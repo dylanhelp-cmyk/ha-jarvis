@@ -35,4 +35,3 @@ external_components:
       path: ha_jarvis/firmware/components
     components: [jarvis_stream]
     refresh: 5min
-
