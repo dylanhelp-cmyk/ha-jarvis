@@ -1,0 +1,88 @@
+# Hardware-only derivative of esphome/home-assistant-voice-pe
+# home-assistant-voice.yaml @ d4e6fa43d6a1a7d342b7d4d403567e06516719de.
+# Copyright (c) 2019 ESPHome, MIT; see UPSTREAM-LICENSE.txt.
+# Changes: omit stock pipeline/player; raw PCM channel 0 and NS wake channel 1.
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: 5.5.6
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+i2c:
+  - id: internal_i2c
+    sda: GPIO5
+    scl: GPIO6
+    frequency: 400kHz
+
+i2s_audio:
+  - id: i2s_input
+    i2s_lrclk_pin: GPIO14
+    i2s_bclk_pin: GPIO13
+
+microphone:
+  - platform: i2s_audio
+    id: i2s_mics
+    i2s_din_pin: GPIO15
+    adc_type: external
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    i2s_mode: secondary
+    i2s_audio_id: i2s_input
+    channel: stereo
+    correct_dc_offset: false
+
+voice_kit:
+  id: voice_kit_component
+  i2c_id: internal_i2c
+  reset_pin: GPIO4
+  channel_0_stage: NONE
+  channel_1_stage: NS
+  firmware:
+    url: https://github.com/esphome/voice-kit-xmos-firmware/releases/download/v1.3.1/ffva_v1.3.1_upgrade.bin
+    version: "1.3.1"
+    md5: 964635c5bf125529dab14a2472a15401
+
+power_supply:
+  - id: led_power
+    pin: GPIO45
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_ring
+    internal: true
+    pin: GPIO21
+    bit0_high: 300ns
+    bit0_low: 975ns
+    bit1_high: 650ns
+    bit1_low: 650ns
+    reset_low: 300us
+    reset_high: 0us
+    max_refresh_rate: 15ms
+    num_leds: 12
+    channel_colors: GRB
+    rmt_symbols: 192
+    default_transition_length: 0ms
+    power_supply: led_power
+
+# Keep the internal amplifier disabled during acoustic input measurements.
+switch:
+  - platform: gpio
+    pin: GPIO47
+    id: internal_speaker_amp
+    internal: true
+    restore_mode: ALWAYS_OFF

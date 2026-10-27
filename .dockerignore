@@ -1,0 +1,11 @@
+.git
+.venv
+dist
+data
+tests
+**/__pycache__
+**/.esphome
+**/secrets.yaml
+**/.test_secrets
+**/.validation
+**/*.bin

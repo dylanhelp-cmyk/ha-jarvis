@@ -1,0 +1,4 @@
+/.esphome/
+/secrets.yaml
+/.validation/
+__pycache__/

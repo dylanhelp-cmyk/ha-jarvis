@@ -1,0 +1,4 @@
+aiohttp==3.14.5
+numpy==2.5.4
+aioslimproto @ https://github.com/music-assistant/aioslimproto/archive/f133feab2d94bc9be7e4704548e18be4bbc53727.zip
+pyatv==0.18.0

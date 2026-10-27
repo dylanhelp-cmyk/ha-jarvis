@@ -1,0 +1,115 @@
+import asyncio
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from aiohttp.test_utils import TestClient, TestServer
+from jarvis.server import Bench, create_ui, create_audio, validate_config
+from jarvis.device import Device
+from jarvis.audio import FRAME
+
+
+class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.bench = Bench(self.folder.name)
+        self.ui = TestClient(TestServer(create_ui(self.bench)))
+        self.audio = TestClient(TestServer(create_audio(self.bench)))
+        await self.ui.start_server()
+        await self.audio.start_server()
+
+    async def asyncTearDown(self):
+        await self.bench.cancel()
+        await self.audio.close()
+        await self.ui.close()
+        self.folder.cleanup()
+
+    async def test_first_load_does_not_capture_or_open_cloud(self):
+        response = await self.ui.get('/api/status')
+        body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertFalse(body['cloud']['enabled'])
+        self.assertFalse(body['test']['running'])
+        self.assertNotIn('device_token', body['config'])
+
+    async def test_test_requires_user_confirmation_and_paired_mic(self):
+        response = await self.ui.post('/api/tests', json={'kind':'latency'})
+        self.assertEqual(response.status, 400)
+        response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
+        self.assertEqual(response.status, 400)
+        self.assertIsNone(self.bench.task)
+
+    async def test_cross_origin_and_non_json_control_are_rejected(self):
+        response = await self.ui.put('/api/config', json={}, headers={'Origin':'https://untrusted.example'})
+        self.assertEqual(response.status, 403)
+        response = await self.ui.put('/api/config', data='{}', headers={'Content-Type':'text/plain'})
+        self.assertEqual(response.status, 415)
+
+    async def test_diagnostic_export_does_not_include_pairing_secret(self):
+        response = await self.ui.get('/api/diagnostics')
+        self.assertNotIn(self.bench.config['device_token'], await response.text())
+
+    async def test_unpaired_device_cannot_connect(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello','protocol':1,'token':'wrong','sample_rate':16000,'channels':1})
+        await ws.receive()
+        self.assertFalse(self.bench.device.snapshot()['connected'])
+        await ws.close()
+
+    async def test_authenticated_connection_is_idle_and_exclusive(self):
+        message = {'type':'hello','protocol':1,'token':self.bench.config['device_token'],'sample_rate':16000,'channels':1,'device_id':'test-device'}
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json(message)
+        self.assertEqual((await ws.receive_json())['type'], 'hello_ok')
+        self.assertIsNone(self.bench.device.capture_id)
+        second = await self.audio.ws_connect('/device')
+        await second.send_json(message)
+        await second.receive()
+        self.assertTrue(self.bench.device.snapshot()['connected'])
+        await second.close()
+        await ws.close()
+
+    async def test_stale_stream_url_cannot_be_replayed(self):
+        response = await self.audio.get('/stream/made-up.wav')
+        self.assertEqual(response.status, 404)
+
+    async def test_pairing_rotation_closes_old_connection(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello','protocol':1,'token':self.bench.config['device_token'],'sample_rate':16000,'channels':1})
+        await ws.receive_json()
+        response = await self.ui.put('/api/config', json={'device_token':'a'*40})
+        self.assertEqual(response.status, 200)
+        await ws.receive()
+        await ws.close()
+
+
+class DeviceTests(unittest.TestCase):
+    def test_sample_gap_invalidates_capture(self):
+        device = Device()
+        device.capture_id = 'test'
+        device.receive_pcm(FRAME.pack(b'JPCM',1,1,2,0,0,10) + b'\0'*4)
+        device.receive_pcm(FRAME.pack(b'JPCM',1,1,2,1,3,11) + b'\0'*4)
+        self.assertIn('Capture sample gap or reordering', device.errors)
+
+    def test_device_mute_or_drops_invalidates_capture(self):
+        device = Device()
+        device.capture_id = 'test'
+        device.receive_json({'type':'status','muted':True})
+        device.receive_json({'type':'capture_stopped','capture_id':'test','reason':'requested','dropped_frames':2})
+        self.assertEqual(len(device.errors), 2)
+
+    def test_missing_opening_frame_is_detected(self):
+        device = Device()
+        device.capture_id = 'test'
+        device.receive_pcm(FRAME.pack(b'JPCM',1,1,2,1,2,10) + b'\0'*4)
+        self.assertIn('Capture beginning was lost', device.errors)
+
+    def test_bad_addresses_and_short_pairing_token_are_rejected(self):
+        for config in [{'device_token':'short'}, {'device_token':'a'*40,'wiim_host':'8.8.8.8'},
+                       {'device_token':'a'*40,'stream_base_url':'http://127.0.0.1:8099'},
+                       {'device_token':'a'*40,'stream_base_url':'http://192.168.1.4:8099/private'}]:
+            with self.assertRaises(ValueError): validate_config(config)
+
+
+if __name__ == '__main__': unittest.main()
