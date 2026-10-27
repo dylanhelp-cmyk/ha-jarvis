@@ -33,7 +33,8 @@ function configValues() {
 }
 function updateReadiness() {
   const running = Boolean(status?.test?.running);
-  let reason = 'Ready for three local trials.';
+  const readyText = kind === 'stop' ? 'Ready for one local stop trial.' : 'Ready for three local onset trials.';
+  let reason = readyText;
   if (!status) reason = 'Waiting for the bench connection.';
   else if (running) reason = 'Test in progress. You can stop it at any time.';
   else if (!configLoaded) reason = 'Connection settings are unavailable. Refresh this page to retry.';
@@ -41,11 +42,12 @@ function updateReadiness() {
   else if (!configured) reason = 'Save a WiiM address and reachable stream URL first.';
   else if (!status.device?.connected) reason = 'Connect the microphone device before testing.';
   else if (status.device?.muted) reason = 'Unmute the microphone device before testing.';
+  else if (status.device?.raw_ready !== true) reason = 'Waiting for verified raw microphone / XMOS readiness.';
   else if (!status.transports?.[$('route').value]?.available) reason = 'The selected transport is not available.';
   else if ($('codec').value === 'flac' && status.codecs?.flac === false) reason = 'FLAC requires ffmpeg. Select WAV or install the supported encoder.';
   else if ($('route').value === 'slimproto' && !(status.transports?.slimproto?.clients || []).some((player) => player.connected && (!$('slimproto-player').value || player.player_id === $('slimproto-player').value))) reason = 'Connect the selected WiiM player to this SlimProto service first.';
   else if (!$('volume-confirmed').checked || !$('idle-confirmed').checked) reason = 'Confirm listening volume and speaker readiness above.';
-  const ready = reason === 'Ready for three local trials.';
+  const ready = reason === readyText;
   $('readiness').textContent = reason;
   $('run-test').disabled = !ready || busy;
   $('run-test').textContent = `Run ${labels[kind].toLowerCase()} →`;
@@ -64,7 +66,7 @@ function renderStatus(data) {
   $('connection-dot').className = 'dot online';
   $('connection-label').textContent = 'Bench connected';
   const device = data.device || {};
-  $('device-status').textContent = device.connected ? (device.muted ? 'Connected · muted' : (data.test?.running ? 'Connected · capturing' : 'Ready · microphone idle')) : 'Awaiting microphone';
+  $('device-status').textContent = device.connected ? (device.muted ? 'Connected · muted' : (data.test?.running ? 'Connected · capturing' : device.raw_ready ? 'Ready · microphone idle' : 'Connected · awaiting raw audio')) : 'Awaiting microphone';
   $('device-detail').textContent = device.connected ? [device.device_id, device.sample_rate ? `${device.sample_rate.toLocaleString()} Hz` : '', device.firmware ? `FW ${device.firmware}` : ''].filter(Boolean).join(' · ') : 'Flash firmware and pair your device';
   const route = data.config?.route || 'http';
   $('route-status').textContent = route === 'slimproto' ? 'SlimProto' : route === 'airplay' ? 'AirPlay baseline' : 'Native HTTP';
@@ -126,6 +128,20 @@ function renderResults(data) {
       const metric = node('div'); metric.append(node('span', 'metric-label', label), node('span', 'metric-value', value)); metrics.append(metric);
     });
     card.append(metrics);
+    if (result.error) card.append(node('p', 'result-warning', `Test error: ${result.error}`));
+    const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
+    if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));
+    const estimates = (result.trials || []).map((trial) => trial.clock_uncertainty_ms).filter((value) => typeof value === 'number' && Number.isFinite(value));
+    if (estimates.length) card.append(node('p', 'result-meta', `Clock/detector estimate: ±${Math.max(...estimates).toFixed(1)} ms. Microphone pipeline delay is uncalibrated; this is not a total uncertainty bound.`));
+    if (result.kind === 'stability') {
+      const continuity = result.stability;
+      const missing = (result.trials || []).filter((trial) => trial.latency_ms == null).length;
+      card.append(node('p', 'result-meta', `Missing onset probes: ${missing} / ${result.trials?.length || 0}.`));
+      if (continuity?.status === 'measured') {
+        card.append(node('p', 'result-meta', `Continuity: ${continuity.dropout_count ?? 0} dropout(s) · ${milliseconds(continuity.dropout_ms)} total · longest gap ${milliseconds(continuity.longest_gap_ms)} · observed ${milliseconds(continuity.observed_ms)}.`));
+        if (continuity.method) card.append(node('p', 'result-meta', `Continuity method: ${continuity.method}`));
+      } else card.append(node('p', 'result-warning', `Continuity unavailable: ${continuity?.reason || 'insufficient acoustic evidence.'}`));
+    }
     if (result.trials?.length) {
       const table = node('table', 'trial-table');
       const caption = node('caption', 'skip', `${labels[result.kind] || 'Audio test'} trial measurements`); table.append(caption);
@@ -185,8 +201,8 @@ $('run-test').addEventListener('click', async () => {
   if ($('run-test').disabled) return;
   busy = true; updateReadiness();
   try {
-    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: 3, comfortable_volume_confirmed: true})});
-    announce(`${labels[kind]} started. Keep the microphone near the speaker and the room quiet.`);
+    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: kind === 'stop' ? 1 : 3, comfortable_volume_confirmed: true})});
+    announce(`${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
   } catch (error) {announce(error.message, true);}
   finally {busy = false; updateReadiness();}

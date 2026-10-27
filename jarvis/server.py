@@ -39,14 +39,14 @@ def validate_config(value):
     config = {**DEFAULTS, **value}
     if config["wiim_host"]:
         address = ipaddress.ip_address(config["wiim_host"])
-        if not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast:
+        if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast:
             raise ValueError("WiiM address must be a private LAN IP address")
     if config["stream_base_url"]:
         parsed = urlparse(config["stream_base_url"])
         address = ipaddress.ip_address(parsed.hostname or "")
         if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
             raise ValueError("Stream address must be http://HA-LAN-IP:8099, without a path")
-        if not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast or parsed.port != 8099:
+        if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast or parsed.port != 8099:
             raise ValueError("Stream address must use the HA LAN IP and port 8099")
     if config["route"] not in ("http", "slimproto", "airplay") or config["codec"] not in ("wav", "flac"):
         raise ValueError("Unsupported route or codec")
@@ -167,7 +167,10 @@ class Bench:
 
     async def cancel(self):
         if self.task and not self.task.done():
-            self.task.cancel()
+            if not self.test.get("cancelling"):
+                self.test["cancelling"] = True
+                self.test["phase"] = "stopping playback and microphone capture"
+                self.task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.task
 
@@ -183,7 +186,7 @@ class Bench:
         del self.results[30:]
         try:
             self.test["phase"] = "synchronizing microphone"
-            await self.device.begin(result["id"], min(120000, (repetitions * 2 + 20) * 1000))
+            await self.device.begin(result["id"], min(120000, (repetitions * 2 + 45) * 1000))
             await asyncio.sleep(.4)
             if self.config["route"] == "http":
                 self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
@@ -343,8 +346,8 @@ def create_ui(bench):
         bench.task = asyncio.create_task(bench.run(kind, repetitions))
         return web.json_response({"test_id": ident}, status=202)
     async def cancel(request):
-        await bench.cancel()
-        return web.json_response({"cancelled": True})
+        asyncio.create_task(bench.cancel())
+        return web.json_response({"stop_requested": True}, status=202)
     async def results(request): return web.json_response({"results": bench.results})
     async def diagnostics(request):
         config = {k: v for k, v in bench.config.items() if k not in ("device_token", "wiim_host", "stream_base_url", "slimproto_player_id")}

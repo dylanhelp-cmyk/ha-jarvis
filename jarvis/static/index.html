@@ -32,7 +32,7 @@
           <form id="config-form">
             <label for="wiim-host">WiiM address</label>
             <input id="wiim-host" name="wiim_host" placeholder="192.168.1.50" autocomplete="off" spellcheck="false" required>
-            <p class="field-help">The speaker’s local IP address or hostname.</p>
+            <p class="field-help">The speaker’s local IPv4 address.</p>
             <label for="stream-base-url">Stream base URL</label>
             <input id="stream-base-url" name="stream_base_url" type="url" placeholder="http://192.168.1.10:8099" autocomplete="off" spellcheck="false" required>
             <p class="field-help">A direct bench URL the WiiM can reach on your LAN. Home Assistant ingress is for this control panel.</p>
@@ -55,9 +55,9 @@
           </form>
         </section>
         <section class="panel tests" aria-labelledby="tests-title">
-          <div class="section-heading"><span class="step">02</span><div><h2 id="tests-title">Listen. Measure. Repeat.</h2><p>Three trials per test. Real measurements only.</p></div></div>
+          <div class="section-heading"><span class="step">02</span><div><h2 id="tests-title">Listen. Measure. Repeat.</h2><p>3 onset trials; 1 stop trial. Real measurements only.</p></div></div>
           <div class="test-options" role="group" aria-label="Choose audio test">
-            <button class="test-option selected" data-kind="latency" type="button" aria-pressed="true"><span class="test-icon" aria-hidden="true">↗</span><span><strong>Playback latency</strong><small>Time from stream request to detected sound.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
+            <button class="test-option selected" data-kind="latency" type="button" aria-pressed="true"><span class="test-icon" aria-hidden="true">↗</span><span><strong>Playback latency</strong><small>Playback path: emitted marker → microphone-detected sound.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stop" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Stop response</strong><small>How quickly the speaker falls silent.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stability" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Stream stability</strong><small>Check continuity across repeated playback.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
           </div>
