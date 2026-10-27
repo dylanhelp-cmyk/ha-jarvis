@@ -1,8 +1,10 @@
 # Voice PE acoustic test firmware
 
-Copy this directory into ESPHome Builder's configuration directory, preserving `components/jarvis_stream/`. Open `voice-pe-testbench.yaml`. Tested baseline: **ESPHome 2026.10.0 / ESP-IDF 5.5.6**, for Home Assistant Voice Preview Edition hardware.
+For repository-managed updates, save `voice-pe-repository.yaml` in ESPHome Builder once. It downloads the shared package and custom component from [ha-jarvis](https://github.com/dylanhelp-cmyk/ha-jarvis) on `main`, checking for changes during validation/compilation when the five-minute cache expires. Future source revisions require no file copying: validate, compile and choose Install in Builder. Nothing automatically flashes the device. Tested baseline: **ESPHome 2026.10.0 / ESP-IDF 5.5.6**, for Home Assistant Voice Preview Edition hardware; project version **0.1.1**.
 
 Add the keys in `secrets.example.yaml` to Builder's `secrets.yaml`: Wi-Fi, fresh API encryption key, unique OTA password, App LAN URL (`ws://HA_LAN_IP:8099/device`) and App-generated pairing token. Replace the intentionally invalid all-zero API example. This milestone authenticates over **plain LAN WebSocket**; keep port 8099 private.
+
+Secrets stay in the local entry and Builder's local `secrets.yaml`; the remotely downloaded package and hardware YAML contain no secret lookups. Keep the device name stable across updates. For a fixed-source fallback, copy this complete firmware directory, preserving `components/jarvis_stream/`, and open `voice-pe-testbench.yaml` instead.
 
 Run **Validate**, then **Install → Manual download** for a review candidate. No firmware was flashed or installed. Flashing/acoustic tests remain user-controlled. Native API, OTA, mute, LEDs and local Hey Jarvis are supported; this input-test configuration replaces the stock pipeline/player and keeps the speaker amp off.
 
@@ -16,4 +18,4 @@ Espressif `esp_websocket_client` 1.5.0 is pinned at `29f1dec4083cdb9a051fcbb1ca5
 
 Timestamps estimate first-sample time from callback minus block duration; **XMOS/I2S delay remains uncalibrated**. Clock sync uses the same 32-bit monotonic millisecond epoch (49-day wrap). Raw PCM is not calibrated SPL. Missing frames/poor sync invalidate measurements. Physical mute, audio quality, wake accuracy and wireless reliability remain untested.
 
-Local validation passed schema, actual C++ compilation, linking and image generation (1,458,815-byte image; 38.6% static RAM, 82% app partition free). Initial Windows linker-generator batch handling needed its original Python command invoked directly; the final ordinary ESPHome compile then reported success. The image uses temporary development credentials and is **not an installation artifact**; compile your own in Builder.
+The original firmware passed full compilation/linking (1,458,815-byte image; 38.6% static RAM, 82% app partition free). Version 0.1.1 changes source packaging and version metadata; its exact repository layout and local fallback passed ESPHome schema validation and C++ code generation through a temporary local Git repository. Any development images use temporary credentials and are **not installation artifacts**; compile your own in Builder.

@@ -5,9 +5,11 @@ __pycache__/
 .esphome/
 .pioenvs/
 .piolibdeps/
-firmware/.validation/
-firmware/.test_secrets/
+.validation/
+.test_secrets/
 secrets.yaml
+jarvis-secrets-to-merge.yaml
+firmware-secrets.json
 *.bin
 data/
 dist/

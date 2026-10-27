@@ -6,7 +6,7 @@ import subprocess
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 def package():
@@ -22,8 +22,8 @@ def package():
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in names:
-            archive.write(ROOT / name, "ha_jarvis/" + name)
-        archive.writestr("ha_jarvis/BUILD.json", json.dumps({"version": VERSION, "source_commit": commit, "stage": "local_audio_bench", "cloud_enabled": False}, indent=2))
+            archive.write(ROOT / name, "ha-jarvis/" + name)
+        archive.writestr("ha-jarvis/BUILD.json", json.dumps({"version": VERSION, "source_commit": commit, "stage": "local_audio_bench", "cloud_enabled": False}, indent=2))
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(".zip.sha256").write_text(digest + "  " + output.name + "\n")
     print(json.dumps({"archive": str(output), "bytes": output.stat().st_size, "sha256": digest, "files": len(names), "commit": commit}))

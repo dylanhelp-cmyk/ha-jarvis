@@ -115,10 +115,19 @@ class Bench:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.data_dir / "settings.json"
+        self.firmware_secrets_path = self.data_dir / "firmware-secrets.json"
         self.config = {**DEFAULTS, "device_token": secrets.token_urlsafe(32)}
         if self.path.exists():
             self.config = validate_config(json.loads(self.path.read_text()))
         self.save()
+        if self.firmware_secrets_path.exists():
+            self.firmware_secrets = json.loads(self.firmware_secrets_path.read_text())
+        else:
+            self.firmware_secrets = {
+                "jarvis_api_key": base64.b64encode(secrets.token_bytes(32)).decode(),
+                "jarvis_ota_password": secrets.token_urlsafe(32)}
+            self.firmware_secrets_path.write_text(json.dumps(self.firmware_secrets))
+            with suppress(OSError): self.firmware_secrets_path.chmod(0o600)
         self.device = Device()
         self.test = {"running": False, "phase": "idle"}
         self.results = []
@@ -364,17 +373,19 @@ def create_ui(bench):
             if bench.config.get(key): content = content.replace(bench.config[key], "[redacted]")
         return web.Response(text=content, content_type="application/json", headers={"Content-Disposition": 'attachment; filename="jarvis-diagnostics.json"'})
     async def firmware(request):
+        if not bench.config["stream_base_url"]:
+            raise ValueError("Save the HA LAN stream URL before downloading ESPHome setup")
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for file in (ROOT / "firmware").rglob("*"):
-                if file.is_file() and not any(p.startswith(".") for p in file.relative_to(ROOT / "firmware").parts) and (file.suffix in (".yaml", ".py", ".h", ".cpp", ".md") or file.name == "UPSTREAM-LICENSE.txt") and file.name != "secrets.yaml":
-                    archive.write(file, str(file.relative_to(ROOT)))
+            # A one-time local entry fetches versioned source from GitHub on
+            # subsequent Builder builds; no repeated source-directory copying.
+            archive.write(ROOT / "firmware/voice-pe-repository.yaml", "voice-pe-repository.yaml")
+            archive.writestr("SETUP.txt", "Copy voice-pe-repository.yaml into ESPHome Builder. Merge jarvis-secrets-to-merge.yaml into existing secrets.yaml without replacing other values. Keep Wi-Fi secrets local. Validate and install when you choose. Later builds fetch the public GitHub firmware package/components (5-minute cache); no new bundle is required for routine updates. App updates are separate through Home Assistant Apps.\n")
             values = {"jarvis_pairing_token": bench.config["device_token"],
                       "jarvis_server_url": "ws://" + (urlparse(bench.config["stream_base_url"]).netloc or "YOUR_HA_IP:8099") + "/device",
-                      "jarvis_api_key": base64.b64encode(secrets.token_bytes(32)).decode(),
-                      "jarvis_ota_password": secrets.token_urlsafe(32)}
-            archive.writestr("firmware/jarvis-secrets-to-merge.yaml", "# Merge into Builder secrets.yaml; preserve your Wi-Fi and other device secrets.\n# These local credentials are generated for this download; keep them private.\n" + "".join(key + ": " + json.dumps(value) + "\n" for key,value in values.items()))
-        return web.Response(body=buffer.getvalue(), content_type="application/zip", headers={"Content-Disposition": 'attachment; filename="jarvis-firmware.zip"'})
+                      **bench.firmware_secrets}
+            archive.writestr("jarvis-secrets-to-merge.yaml", "# Merge into Builder secrets.yaml; preserve your Wi-Fi and other device secrets.\n# These local credentials persist across App updates and repeated downloads.\n" + "".join(key + ": " + json.dumps(value) + "\n" for key,value in values.items()))
+        return web.Response(body=buffer.getvalue(), content_type="application/zip", headers={"Content-Disposition": 'attachment; filename="jarvis-esphome-setup.zip"'})
     app.router.add_get("/", index)
     app.router.add_static("/static/", ROOT / "jarvis/static")
     app.router.add_get("/api/status", status)

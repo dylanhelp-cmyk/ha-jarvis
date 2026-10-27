@@ -49,7 +49,8 @@
             <details class="device-setup"><summary>Microphone pairing & firmware</summary><div class="details-content">
               <label for="device-token">Device token</label><div class="token-row"><input id="device-token" name="device_token" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="token-help"><button class="button subtle" id="reveal-token" type="button" aria-label="Show device token" aria-pressed="false">Show</button><button class="button subtle" id="copy-token" type="button">Copy</button></div>
               <p id="token-help" class="field-help">Use this secret only in your microphone firmware. Keep this panel behind authenticated Home Assistant ingress or on a trusted local network.</p>
-              <a class="text-link" href="api/firmware" download>Download firmware bundle <span aria-hidden="true">↗</span></a>
+              <a class="text-link" href="api/firmware" download>Download one-time ESPHome setup <span aria-hidden="true">↗</span></a>
+              <p class="field-help">Keep this local entry in Builder. Future firmware builds fetch source updates from GitHub; no repeated folder copying.</p>
             </div></details>
             <div class="save-row"><button class="button primary" id="save-config" type="submit">Save connection</button><span id="save-state" class="muted" aria-live="polite">Loading settings…</span></div>
           </form>

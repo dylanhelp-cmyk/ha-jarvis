@@ -1,8 +1,10 @@
 import asyncio
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
 from jarvis.server import Bench, create_ui, create_audio, validate_config
@@ -49,6 +51,23 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_diagnostic_export_does_not_include_pairing_secret(self):
         response = await self.ui.get('/api/diagnostics')
         self.assertNotIn(self.bench.config['device_token'], await response.text())
+
+    async def test_firmware_setup_uses_repository_and_persistent_credentials(self):
+        self.bench.config['stream_base_url'] = 'http://192.168.1.10:8099'
+        first = await self.ui.get('/api/firmware')
+        second = await self.ui.get('/api/firmware')
+        self.assertEqual(first.status, 200)
+        a = zipfile.ZipFile(io.BytesIO(await first.read()))
+        b = zipfile.ZipFile(io.BytesIO(await second.read()))
+        self.assertEqual(a.read('jarvis-secrets-to-merge.yaml'), b.read('jarvis-secrets-to-merge.yaml'))
+        self.assertIn(b'https://github.com/dylanhelp-cmyk/ha-jarvis', a.read('voice-pe-repository.yaml'))
+        self.assertFalse(any('components/' in name for name in a.namelist()))
+        restarted = Bench(self.folder.name)
+        self.assertEqual(restarted.firmware_secrets, self.bench.firmware_secrets)
+
+    async def test_firmware_setup_requires_the_saved_lan_url(self):
+        response = await self.ui.get('/api/firmware')
+        self.assertEqual(response.status, 400)
 
     async def test_unpaired_device_cannot_connect(self):
         ws = await self.audio.ws_connect('/device')

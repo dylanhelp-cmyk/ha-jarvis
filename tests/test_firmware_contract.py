@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-FIRMWARE = ROOT / "firmware"
+FIRMWARE = ROOT / "ha_jarvis" / "firmware"
 
 
 class FirmwareContractTests(unittest.TestCase):
@@ -35,18 +35,31 @@ int main() {
 
     def test_hardware_and_privacy_configuration(self):
         main = (FIRMWARE / "voice-pe-testbench.yaml").read_text()
+        package = (FIRMWARE / "voice-pe-package.yaml").read_text()
         hardware = (FIRMWARE / "voice-pe-hardware.yaml").read_text()
-        self.assertNotIn("\nvoice_assistant:", main + hardware)
+        self.assertNotIn("\nvoice_assistant:", main + package + hardware)
         self.assertIn("channel_0_stage: NONE", hardware)
         self.assertIn("channel_1_stage: NS", hardware)
         self.assertIn("correct_dc_offset: false", hardware)
         self.assertIn('version: "1.3.1"', hardware)
         self.assertIn("964635c5bf125529dab14a2472a15401", hardware)
-        self.assertIn("d4e6fa43d6a1a7d342b7d4d403567e06516719de", main)
-        self.assertIn("gain_factor: 1", main)
+        self.assertIn("d4e6fa43d6a1a7d342b7d4d403567e06516719de", package)
+        self.assertIn("gain_factor: 1", package)
         self.assertIn("!secret jarvis_pairing_token", main)
-        self.assertIn("pin: GPIO3", main)
-        self.assertIn("microphone.mute: i2s_mics", main)
+        self.assertIn("pin: GPIO3", package)
+        self.assertIn("microphone.mute: i2s_mics", package)
+
+    def test_repository_entry_keeps_credentials_local(self):
+        entry = (FIRMWARE / "voice-pe-repository.yaml").read_text()
+        for name in ("voice-pe-package.yaml", "voice-pe-hardware.yaml"):
+            self.assertNotIn("!secret", (FIRMWARE / name).read_text())
+        self.assertIn("!secret wifi_password", entry)
+        self.assertIn("!secret jarvis_pairing_token", entry)
+        self.assertIn("files: [ha_jarvis/firmware/voice-pe-package.yaml]", entry)
+        self.assertIn("path: ha_jarvis/firmware/components", entry)
+        self.assertEqual(entry.count("refresh: 5min"), 2)
+        self.assertEqual(entry.count("ref: main"), 2)
+        self.assertNotIn("password:", entry.split("packages:", 1)[1])
 
     @unittest.skipUnless(importlib.util.find_spec("esphome"), "ESPHome is an optional firmware development dependency")
     def test_transport_url_schema_rejects_wrong_paths_and_embedded_credentials(self):

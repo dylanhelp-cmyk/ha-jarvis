@@ -1,13 +1,12 @@
-# First test build — 0.1.0
+# Install and update — 0.1.1
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
 ## Install the Home Assistant OS App
 
-1. Download this private repository through GitHub **Code → Download ZIP**, or use the supplied `ha-jarvis-0.1.0.zip`.
-2. Copy the project contents into `/addons/ha_jarvis/` on Home Assistant OS, using the Samba `addons` share or your existing file-transfer method. `config.yaml`, `Dockerfile`, `requirements.txt`, `jarvis/` and `firmware/` must sit directly inside that folder. Do not copy `.venv`, `data`, or ESPHome build caches.
-3. Open **Settings → Apps → Install app**, refresh/check for updates, then find **HA Jarvis Audio Bench** under **Local apps**. Install it. The first local image build downloads dependencies and can take several minutes.
-4. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port.
+1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.1** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.
 
@@ -18,16 +17,22 @@ The App does not adjust amplifier volume. Test signals use a modest digital leve
 ## Prepare Voice PE in ESPHome Builder
 
 1. Preserve your current device YAML and secrets for recovery before replacing firmware.
-2. In the Jarvis interface, select **Download firmware bundle**. Copy the bundle's `firmware/` contents into `/config/esphome/`, preserving `components/jarvis_stream/` and the two YAML files.
-3. Merge `jarvis-secrets-to-merge.yaml` into Builder's existing `secrets.yaml`; keep existing secrets. Ensure `wifi_ssid` and `wifi_password` are correct. The downloaded bundle supplies the App pairing token, URL and fresh native-API/OTA credentials. Keep it private.
-4. Open `voice-pe-testbench.yaml` in Builder 2026.10.0 or later, **Validate**, then **Install** using your normal method. Changed native-API/OTA credentials may require a first USB installation; do not assume the previous firmware accepts the new password.
+2. Save the App connection settings, then select **Download one-time ESPHome setup**. Copy only `voice-pe-repository.yaml` into `/config/esphome/` or create that file using Builder's editor. It pulls its shared firmware package and components directly from this public GitHub repository.
+3. Merge the setup's `jarvis-secrets-to-merge.yaml` into Builder's existing `secrets.yaml`; keep existing secrets. Ensure `wifi_ssid` and `wifi_password` are correct. The setup supplies the App pairing token, URL and native-API/OTA credentials. They remain local, persist across App updates and do not change on repeated setup downloads.
+4. Open `voice-pe-repository.yaml` in Builder 2026.10.0 or later, **Validate**, then **Install** using your normal method. The first replacement of the previous experimental firmware may require USB or its existing OTA credentials. Keep the new credentials and device name unchanged for subsequent OTA updates.
 5. The official `voice_kit` component updates XMOS to pinned v1.3.1 on first boot if needed. Wait for completion and for Jarvis to report a paired, raw-ready microphone. Add the new ESPHome device to HA using its generated API key if you want its mute/status controls.
 
 The test firmware keeps local Hey Jarvis detection, native API, OTA and LEDs, but replaces the old voice pipeline/player. Waking it only emits an event in this milestone: it does not start a conversation, upload audio or say “Yes sir” yet. The Voice PE speaker amplifier stays off. Only a test started in the App uploads microphone audio.
 
 Physical mute and the center button stop capture. The center button enables software mute; clear it using the new ESPHome device's **Microphone mute** switch. Blue LEDs mean test capture; red means muted; dim white means paired/raw-ready; amber means not ready.
 
-Recovery: restore your saved configuration through Builder/USB, or use the [official Voice PE installer](https://esphome.github.io/home-assistant-voice-pe/). The firmware bundle contains source; rebuild in Builder with your own secrets. The development-validation `.bin` is deliberately not distributed.
+Recovery: restore your saved configuration through Builder/USB, or use the [official Voice PE installer](https://esphome.github.io/home-assistant-voice-pe/). Rebuild in Builder with your own secrets; no development-validation `.bin` is distributed.
+
+## Update later revisions
+
+- **App:** Home Assistant checks this repository for new App versions. Use the App's **Update** button when one is available; **Check for updates** refreshes the store. Settings and pairing credentials in `/data` are retained. Do not uninstall/reinstall for routine updates.
+- **Voice PE:** keep your local `voice-pe-repository.yaml` and secrets. Builder checks the GitHub `main` package and component when validating/compiling after a five-minute cache expires. Choose **Install** to build and flash an update. No source folders need copying, and nothing automatically flashes the device. The project version is shown in device metadata.
+- App and firmware updates remain separate. Each revision's short change note will say which one needs updating. This project is still the audio-test milestone.
 
 ## Run the first test
 
@@ -51,4 +56,4 @@ Do not expose LAN audio port 8099 or the SlimProto listener to the internet. The
 
 ## Development validation
 
-Offline checks use synthetic audio, fake receivers and loopback APIs. Run `python -m unittest discover -s tests -v` after installing requirements in a development environment. Firmware schema and a real ESP32-S3 compile/link passed on ESPHome 2026.10.0. The Home Assistant container image still needs its first build in your HA installation; Docker Desktop's Linux engine was not running here.
+Offline checks use synthetic audio, fake receivers and loopback APIs. Install `ha_jarvis/requirements.txt` in a development environment and run `python tools/check.py`. The original firmware passed a real ESP32-S3 compile/link; repository packaging was validated/code-generated on ESPHome 2026.10.0. The Home Assistant container image still needs its first build in your HA installation; Docker Desktop's Linux engine was not running here.

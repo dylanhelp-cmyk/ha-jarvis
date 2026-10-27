@@ -3,6 +3,7 @@
 #include <cstring>
 #include "esp_timer.h"
 #include "esphome/components/json/json_util.h"
+#include "esphome/core/defines.h"
 #include "esphome/core/log.h"
 
 namespace esphome::jarvis_stream {
@@ -230,7 +231,8 @@ void JarvisStream::loop() {
       send_json_(json::build_json([this](JsonObject out) {
         out["type"] = "hello"; out["protocol"] = 1; out["device_id"] = device_id_;
         out["token"] = token_; out["sample_rate"] = 16000; out["channels"] = 1;
-        out["firmware"] = "jarvis-testbench-1"; out["xmos_version"] = xmos_version_;
+        out["firmware"] = ESPHOME_PROJECT_VERSION; out["firmware_project"] = ESPHOME_PROJECT_NAME;
+        out["xmos_version"] = xmos_version_;
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
       }));
     } else command_(control.text);
