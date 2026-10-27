@@ -2,6 +2,8 @@
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
+**Firmware 0.1.2:** addresses the startup/reconnect watchdog path. The App remains 0.1.1 and does not need updating for this correction. Rebuild your existing Builder entry after its five-minute Git cache expires; confirm `jarvis.voice_pe_testbench version 0.1.2` before flashing. If the device cannot stay online, use USB. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
+
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.

@@ -3,6 +3,7 @@
 #include <cstring>
 #include "esp_timer.h"
 #include "esphome/components/json/json_util.h"
+#include "esphome/components/network/util.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/log.h"
 
@@ -13,21 +14,106 @@ uint32_t JarvisStream::now_ms_() { return static_cast<uint32_t>(esp_timer_get_ti
 void JarvisStream::setup() {
   audio_queue_ = xQueueCreate(16, sizeof(AudioPacket));
   control_queue_ = xQueueCreate(8, sizeof(Control));
-  if (!audio_queue_ || !control_queue_) { mark_failed(); return; }
+  outgoing_queue_ = xQueueCreate(8, sizeof(Outgoing));
+  if (!audio_queue_ || !control_queue_ || !outgoing_queue_) { mark_failed(); return; }
   mic_->add_data_callback([this](const std::vector<uint8_t> &data) { microphone_data_(data); });
+  if (xTaskCreate(network_worker, "jarvis_network", 8192, this, 2, &network_worker_handle_) != pdPASS) {
+    mark_failed();
+  }
+}
+
+bool JarvisStream::initialize_client_() {
   esp_websocket_client_config_t config{};
   config.uri = server_url_.c_str();
-  config.disable_auto_reconnect = true;
+  // The library task owns ordinary network-error and clean-close retries.
+  config.disable_auto_reconnect = false;
+  config.enable_close_reconnect = true;
+  config.reconnect_timeout_ms = NetworkLifecycle::RETRY_MS;
   config.task_stack = 6144;
   config.buffer_size = 1024;
   config.network_timeout_ms = 1000;
   config.ping_interval_sec = 10;
   client_ = esp_websocket_client_init(&config);
   if (!client_ || esp_websocket_register_events(client_, WEBSOCKET_EVENT_ANY, websocket_event, this) != ESP_OK) {
-    mark_failed(); return;
+    if (client_) esp_websocket_client_destroy(client_);
+    client_ = nullptr;
+    return false;
   }
-  // The loop initiates connections; no audio is sent until authenticated and explicitly commanded.
-  last_connect_attempt_ = now_ms_() - 5000;
+  return true;
+}
+
+void JarvisStream::network_worker(void *arg) {
+  static_cast<JarvisStream *>(arg)->network_worker_();
+}
+
+void JarvisStream::request_transport_reset_() {
+  active_ = false;
+  authenticated_ = false;
+  connected_ = false;
+  ++epoch_;
+  transport_fault_ = true;
+  worker_reset_ = true;
+}
+
+void JarvisStream::network_worker_() {
+  NetworkLifecycle lifecycle;
+  for (;;) {
+    const uint32_t now = now_ms_();
+    const auto action = lifecycle.next(network_ready_, worker_reset_, shutting_down_, now);
+    switch (action) {
+      case NetworkAction::INITIALIZE:
+        lifecycle.initialized(initialize_client_(), now);
+        break;
+      case NetworkAction::START:
+        // At most once after a successful start. Ordinary reconnects stay in the library task.
+        lifecycle.started(esp_websocket_client_start(client_) == ESP_OK, now);
+        break;
+      case NetworkAction::STOP:
+        active_ = false; authenticated_ = false; connected_ = false;
+        ++epoch_;
+        // This API may wait indefinitely. Only this worker may call it; never the ESPHome loop.
+        esp_websocket_client_stop(client_);
+        worker_reset_ = false;  // FINISH during intentional stop is already accounted for.
+        lifecycle.stopped(now_ms_());
+        break;
+      case NetworkAction::DESTROY:
+        esp_websocket_client_destroy(client_);
+        client_ = nullptr;
+        lifecycle.destroyed();
+        break;
+      case NetworkAction::EXIT:
+        network_worker_handle_ = nullptr;
+        vTaskDelete(nullptr);
+        return;
+      case NetworkAction::WAIT:
+        break;
+    }
+    if (!shutting_down_ && connected_) {
+      Outgoing outgoing{};
+      for (int i = 0; i < 8 && xQueueReceive(outgoing_queue_, &outgoing, 0) == pdTRUE; ++i) {
+        if (outgoing.epoch != epoch_) continue;
+        if (outgoing.capture_generation && (!active_ || outgoing.capture_generation != generation_)) continue;
+        if (esp_websocket_client_send_text(client_, outgoing.text, outgoing.length, pdMS_TO_TICKS(100)) != outgoing.length) {
+          request_transport_reset_();
+          break;
+        }
+        if (outgoing.capture_generation) acknowledged_generation_ = outgoing.capture_generation;
+      }
+      AudioPacket packet{};
+      for (int i = 0; i < 4 && active_ && !muted_ && authenticated_ && connected_ &&
+                           acknowledged_generation_ == generation_ &&
+                           xQueueReceive(audio_queue_, &packet, 0) == pdTRUE; ++i) {
+        if (packet.generation != generation_) continue;
+        const size_t bytes = HEADER_BYTES + packet.samples * 2;
+        if (esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes,
+                                          pdMS_TO_TICKS(30)) != static_cast<int>(bytes)) {
+          request_transport_reset_();
+          break;
+        }
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 void JarvisStream::websocket_event(void *arg, esp_event_base_t, int32_t event, void *data) {
@@ -35,12 +121,19 @@ void JarvisStream::websocket_event(void *arg, esp_event_base_t, int32_t event, v
 }
 
 void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *data) {
+  if (event == WEBSOCKET_EVENT_FINISH) {
+    // Covers an unexpected library-task exit; worker reaps it and retries.
+    worker_reset_ = true;
+    return;
+  }
+  if (shutting_down_) return;
   Control control{};
   if (event == WEBSOCKET_EVENT_CONNECTED) {
     control.epoch = ++epoch_;
     connected_ = true;
     authenticated_ = false;
     active_ = false;
+    acknowledged_generation_ = 0;
     incoming_.clear();
     control.kind = 1;
   } else if (event == WEBSOCKET_EVENT_DISCONNECTED || event == WEBSOCKET_EVENT_CLOSED || event == WEBSOCKET_EVENT_ERROR) {
@@ -55,24 +148,29 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
     if (data->op_code == 0x9 || data->op_code == 0xA) return;
     if (data->op_code != 0x1 || data->payload_len >= static_cast<int>(sizeof(control.text)) ||
         data->payload_len < 0 || data->data_len < 0 || data->payload_offset < 0) {
-      transport_fault_ = true; active_ = false; return;
+      request_transport_reset_(); return;
     }
     if (data->payload_offset == 0) incoming_.clear();
-    if (static_cast<size_t>(data->payload_offset) != incoming_.size()) { transport_fault_ = true; active_ = false; return; }
+    if (static_cast<size_t>(data->payload_offset) != incoming_.size()) { request_transport_reset_(); return; }
     incoming_.append(data->data_ptr, data->data_len);
     if (incoming_.size() != static_cast<size_t>(data->payload_len)) return;
-    if (!data->fin) { transport_fault_ = true; active_ = false; return; }
+    if (!data->fin) { request_transport_reset_(); return; }
     control.kind = 2;
     control.epoch = epoch_;
     std::memcpy(control.text, incoming_.data(), incoming_.size());
   } else return;
-  if (xQueueSend(control_queue_, &control, 0) != pdTRUE) { transport_fault_ = true; active_ = false; }
+  if (xQueueSend(control_queue_, &control, 0) != pdTRUE) request_transport_reset_();
 }
 
-bool JarvisStream::send_json_(const std::string &text) {
-  if (!connected_ || !client_) return false;
-  int sent = esp_websocket_client_send_text(client_, text.c_str(), text.size(), pdMS_TO_TICKS(100));
-  if (sent != static_cast<int>(text.size())) { transport_fault_ = true; active_ = false; return false; }
+bool JarvisStream::send_json_(const std::string &text, bool capture_start) {
+  if (!connected_ || shutting_down_) return false;
+  Outgoing outgoing{};
+  if (text.size() >= sizeof(outgoing.text)) { request_transport_reset_(); return false; }
+  outgoing.epoch = epoch_;
+  outgoing.capture_generation = capture_start ? generation_.load() : 0;
+  outgoing.length = text.size();
+  std::memcpy(outgoing.text, text.data(), text.size());
+  if (xQueueSend(outgoing_queue_, &outgoing, 0) != pdTRUE) { request_transport_reset_(); return false; }
   return true;
 }
 
@@ -140,13 +238,14 @@ void JarvisStream::command_(const char *text) {
       portENTER_CRITICAL(&capture_lock_);
       ++generation_; sample_counter_ = 0; sequence_ = 0; deadline_ = now_ms_() + duration;
       portEXIT_CRITICAL(&capture_lock_);
-      // Send acknowledgement before enabling any microphone upload.
-      if (send_json_(json::build_json([&](JsonObject out) {
+      acknowledged_generation_ = 0;
+      // Arm locally, but the worker sends no PCM until this acknowledgement is actually transmitted.
+      active_ = true;
+      if (!send_json_(json::build_json([&](JsonObject out) {
         out["type"] = "capture_started"; out["capture_id"] = id;
         out["first_sample"] = 0; out["device_time_ms"] = now_ms_();
         out["timing"] = "estimated_callback_minus_block_duration";
-      }))) active_ = true;
-      else stop_capture_("transport_error");
+      }), true)) stop_capture_("transport_error");
     }
     return true;
   });
@@ -185,10 +284,13 @@ void JarvisStream::stop_capture_(const char *reason) {
   portENTER_CRITICAL(&capture_lock_);
   ++generation_; count = sample_counter_;
   portEXIT_CRITICAL(&capture_lock_);
-  send_json_(json::build_json([&](JsonObject out) {
-    out["type"] = "capture_stopped"; out["capture_id"] = capture_id_;
-    out["reason"] = reason; out["samples_seen"] = count; out["dropped_frames"] = dropped_.load();
-  }));
+  // A newly reconnected socket must receive hello first, not the previous capture's stop event.
+  if (authenticated_) {
+    send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "capture_stopped"; out["capture_id"] = capture_id_;
+      out["reason"] = reason; out["samples_seen"] = count; out["dropped_frames"] = dropped_.load();
+    }));
+  }
   capture_id_.clear();
 }
 
@@ -203,17 +305,14 @@ void JarvisStream::wake_word(const std::string &word) {
 
 void JarvisStream::loop() {
   const uint32_t now = now_ms_();
+  const bool network_ready = network::is_connected();
+  if (!network_ready && network_ready_.exchange(false)) {
+    // A brief Wi-Fi flap may leave TCP apparently alive. Force a fresh hello on recovery.
+    request_transport_reset_();
+  } else if (network_ready) network_ready_ = true;
   if (transport_fault_.exchange(false)) {
-    stop_capture_("disconnected"); authenticated_ = false; connected_ = false;
-    esp_websocket_client_stop(client_);
-    xQueueReset(control_queue_);
-    last_connect_attempt_ = now;
-  }
-  if (!connected_ && now - last_connect_attempt_ >= 5000) {
-    last_connect_attempt_ = now;
-    // stop() also reaps a completed connection task before restart.
-    esp_websocket_client_stop(client_);
-    esp_websocket_client_start(client_);
+    stop_capture_("disconnected");
+    // Preserve a newly arrived CONNECTED event; stale controls are rejected by epoch below.
   }
   if (now - last_hardware_check_ >= 5000 && capture_id_.empty()) {
     last_hardware_check_ = now;
@@ -241,19 +340,11 @@ void JarvisStream::loop() {
   if (!capture_id_.empty() && (!active_ || muted_ || static_cast<int32_t>(now - deadline_) >= 0)) {
     stop_capture_(muted_ ? "muted" : "duration_complete");
   }
-  AudioPacket packet{};
-  // Bounded work; stale queued samples are never replayed after a new capture.
-  for (int i = 0; i < 4 && active_ && !muted_ && xQueueReceive(audio_queue_, &packet, 0) == pdTRUE; ++i) {
-    if (packet.generation != generation_ || !authenticated_ || !connected_) continue;
-    const size_t bytes = HEADER_BYTES + packet.samples * 2;
-    if (esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes, pdMS_TO_TICKS(30)) != static_cast<int>(bytes)) {
-      transport_fault_ = true; stop_capture_("transport_error"); break;
-    }
-  }
 }
 
 void JarvisStream::on_shutdown() {
-  active_ = false; authenticated_ = false;
-  if (client_) { esp_websocket_client_stop(client_); esp_websocket_client_destroy(client_); client_ = nullptr; }
+  // ESPHome shutdown/OTA must not wait for a network task, socket or DNS operation.
+  active_ = false; authenticated_ = false; connected_ = false;
+  network_ready_ = false; shutting_down_ = true;
 }
 }  // namespace esphome::jarvis_stream

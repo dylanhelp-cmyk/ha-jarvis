@@ -7,6 +7,8 @@
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
+#include "network_lifecycle.h"
 #include "protocol.h"
 
 namespace esphome::jarvis_stream {
@@ -27,26 +29,33 @@ class JarvisStream : public Component, public i2c::I2CDevice {
 
  protected:
   struct AudioPacket { uint32_t generation; uint16_t samples; uint8_t wire[HEADER_BYTES + MAX_SAMPLES * 2]; };
+  struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; char text[1024]; };
   struct Control { uint32_t epoch; uint8_t kind; char text[768]; };
+  static void network_worker(void *arg);
+  void network_worker_();
+  bool initialize_client_();
+  void request_transport_reset_();
   static void websocket_event(void *arg, esp_event_base_t base, int32_t event, void *data);
   void receive_event_(int32_t event, esp_websocket_event_data_t *data);
   void microphone_data_(const std::vector<uint8_t> &data);
   void command_(const char *text);
-  bool send_json_(const std::string &text);
+  bool send_json_(const std::string &text, bool capture_start = false);
   void stop_capture_(const char *reason);
   bool verify_hardware_();
   void send_state_();
   static uint32_t now_ms_();
   microphone::MicrophoneSource *mic_{nullptr};
   esp_websocket_client_handle_t client_{nullptr};
-  QueueHandle_t audio_queue_{nullptr}, control_queue_{nullptr};
+  QueueHandle_t audio_queue_{nullptr}, control_queue_{nullptr}, outgoing_queue_{nullptr};
+  TaskHandle_t network_worker_handle_{nullptr};
   std::string server_url_, device_id_, token_, capture_id_, incoming_;
   std::atomic<bool> active_{false}, authenticated_{false}, connected_{false}, muted_{true}, transport_fault_{false};
-  std::atomic<uint32_t> epoch_{0}, dropped_{0};
+  std::atomic<bool> network_ready_{false}, worker_reset_{false}, shutting_down_{false};
+  std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
   portMUX_TYPE capture_lock_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t sample_counter_{0};
-  uint32_t sequence_{0}, generation_{0}, deadline_{0};
-  uint32_t last_connect_attempt_{0}, last_hardware_check_{0};
+  uint32_t sequence_{0}, deadline_{0};
+  uint32_t last_hardware_check_{0};
   bool hardware_ready_{false}, previous_mute_{true};
   std::string xmos_version_;
 };

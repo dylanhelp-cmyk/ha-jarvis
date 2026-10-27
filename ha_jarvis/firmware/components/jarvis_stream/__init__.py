@@ -49,6 +49,7 @@ async def to_code(config):
     esp32.add_idf_component(
         name="esp_websocket_client",
         repo="https://github.com/espressif/esp-protocols.git",
-        ref="29f1dec4083cdb9a051fcbb1ca5908e9d4141fa0",  # websocket-v1.5.0
+        # 1.7.0: fixes start/stop completion-bit race; supports ESP-IDF >=5.0.
+        ref="b2b86d7388de0d7335ff21df1cc15e6ea278caf1",
         path="components/esp_websocket_client",
     )
