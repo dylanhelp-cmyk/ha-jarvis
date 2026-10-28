@@ -253,8 +253,8 @@ class SlimProtoTransport(Transport):
             raise TransportError("Installed aioslimproto lacks buffer controls; install the pinned source dependency")
         mime_type = MIME_TYPES[codec]
         if codec == "wav":
-            # The library derives PCM parameters from the supplied MIME string rather
-            # than waiting for the WAV header. Match the actual stream format.
+            # SlimProto uses headerless PCM. The HTTP response must repeat these
+            # parameters: the library sends another decoder command on RESP.
             sample_rate = int(config.get("sample_rate", 44100))
             sample_size = int(config.get("sample_size", config.get("bit_depth", 16)))
             channels = int(config.get("channels", 2))
@@ -262,7 +262,7 @@ class SlimProtoTransport(Transport):
                 raise TransportError("SlimProto WAV requires 1/2 channels and 8/16/24/32 bit PCM")
             if sample_rate not in SLIM_PCM_RATES:
                 raise TransportError("Sample rate has no SlimProto PCM format code")
-            mime_type += f";rate={sample_rate};bitrate={sample_size};channels={channels}"
+            mime_type = f"audio/pcm;rate={sample_rate};bitrate={sample_size};channels={channels}"
         self._player = player
         self.last_error = None
         async def send() -> None:

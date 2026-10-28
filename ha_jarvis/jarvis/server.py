@@ -210,10 +210,13 @@ class Bench:
                 self.transport = self.slim
             self.stream = Stream(kind, repetitions)
             extension = self.config["codec"]
+            if self.config["route"] == "slimproto" and extension == "wav":
+                extension = "pcm"
             url = self.config["stream_base_url"].rstrip("/") + "/stream/" + self.stream.id + "." + extension
             self.test["phase"] = "waiting for speaker stream"
             play_requested = time.monotonic()
-            await self.transport.play(url, {"codec": extension, "sample_rate": RATE, "channels": 1, "sample_size": 16})
+            await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1, "sample_size": 16})
+            result["wire_format"] = "pcm_s16le" if extension == "pcm" else extension
             await asyncio.wait_for(self.stream.connected.wait(), timeout=12)
             self.test["phase"] = "playing acoustic probes — remain quiet"
             if kind == "stop":
@@ -466,9 +469,13 @@ def create_audio(bench):
         return ws
     async def stream(request):
         active = bench.stream
-        if not active or request.match_info["name"] != active.id + "." + bench.config["codec"] or active.stop_requested.is_set():
+        raw_pcm = bench.config["route"] == "slimproto" and bench.config["codec"] == "wav"
+        extension = "pcm" if raw_pcm else bench.config["codec"]
+        if not active or request.match_info["name"] != active.id + "." + extension or active.stop_requested.is_set():
             raise web.HTTPNotFound()
         content_type = "audio/wav" if bench.config["codec"] == "wav" else "audio/flac"
+        if raw_pcm:
+            content_type = f"audio/pcm;rate={RATE};bitrate=16;channels=1"
         if request.method == "HEAD":
             return web.Response(headers={"Content-Type": content_type, "Cache-Control": "no-store"})
         if active.consumed:
@@ -480,7 +487,8 @@ def create_audio(bench):
         encoder_task = None
         try:
             if bench.config["codec"] == "wav":
-                await response.write(wav_header())
+                if not raw_pcm:
+                    await response.write(wav_header())
                 async for chunk in active.blocks(): await response.write(chunk)
             else:
                 process = await asyncio.create_subprocess_exec("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "pipe:0", "-c:a", "flac", "-compression_level", "0", "-flush_packets", "1", "-f", "flac", "pipe:1", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)

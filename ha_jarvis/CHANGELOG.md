@@ -1,3 +1,10 @@
+# 0.1.4
+
+- Fix SlimProto format negotiation: the HTTP response now repeats 16 kHz/16-bit/mono parameters, preventing the library's response handler from replacing them with 44.1 kHz/stereo defaults.
+- Send headerless PCM on SlimProto's uncompressed route so container bytes cannot become audio. HTTP/WAV and FLAC framing are unchanged.
+- Offline regression exercises both actual library decoder commands against the served MIME/body; hardware playback needs confirmation.
+- App-only update; keep firmware 0.1.3. Select SlimProto / PCM (uncompressed), lower amplifier volume, run one playback latency test and export diagnostics. Stop if distortion remains.
+
 # 0.1.3
 
 - Reserve “cancelled” for the App Stop button. Microphone disconnect/mute and App shutdown now report a reason, phase and elapsed time.

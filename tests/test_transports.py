@@ -187,7 +187,7 @@ class SlimTests(unittest.IsolatedAsyncioTestCase):
         await self.transport.play("http://127.0.0.1/test.wav", {
             "sample_rate": 48000, "sample_size": 16, "channels": 1})
         self.assertEqual(self.server.player.play_url.await_args.kwargs["mime_type"],
-                         "audio/wav;rate=48000;bitrate=16;channels=1")
+                         "audio/pcm;rate=48000;bitrate=16;channels=1")
 
     async def test_rejects_unadvertised_codec(self):
         self.server.player.supported_codecs = ["pcm"]

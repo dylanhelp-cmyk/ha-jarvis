@@ -4,14 +4,16 @@ import json
 import io
 from pathlib import Path
 import tempfile
+import struct
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
-from jarvis.server import Bench, create_ui, create_audio, validate_config
+from jarvis.server import Bench, Stream, create_ui, create_audio, validate_config
 from jarvis.device import Device
-from jarvis.audio import FRAME
+from jarvis.audio import FRAME, wav_header
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
@@ -183,6 +185,54 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_stream_url_cannot_be_replayed(self):
         response = await self.audio.get('/stream/made-up.wav')
         self.assertEqual(response.status, 404)
+
+    async def test_slim_pcm_http_body_and_both_decoder_commands_agree(self):
+        from aioslimproto.client import SlimClient
+        self.bench.config.update(route='slimproto', codec='wav')
+        stream = self.bench.stream = Stream('latency', 1)
+        samples = struct.pack('<hhhh', -2000, -1, 0, 2000)
+        async def blocks():
+            yield samples
+        reader = asyncio.StreamReader()
+        writer = SimpleNamespace(is_closing=lambda:False, can_write_eof=lambda:False,
+                                 close=lambda:None, wait_closed=AsyncMock())
+        player = SlimClient(reader, writer, lambda *args:None)
+        player._connected = player._powered = True
+        player._capabilities = {'SupportedCodecs':['pcm', 'flc']}
+        player.send_frame = AsyncMock()
+        try:
+            # Use the actual transport, pinned library, endpoint and response
+            # parser: an assertion on the initial MIME alone missed this bug.
+            from jarvis.transports import SlimProtoTransport
+            transport = SlimProtoTransport('127.0.0.1')
+            transport._server = SimpleNamespace(players=[player])
+            with patch.object(stream, 'blocks', blocks):
+                url = str(self.audio.make_url('/stream/' + stream.id + '.pcm'))
+                await transport.play(url, {'codec':'wav', 'sample_rate':16000, 'sample_size':16, 'channels':1})
+                command, packet = player.send_frame.await_args.args
+                self.assertEqual(command, b'strm')
+                self.assertEqual(struct.unpack('!cc5sBcBcBBBLHL', packet[:24])[2], b'p1711')
+                response = await self.audio.get('/stream/' + stream.id + '.pcm')
+                self.assertEqual(await response.read(), samples)  # no RIFF header or byte swaps
+                content_type = response.headers['Content-Type']
+                self.assertEqual(content_type, 'audio/pcm;rate=16000;bitrate=16;channels=1')
+                player._awaiting_stmc = False  # simulated connection acknowledgment
+                await player._process_resp(('HTTP/1.0 200 OK\r\nContent-Type: ' + content_type + '\r\n\r\n').encode())
+                decoder_commands = [call.args[1] for call in player.send_frame.await_args_list if call.args[0] == b'codc']
+                self.assertEqual(decoder_commands, [b'p1711'])
+        finally:
+            player.disconnect()
+            await player._async_cleanup()
+
+    async def test_http_wav_keeps_its_container_header(self):
+        self.bench.config.update(route='http', codec='wav')
+        stream = self.bench.stream = Stream('latency', 1)
+        async def blocks():
+            yield b'\x01\x00' * 20
+        with patch.object(stream, 'blocks', blocks):
+            response = await self.audio.get('/stream/' + stream.id + '.wav')
+            self.assertEqual(response.headers['Content-Type'], 'audio/wav')
+            self.assertEqual(await response.read(), wav_header() + b'\x01\x00' * 20)
 
     async def test_pairing_rotation_closes_old_connection(self):
         ws = await self.audio.ws_connect('/device')

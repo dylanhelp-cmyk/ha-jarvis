@@ -57,6 +57,7 @@ function updateReadiness() {
   $('save-config').disabled = busy || running || !configLoaded;
   document.querySelectorAll('#config-form input, #config-form select').forEach((el) => {el.disabled = running || busy;});
   const route = $('route').value;
+  $('codec').querySelector('[value="wav"]').textContent = route === 'slimproto' ? 'PCM (uncompressed)' : 'WAV';
   $('transport-help').textContent = route === 'slimproto' ? 'Requires an available SlimProto service and connected player. Expand advanced transport settings for pairing.' : route === 'airplay' ? 'AirPlay is a baseline transport; receiver capability and credentials must be validated first.' : 'HTTP streams a local test signal to the WiiM.';
   $('tls-warning').hidden = $('verify-tls').checked;
   try {$('lms-host').textContent = new URL($('stream-base-url').value).hostname;} catch {$('lms-host').textContent = 'the HA address in your stream URL';}
@@ -70,7 +71,8 @@ function renderStatus(data) {
   $('device-detail').textContent = device.connected ? [device.device_id, device.sample_rate ? `${device.sample_rate.toLocaleString()} Hz` : '', device.firmware ? `FW ${device.firmware}` : ''].filter(Boolean).join(' · ') : 'Flash firmware and pair your device';
   const route = data.config?.route || 'http';
   $('route-status').textContent = route === 'slimproto' ? 'SlimProto' : route === 'airplay' ? 'AirPlay baseline' : 'Native HTTP';
-  $('route-detail').textContent = `${String(data.config?.codec || 'wav').toUpperCase()} · ${data.transports?.[route]?.available ? 'Available' : 'Unavailable'}`;
+  const codecLabel = route === 'slimproto' && data.config?.codec === 'wav' ? 'PCM' : String(data.config?.codec || 'wav').toUpperCase();
+  $('route-detail').textContent = `${codecLabel} · ${data.transports?.[route]?.available ? 'Available' : 'Unavailable'}`;
   $('test-status').textContent = data.test?.running ? 'Test in progress' : 'Standby';
   $('test-detail').textContent = data.test?.running ? (data.test.phase || 'Preparing signal') : 'No test starts automatically';
   $('version').textContent = `v${data.version || '—'} · Local audio milestone`;
@@ -121,7 +123,7 @@ function renderResults(data) {
     card.append(top);
     const when = new Date(result.started_at);
     const date = Number.isNaN(when.getTime()) ? 'Time unavailable' : when.toLocaleString();
-    card.append(node('p', 'result-meta', `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${String(result.codec || '—').toUpperCase()}`));
+    card.append(node('p', 'result-meta', `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${result.wire_format === 'pcm_s16le' ? 'PCM' : String(result.codec || '—').toUpperCase()}`));
     const metrics = node('div', 'metrics');
     const stopMetric = result.kind === 'stop';
     [[stopMetric ? 'Median stop → silence' : 'Median onset latency', milliseconds(result.summary?.median_ms)], ['95th percentile', milliseconds(result.summary?.p95_ms)], ['Valid trials', `${result.summary?.valid_trials ?? 0} / ${result.trials?.length ?? 0}`]].forEach(([label, value]) => {
