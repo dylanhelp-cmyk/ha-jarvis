@@ -6,12 +6,37 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "ha_jarvis" / "firmware"
 
 
 class FirmwareContractTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("esphome"), "ESPHome is an optional firmware development dependency")
+    def test_component_codegen_enables_independent_websocket_transmit_lock(self):
+        import asyncio
+        from esphome.components import esp32
+        from esphome.core import CORE
+
+        spec = importlib.util.spec_from_file_location("jarvis_firmware_lock_schema", FIRMWARE / "components/jarvis_stream/__init__.py")
+        component = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(component)
+        config = {"id": "pcm_stream", "microphone": {}, "server_url": "ws://example.invalid:8099/device",
+                  "device_id": "testbench", "token": "test-only-token"}
+        # Exercise the real ESPHome SDK option API; isolate unrelated generated
+        # component expressions and registration from this transport requirement.
+        with patch.dict(CORE.data, {esp32.KEY_ESP32: {esp32.KEY_SDKCONFIG_OPTIONS: {}}}), \
+             patch.object(component.cg, "new_Pvariable", return_value=MagicMock()), \
+             patch.object(component.cg, "add"), \
+             patch.object(component.cg, "register_component", new=AsyncMock()), \
+             patch.object(component.i2c, "register_i2c_device", new=AsyncMock()), \
+             patch.object(component.microphone, "microphone_source_to_code", new=AsyncMock()), \
+             patch.object(component.esp32, "add_idf_component"):
+            asyncio.run(component.to_code(config))
+            self.assertIs(CORE.data[esp32.KEY_ESP32][esp32.KEY_SDKCONFIG_OPTIONS]
+                          ["CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK"], True)
+
     def test_actual_cpp_encoder_matches_wire_struct(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         if compiler is None:

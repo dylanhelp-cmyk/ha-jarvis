@@ -23,7 +23,7 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
-from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, capture_health, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
+from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
 from .device import Device
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -174,9 +174,10 @@ class Bench:
                 "codecs": {"wav": True, "flac": shutil.which("ffmpeg") is not None},
                 "cloud": {"enabled": False, "reason": "Wireless audio validation comes first; this build has no OpenAI client"}}
 
-    async def cancel(self):
+    async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
-            if not self.test.get("cancelling"):
+            if not self.test.get("cancelling") and not self.test.get("finishing"):
+                self.test["interruption"] = {"reason": reason, "phase": self.test.get("phase"), **(details or {})}
                 self.test["cancelling"] = True
                 self.test["phase"] = "stopping playback and microphone capture"
                 self.task.cancel()
@@ -185,6 +186,7 @@ class Bench:
 
     async def run(self, kind, repetitions):
         from .transports import NativeHTTPTransport, AirPlayTransport
+        started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": self.config["route"],
                   "codec": self.config["codec"], "started_at": datetime.now(timezone.utc).isoformat(),
                   "status": "running", "trials": [], "summary": summarize([]), "warnings": [
@@ -231,15 +233,7 @@ class Bench:
             self.test["phase"] = "analysing microphone capture"
             await self.device.end()
             pcm, capture_start = self.device.recording()
-            result["capture"] = capture_health(pcm)
-            frames = self.device.frames
-            result["capture"]["frames"] = len(frames)
-            if len(frames) > 1:
-                span_ms = (frames[-1].capture_ms - frames[0].capture_ms) % (2 ** 32)
-                sample_span_ms = (frames[-1].first_sample - frames[0].first_sample) * 1000 / RATE
-                result["capture"]["sample_clock_span_ms"] = round(sample_span_ms, 1)
-                result["capture"]["timestamp_span_ms"] = span_ms
-                result["capture"]["span_difference_ms"] = round(span_ms - sample_span_ms, 1)
+            result["capture"] = self.device.capture_diagnostics()
             if kind == "stop":
                 detection = await asyncio.to_thread(detect_stop, pcm, capture_start, result["stop_command_at"])
                 result["trials"].append({"trial": 1, **detection,
@@ -279,12 +273,30 @@ class Bench:
             if result["status"] == "unavailable":
                 result["warnings"].append("Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the 15-second search limit also cannot be measured.")
         except asyncio.CancelledError:
-            result["status"] = "cancelled"
+            interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation", "phase": self.test.get("phase")})
+            result["interruption"] = {**interruption, "elapsed_seconds": round(time.monotonic() - started, 3)}
+            result["status"] = "cancelled" if interruption["reason"] == "user_stop" else "failed"
+            if result["status"] == "failed":
+                messages = {"device_disconnected": "Voice PE connection lost during the test",
+                            "device_muted": "Voice PE reported mute during the test",
+                            "app_shutdown": "App shut down during the test"}
+                result["error"] = messages.get(interruption["reason"], "Test task was unexpectedly interrupted")
             raise
         except Exception as exc:
             result["status"] = "failed"
             result["error"] = str(exc)
         finally:
+            # A late disconnect must not cancel the cleanup that stops playback
+            # and clears the microphone recording after an earlier failure.
+            self.test["finishing"] = True
+            result["capture_at_end"] = self.device.capture_diagnostics()
+            result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            result["ended_phase"] = result.get("interruption", {}).get("phase", self.test.get("phase"))
+            if self.stream:
+                result["stream"] = {"bytes_sent": self.stream.bytes_sent,
+                                    "max_schedule_lag_ms": round(self.stream.schedule_lag_ms, 2),
+                                    "connected": self.stream.connected.is_set(), "finished": self.stream.done.is_set(),
+                                    "error": self.stream.error}
             if self.transport:
                 try:
                     await asyncio.wait_for(self.transport.stop(), timeout=8)
@@ -298,6 +310,7 @@ class Bench:
                 self.stream.stop_requested.set()
             with suppress(Exception):
                 await self.device.end()
+            result["capture"] = self.device.capture_diagnostics()
             self.device.frames.clear()
             result["summary"] = summarize(result["trials"])
             self.test = {"running": False, "phase": "idle"}
@@ -418,6 +431,7 @@ def create_audio(bench):
         ws = web.WebSocketResponse(heartbeat=15, max_msg_size=16384)
         await ws.prepare(request)
         accepted = False
+        disconnect_details = {}
         try:
             message = await asyncio.wait_for(ws.receive_json(), timeout=5)
             token = str(message.get("token", ""))
@@ -437,14 +451,18 @@ def create_audio(bench):
                 elif frame.type == WSMsgType.TEXT:
                     bench.device.receive_json(json.loads(frame.data))
                     if bench.device.info.get("muted") and bench.test["running"]:
-                        asyncio.create_task(bench.cancel())
-        except (ValueError, asyncio.TimeoutError, KeyError, TypeError):
+                        asyncio.create_task(bench.cancel("device_muted"))
+        except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:
+            disconnect_details = {"protocol_error": str(exc), "exception_type": type(exc).__name__, "server_close_code": 1008}
             await ws.close(code=1008, message=b"Invalid device protocol")
         finally:
             if accepted and bench.device.ws is ws:
+                disconnect_details["close_code"] = ws.close_code
+                if ws.exception() is not None:
+                    disconnect_details["socket_error"] = str(ws.exception())
                 bench.device.ws = None
-                await bench.cancel()
                 bench.device.info = {}
+                await bench.cancel("device_disconnected", disconnect_details)
         return ws
     async def stream(request):
         active = bench.stream
@@ -508,7 +526,7 @@ async def serve():
     try:
         await shutdown.wait()
     finally:
-        await bench.cancel()
+        await bench.cancel("app_shutdown")
         if bench.slim: await bench.slim.close()
         if bench.device.ws is not None: await bench.device.ws.close()
         await audio_runner.cleanup()

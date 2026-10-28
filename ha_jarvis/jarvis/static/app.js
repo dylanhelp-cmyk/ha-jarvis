@@ -130,11 +130,16 @@ function renderResults(data) {
     card.append(metrics);
     if (result.capture) {
       const health = result.capture;
-      const level = (value) => typeof value === 'number' ? `${value.toFixed(1)} dBFS` : 'digital silence';
+      const level = (value) => typeof value === 'number' ? `${value.toFixed(1)} dBFS` : value === null ? 'digital silence' : 'unavailable';
       card.append(node('p', 'result-meta', `Microphone: ${health.duration_seconds}s captured · RMS ${level(health.rms_dbfs)} · peak ${level(health.peak_dbfs)} · ${((health.clipped_fraction || 0) * 100).toFixed(2)}% clipped.`));
       if (health.signal === 'digital_silence') card.append(node('p', 'result-warning', 'Microphone frames contain only zeros. Increasing speaker volume cannot resolve digital silence.'));
     }
     if (result.error) card.append(node('p', 'result-warning', `Test error: ${result.error}`));
+    if (result.interruption) {
+      const interruption = result.interruption;
+      card.append(node('p', 'result-meta', `Ended after ${interruption.elapsed_seconds ?? '—'}s · ${interruption.reason} · phase: ${interruption.phase || 'unknown'}.`));
+      if (interruption.protocol_error || interruption.socket_error) card.append(node('p', 'result-warning', interruption.protocol_error || interruption.socket_error));
+    }
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));
     const estimates = (result.trials || []).map((trial) => trial.clock_uncertainty_ms).filter((value) => typeof value === 'number' && Number.isFinite(value));

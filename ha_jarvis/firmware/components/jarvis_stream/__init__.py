@@ -46,6 +46,9 @@ async def to_code(config):
     cg.add(var.set_microphone(source))
     for key in ("server_url", "device_id", "token"):
         cg.add(getattr(var, "set_" + key)(config[key]))
+    # RX and heartbeat work can wait up to network_timeout_ms. Keep it from
+    # consuming the PCM sender's short mutex deadline on a shared RX/TX lock.
+    esp32.add_idf_sdkconfig_option("CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK", True)
     esp32.add_idf_component(
         name="esp_websocket_client",
         repo="https://github.com/espressif/esp-protocols.git",

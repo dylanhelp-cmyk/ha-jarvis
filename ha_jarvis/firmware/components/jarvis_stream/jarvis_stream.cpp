@@ -93,7 +93,10 @@ void JarvisStream::network_worker_() {
       for (int i = 0; i < 8 && xQueueReceive(outgoing_queue_, &outgoing, 0) == pdTRUE; ++i) {
         if (outgoing.epoch != epoch_) continue;
         if (outgoing.capture_generation && (!active_ || outgoing.capture_generation != generation_)) continue;
-        if (esp_websocket_client_send_text(client_, outgoing.text, outgoing.length, pdMS_TO_TICKS(100)) != outgoing.length) {
+        const int sent = esp_websocket_client_send_text(client_, outgoing.text, outgoing.length, pdMS_TO_TICKS(100));
+        if (sent != outgoing.length) {
+          ESP_LOGW(TAG, "Resetting transport: control send failed (sent=%d expected=%u)", sent,
+                   static_cast<unsigned>(outgoing.length));
           request_transport_reset_();
           break;
         }
@@ -105,8 +108,11 @@ void JarvisStream::network_worker_() {
                            xQueueReceive(audio_queue_, &packet, 0) == pdTRUE; ++i) {
         if (packet.generation != generation_) continue;
         const size_t bytes = HEADER_BYTES + packet.samples * 2;
-        if (esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes,
-                                          pdMS_TO_TICKS(30)) != static_cast<int>(bytes)) {
+        const int sent = esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes,
+                                                       pdMS_TO_TICKS(30));
+        if (sent != static_cast<int>(bytes)) {
+          ESP_LOGW(TAG, "Resetting transport: PCM send failed (sent=%d expected=%u)", sent,
+                   static_cast<unsigned>(bytes));
           request_transport_reset_();
           break;
         }

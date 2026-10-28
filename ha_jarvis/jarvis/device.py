@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-from .audio import decode_frame, RATE
+from .audio import capture_health, decode_frame, RATE
 
 
 class Device:
@@ -23,6 +23,8 @@ class Device:
         self.errors = []
         self.next_sample = None
         self.last_seq = None
+        self.stop_info = None
+        self.last_frame_at = None
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -58,6 +60,7 @@ class Device:
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:
+            self.stop_info = {key: message[key] for key in ("reason", "samples_seen", "dropped_frames") if key in message}
             self.stopped.set()
             if message.get("dropped_frames", 0):
                 self.errors.append("Firmware dropped microphone frames")
@@ -82,6 +85,23 @@ class Device:
         if sum(len(f.samples) for f in self.frames) + len(frame.samples) > RATE * 120:
             raise ValueError("Capture exceeded the 120-second memory limit")
         self.frames.append(frame)
+        self.last_frame_at = time.monotonic()
+
+    def capture_diagnostics(self):
+        """Partial recordings remain diagnostically useful, never valid measurements."""
+        pcm = np.concatenate([frame.samples for frame in self.frames]) if self.frames else np.empty(0, dtype="<i2")
+        health = capture_health(pcm)
+        health.update(frames=len(self.frames), errors=list(dict.fromkeys(self.errors)),
+                      completion_confirmed=self.stopped.is_set(), stop=self.stop_info,
+                      clock_rtt_ms=self.clock_rtt_ms)
+        if self.last_frame_at is not None:
+            health["last_frame_age_ms"] = round((time.monotonic() - self.last_frame_at) * 1000, 1)
+        if len(self.frames) > 1:
+            span_ms = (self.frames[-1].capture_ms - self.frames[0].capture_ms) % (2 ** 32)
+            sample_span_ms = (self.frames[-1].first_sample - self.frames[0].first_sample) * 1000 / RATE
+            health.update(timestamp_span_ms=span_ms, sample_clock_span_ms=round(sample_span_ms, 1),
+                          span_difference_ms=round(span_ms - sample_span_ms, 1))
+        return health
 
     async def begin(self, capture_id, duration_ms):
         if not self.snapshot()["connected"] or self.info.get("muted"):
@@ -91,6 +111,7 @@ class Device:
         self.frames.clear()
         self.errors.clear()
         self.next_sample = self.last_seq = None
+        self.stop_info = self.last_frame_at = None
         self.capture_id = capture_id
         self.started.clear()
         self.stopped.clear()

@@ -1,9 +1,11 @@
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import json
 import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -34,6 +36,95 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['cloud']['enabled'])
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
+
+    @asynccontextmanager
+    async def running_test(self):
+        """Exercise actual test task and WS handling with a fake speaker only."""
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
+                            'sample_rate':16000, 'channels':1})
+        await ws.receive_json()
+        self.bench.config.update(wiim_host='192.168.1.20', stream_base_url='http://192.168.1.10:8099')
+        entered = asyncio.Event()
+        async def begin(capture_id, duration_ms):
+            self.bench.device.capture_id = capture_id
+            self.bench.device.started.set()
+            self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\x01\x00'*2)
+        async def play(*args):
+            entered.set()
+        transport = Mock(play=AsyncMock(side_effect=play), stop=AsyncMock(), close=AsyncMock())
+        with patch('jarvis.transports.NativeHTTPTransport', return_value=transport), patch.object(self.bench.device, 'begin', begin):
+            response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
+            self.assertEqual(response.status, 202)
+            await asyncio.wait_for(entered.wait(), 2)
+            try:
+                yield ws
+            finally:
+                await self.bench.cancel()
+                await ws.close()
+
+    async def test_connection_loss_is_failed_and_preserves_partial_capture(self):
+        async with self.running_test() as ws:
+            await ws.close()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(self.bench.task, 2)
+            result = self.bench.results[0]
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['interruption']['reason'], 'device_disconnected')
+            self.assertIn('close_code', result['interruption'])
+            self.assertEqual(result['capture']['samples'], 2)
+            self.assertEqual(result['trials'], [])
+            self.assertFalse(self.bench.test['running'])
+
+    async def test_explicit_stop_is_cancelled_and_preserves_reason(self):
+        async with self.running_test():
+            response = await self.ui.delete('/api/tests/current', json={})
+            self.assertEqual(response.status, 202)
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(self.bench.task, 4)
+            self.assertEqual(self.bench.results[0]['status'], 'cancelled')
+            self.assertEqual(self.bench.results[0]['interruption']['reason'], 'user_stop')
+
+    async def test_mute_is_failed_and_preserves_reason(self):
+        async with self.running_test() as ws:
+            await ws.send_json({'type':'status', 'muted':True})
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(self.bench.task, 4)
+            result = self.bench.results[0]
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['interruption']['reason'], 'device_muted')
+
+    async def test_invalid_pcm_records_protocol_failure(self):
+        async with self.running_test() as ws:
+            await ws.send_bytes(b'bad')
+            await ws.receive()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(self.bench.task, 2)
+            result = self.bench.results[0]
+            self.assertEqual(result['status'], 'failed')
+            self.assertIn('header', result['interruption']['protocol_error'])
+            self.assertEqual(result['interruption']['server_close_code'], 1008)
+
+    async def test_late_disconnect_cannot_interrupt_failure_cleanup(self):
+        async with self.running_test():
+            stopping, release = asyncio.Event(), asyncio.Event()
+            async def stop():
+                stopping.set()
+                await release.wait()
+            self.bench.transport.stop.side_effect = stop
+            with patch('jarvis.server.MAX_PLAYBACK_DELAY_SECONDS', 0), patch.object(self.bench.device, 'end', AsyncMock()):
+                self.bench.stream.connected.set()
+                self.bench.stream.done.set()
+                await asyncio.wait_for(stopping.wait(), 2)
+                # recording() failed clock validation; cleanup is now in progress.
+                late_disconnect = asyncio.create_task(self.bench.cancel('device_disconnected'))
+                await asyncio.sleep(0)
+                self.assertFalse(self.bench.task.cancelling())
+                release.set()
+                await asyncio.wait_for(late_disconnect, 2)
+            self.assertFalse(self.bench.test['running'])
+            self.assertEqual(self.bench.device.frames, [])
+            self.assertEqual(self.bench.results[0]['status'], 'failed')
 
     async def test_test_requires_user_confirmation_and_paired_mic(self):
         response = await self.ui.post('/api/tests', json={'kind':'latency'})

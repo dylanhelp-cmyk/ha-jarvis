@@ -1,3 +1,10 @@
+# 0.1.3
+
+- Reserve “cancelled” for the App Stop button. Microphone disconnect/mute and App shutdown now report a reason, phase and elapsed time.
+- Preserve partial microphone health, capture completion/drop reports and stream progress when a test fails. No audio is retained.
+- Pair with firmware 0.1.3, which separates WebSocket receive/send locks to remove a confirmed contention hazard during capture. The cause of the reported hardware failures remains unconfirmed until retesting.
+- Update both App and firmware, then run one HTTP/WAV playback latency test at comfortable volume with the existing certificate setting. Allow completion and export diagnostics; if it fails, also save the ESPHome logs.
+
 # 0.1.2
 
 - Extend acoustic playback search from 4.5 to 15 seconds and listen longer after streaming, to measure heavily buffered routes.
