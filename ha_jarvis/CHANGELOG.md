@@ -1,3 +1,10 @@
+# 0.1.5
+
+- Surface background AirPlay sender errors immediately while waiting for source fetch, instead of hiding them behind a blank timeout.
+- Record receiver capability/pairing flags, bounded transport events and pending function names (no coroutine locals or credentials). Redact device/player identifiers from diagnostic exports.
+- Give timeouts nonempty error messages and bound AirPlay discovery/control preparation. Report mandatory pairing as unsupported without attempting it.
+- App-only diagnostic update; firmware stays 0.1.3. This does not claim to fix the receiver connection. Run one AirPlay/WAV latency test and export diagnostics even if no sound plays; no additional repeats needed.
+
 # 0.1.4
 
 - Fix SlimProto format negotiation: the HTTP response now repeats 16 kHz/16-bit/mono parameters, preventing the library's response handler from replacing them with 44.1 kHz/stereo defaults.

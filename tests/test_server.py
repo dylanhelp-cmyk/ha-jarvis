@@ -54,7 +54,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\x01\x00'*2)
         async def play(*args):
             entered.set()
-        transport = Mock(play=AsyncMock(side_effect=play), stop=AsyncMock(), close=AsyncMock())
+        transport = Mock(play=AsyncMock(side_effect=play), stop=AsyncMock(), close=AsyncMock(), snapshot=Mock(return_value={}))
         with patch('jarvis.transports.NativeHTTPTransport', return_value=transport), patch.object(self.bench.device, 'begin', begin):
             response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
             self.assertEqual(response.status, 202)
@@ -142,8 +142,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 415)
 
     async def test_diagnostic_export_does_not_include_pairing_secret(self):
+        self.bench.results = [{'transport': {'events':[{'player_id':'aa:bb:cc:dd:ee:ff', 'advertised_host':'192.168.1.77'}]}}]
         response = await self.ui.get('/api/diagnostics')
-        self.assertNotIn(self.bench.config['device_token'], await response.text())
+        content = await response.text()
+        self.assertNotIn(self.bench.config['device_token'], content)
+        self.assertNotIn('aa:bb:cc:dd:ee:ff', content)
+        self.assertNotIn('192.168.1.77', content)
 
     async def test_firmware_setup_uses_repository_and_persistent_credentials(self):
         self.bench.config['stream_base_url'] = 'http://192.168.1.10:8099'

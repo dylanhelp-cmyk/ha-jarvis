@@ -217,7 +217,13 @@ class Bench:
             play_requested = time.monotonic()
             await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1, "sample_size": 16})
             result["wire_format"] = "pcm_s16le" if extension == "pcm" else extension
-            await asyncio.wait_for(self.stream.connected.wait(), timeout=12)
+            if self.config["route"] == "airplay":
+                await self.transport.wait_for_stream(self.stream.connected, timeout=12)
+            else:
+                try:
+                    await asyncio.wait_for(self.stream.connected.wait(), timeout=12)
+                except asyncio.TimeoutError as exc:
+                    raise ValueError("Speaker did not request the test stream within 12 seconds") from exc
             self.test["phase"] = "playing acoustic probes — remain quiet"
             if kind == "stop":
                 await asyncio.sleep(5)
@@ -236,6 +242,8 @@ class Bench:
             self.test["phase"] = "analysing microphone capture"
             await self.device.end()
             pcm, capture_start = self.device.recording()
+            if self.config["route"] == "airplay":
+                self.transport.check_failure()
             result["capture"] = self.device.capture_diagnostics()
             if kind == "stop":
                 detection = await asyncio.to_thread(detect_stop, pcm, capture_start, result["stop_command_at"])
@@ -287,7 +295,8 @@ class Bench:
             raise
         except Exception as exc:
             result["status"] = "failed"
-            result["error"] = str(exc)
+            result["error"] = str(exc) or type(exc).__name__
+            result["exception_type"] = type(exc).__name__
         finally:
             # A late disconnect must not cancel the cleanup that stops playback
             # and clears the microphone recording after an earlier failure.
@@ -301,6 +310,9 @@ class Bench:
                                     "connected": self.stream.connected.is_set(), "finished": self.stream.done.is_set(),
                                     "error": self.stream.error}
             if self.transport:
+                result["transport"] = self.transport.snapshot()
+                if self.config["route"] == "airplay":
+                    result["transport"]["pending_stage"] = self.transport.pending_stage()
                 try:
                     await asyncio.wait_for(self.transport.stop(), timeout=8)
                 except Exception as exc:
@@ -395,9 +407,16 @@ def create_ui(bench):
         status["transports"]["slimproto"]["clients"] = []
         body = {"version": __version__, "config": config, "status": status,
                 "results": bench.results, "audio_retained": False, "cloud_calls": 0}
+        def redact_identifiers(value):
+            if isinstance(value, dict):
+                return {key: "[redacted]" if key in ("player_id", "advertised_host", "device_id") else redact_identifiers(item)
+                        for key, item in value.items()}
+            if isinstance(value, list):
+                return [redact_identifiers(item) for item in value]
+            return value
         # Exception strings can contain URLs, therefore redact all configured
         # secrets/addresses recursively from the export as a final boundary.
-        content = json.dumps(body, indent=2)
+        content = json.dumps(redact_identifiers(body), indent=2)
         for key in ("device_token", "wiim_host", "stream_base_url", "slimproto_player_id"):
             if bench.config.get(key): content = content.replace(bench.config[key], "[redacted]")
         return web.Response(text=content, content_type="application/json", headers={"Content-Disposition": 'attachment; filename="jarvis-diagnostics.json"'})

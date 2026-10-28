@@ -353,6 +353,14 @@ class AirPlayTransport(Transport):
                                    timeout=self.scan_timeout)
         if len(configs) != 1:
             raise TransportError("No unique RAOP receiver found at the configured address")
+        service = configs[0].get_service(Protocol.RAOP)
+        if service is not None:
+            from pyatv.const import PairingRequirement
+            properties = {key: str(value)[:160] for key, value in service.properties.items()
+                          if key in ("cn", "et", "sr", "ss", "ch", "tp", "sf", "ft", "am", "vn", "vs")}
+            self._event("raop_discovered", properties=properties, pairing=str(service.pairing))
+            if service.pairing == PairingRequirement.Mandatory:
+                raise TransportError("RAOP receiver requires pairing; pairing is not implemented in this bench")
         self._connection = await pyatv.connect(configs[0], loop, protocol=Protocol.RAOP)
         self._event("raop_connected")
 
@@ -363,7 +371,10 @@ class AirPlayTransport(Transport):
             await self.stop()
         self.last_error = None
         try:
-            await self._connect()
+            try:
+                await asyncio.wait_for(self._connect(), timeout=self.scan_timeout + 10)
+            except asyncio.TimeoutError as exc:
+                raise TransportError("AirPlay discovery/control connection timed out before streaming") from exc
             self._event("stream_task_started", note="pyatv handles decoding and receiver buffering")
             self._stream_task = asyncio.create_task(self._connection.stream.stream_file(stream_url))
             self._stream_task.add_done_callback(self._completed)
@@ -377,8 +388,52 @@ class AirPlayTransport(Transport):
             raise
         except Exception as exc:
             self.active = False
-            self.last_error = str(exc)
-            raise TransportError(f"AirPlay playback failed: {exc}") from exc
+            self.last_error = str(exc) or type(exc).__name__
+            self._event("play_failed", error=self.last_error, exception_type=type(exc).__name__)
+            raise TransportError(f"AirPlay playback failed: {self.last_error}") from exc
+
+    def pending_stage(self) -> list[str]:
+        """Awaited function names only: never inspect coroutine locals or credentials."""
+        current = self._stream_task.get_coro() if self._stream_task is not None else None
+        stages = []
+        for _ in range(16):
+            code = getattr(current, "cr_code", None) or getattr(current, "gi_code", None)
+            if code is None:
+                break
+            stages.append(code.co_qualname)
+            current = getattr(current, "cr_await", None) or getattr(current, "gi_yieldfrom", None)
+        return stages
+
+    def check_failure(self) -> None:
+        task = self._stream_task
+        if task is not None and task.done():
+            if task.cancelled():
+                raise TransportError("AirPlay sender was unexpectedly cancelled")
+            error = task.exception()
+            if error is not None:
+                message = str(error) or type(error).__name__
+                self.last_error = message
+                raise TransportError(f"AirPlay sender failed ({type(error).__name__}): {message}") from error
+
+    async def wait_for_stream(self, connected: asyncio.Event, timeout: float) -> None:
+        """Surface a background sender failure instead of hiding it behind timeout."""
+        if self._stream_task is None:
+            raise TransportError("AirPlay sender was not started")
+        waiter = asyncio.create_task(connected.wait())
+        try:
+            await asyncio.wait({waiter, self._stream_task}, timeout=timeout,
+                               return_when=asyncio.FIRST_COMPLETED)
+            self.check_failure()
+            if connected.is_set():
+                return
+            stages = self.pending_stage()
+            self._event("source_not_requested", pending_stage=stages)
+            if self._stream_task.done():
+                raise TransportError("AirPlay sender ended before requesting test audio")
+            raise TransportError(f"AirPlay sender did not request test audio within {timeout:g} seconds; receiver/session setup may be stalled")
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
 
     def _completed(self, task: asyncio.Task) -> None:
         self.active = False
@@ -387,8 +442,8 @@ class AirPlayTransport(Transport):
             return
         error = task.exception()
         if error is not None:
-            self.last_error = str(error)
-            self._event("stream_failed", error=self.last_error)
+            self.last_error = str(error) or type(error).__name__
+            self._event("stream_failed", error=self.last_error, exception_type=type(error).__name__)
         else:
             self._event("stream_finished")
 

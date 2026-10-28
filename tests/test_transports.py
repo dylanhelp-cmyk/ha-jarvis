@@ -276,6 +276,50 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
             await self.adapter.play("http://127.0.0.1/stream.flac", {"codec": "flac"})
         self.assertIn("decoder rejected", self.adapter.snapshot()["last_error"])
 
+    async def test_background_setup_failure_surfaces_before_stream_timeout(self):
+        async def fail_later(url):
+            await self.finished.wait()
+            raise RuntimeError('receiver rejected session')
+        self.connection.stream.stream_file.side_effect = fail_later
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.finished.set()
+        with self.assertRaisesRegex(TransportError, 'receiver rejected session'):
+            await self.adapter.wait_for_stream(asyncio.Event(), timeout=1)
+
+    async def test_empty_background_error_has_an_exception_name(self):
+        async def fail_later(url):
+            await self.finished.wait()
+            raise TimeoutError()
+        self.connection.stream.stream_file.side_effect = fail_later
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.finished.set()
+        with self.assertRaisesRegex(TransportError, 'TimeoutError'):
+            await self.adapter.wait_for_stream(asyncio.Event(), timeout=1)
+
+    async def test_stalled_setup_reports_stage_without_cancelling_sender(self):
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        with self.assertRaisesRegex(TransportError, 'did not request test audio'):
+            await self.adapter.wait_for_stream(asyncio.Event(), timeout=.01)
+        self.assertFalse(self.adapter._stream_task.done())
+        self.assertTrue(self.adapter.events[-1]['pending_stage'])
+
+    async def test_fetch_ready_does_not_claim_playback_complete(self):
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        ready = asyncio.Event()
+        ready.set()
+        await self.adapter.wait_for_stream(ready, timeout=.1)
+        self.assertFalse(self.adapter._stream_task.done())
+
+    async def test_cancelling_readiness_wait_leaves_sender_for_stop_cleanup(self):
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        readiness = asyncio.create_task(self.adapter.wait_for_stream(asyncio.Event(), timeout=10))
+        await asyncio.sleep(0)
+        readiness.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await readiness
+        self.assertFalse(self.adapter._stream_task.done())
+        await self.adapter.stop()
+
     async def test_stop_cancels_stalled_sender(self):
         self.connection.remote_control.stop.side_effect = None
         await self.adapter.play("http://127.0.0.1/stream.wav", {})
