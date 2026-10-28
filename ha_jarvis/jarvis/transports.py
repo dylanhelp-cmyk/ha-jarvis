@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import json
+import math
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -83,7 +85,7 @@ class NativeHTTPTransport(Transport):
         self._owns_session = session is None
         self._command_lock = asyncio.Lock()
 
-    async def _command(self, command: str) -> None:
+    async def _request(self, command: str) -> str:
         try:
             import aiohttp
         except ImportError as exc:
@@ -107,13 +109,32 @@ class NativeHTTPTransport(Transport):
                     body = raw_body.decode("utf-8", errors="replace").strip()
                     if response.status < 200 or response.status >= 300:
                         raise TransportError(f"WiiM returned HTTP {response.status}: {body[:160]}")
-                    if body.strip('"').upper() != "OK":
-                        raise TransportError(f"WiiM rejected command: {body[:160]}")
             except (aiohttp.ClientError, asyncio.TimeoutError, TransportError) as exc:
                 self.last_error = str(exc)
                 self._event("command_failed", error=self.last_error)
                 raise TransportError(self.last_error) from exc
-            self._event("command_acknowledged", note="Control response only; audio onset unknown")
+            self._event("command_response_received", note="Control response only; audio onset unknown")
+            return body
+
+    async def _command(self, command: str) -> None:
+        body = await self._request(command)
+        if body.strip('"').upper() != "OK":
+            self.last_error = f"WiiM rejected command: {body[:160]}"
+            raise TransportError(self.last_error)
+
+    async def output_state(self) -> dict[str, Any]:
+        """Read volume/mute without selecting a source or changing output."""
+        try:
+            state = json.loads(await self._request("getPlayerStatus"))
+            volume = float(state["vol"])
+            mute = str(state["mute"])
+            if not math.isfinite(volume) or not 0 <= volume <= 100 or mute not in ("0", "1"):
+                raise ValueError("invalid volume or mute")
+            return {"volume_percent": volume, "muted": mute == "1",
+                    "source_mode": str(state.get("mode", "unknown"))[:32],
+                    "playback_state": str(state.get("status", "unknown"))[:32]}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TransportError("WiiM did not provide a valid volume/mute state; AirPlay will not use a guessed volume") from exc
 
     async def play(self, stream_url: str, config: Mapping[str, Any]) -> None:
         _url(stream_url)
@@ -328,13 +349,14 @@ class AirPlayTransport(Transport):
 
     def __init__(self, device_host: str, *,
                  connection: Any = None, scan_timeout: float = 5.0,
-                 stop_timeout: float = 5.0) -> None:
+                 stop_timeout: float = 5.0, state_reader: Callable[..., Any] | None = None) -> None:
         super().__init__()
         self.device_host = device_host
         self.scan_timeout = scan_timeout
         self.stop_timeout = stop_timeout
         self._connection = connection
         self._stream_task: asyncio.Task | None = None
+        self._state_reader = state_reader
 
     @staticmethod
     def available() -> bool:
@@ -371,10 +393,21 @@ class AirPlayTransport(Transport):
             await self.stop()
         self.last_error = None
         try:
+            output_state = await self._state_reader() if self._state_reader is not None else None
+            if output_state is not None:
+                self._event("receiver_before_play", **output_state)
+                if output_state["muted"] or output_state["volume_percent"] == 0:
+                    raise TransportError("WiiM is muted or at zero volume; set a comfortable level before testing")
             try:
                 await asyncio.wait_for(self._connect(), timeout=self.scan_timeout + 10)
             except asyncio.TimeoutError as exc:
                 raise TransportError("AirPlay discovery/control connection timed out before streaming") from exc
+            if output_state is not None:
+                # Set the sender's context before stream_file initializes RAOP.
+                # Otherwise pyatv can replace the user's level with its 33% default.
+                await self._connection.audio.set_volume(output_state["volume_percent"])
+                self._event("sender_volume_selected", volume_percent=output_state["volume_percent"],
+                            policy="use receiver level read immediately before playback")
             self._event("stream_task_started", note="pyatv handles decoding and receiver buffering")
             self._stream_task = asyncio.create_task(self._connection.stream.stream_file(stream_url))
             self._stream_task.add_done_callback(self._completed)
@@ -403,6 +436,9 @@ class AirPlayTransport(Transport):
             stages.append(code.co_qualname)
             current = getattr(current, "cr_await", None) or getattr(current, "gi_yieldfrom", None)
         return stages
+
+    async def receiver_output_state(self):
+        return await self._state_reader() if self._state_reader is not None else None
 
     def check_failure(self) -> None:
         task = self._stream_task

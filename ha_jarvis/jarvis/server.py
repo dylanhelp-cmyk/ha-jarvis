@@ -76,12 +76,11 @@ class Stream:
         self.schedule_lag_ms = 0
         self.error = None
         self.expected_disconnect = False
-        self.duration = 0
+        self.duration = 30 if self.kind == "stop" else 1 + self.repetitions * 2.0 + 5
 
     async def blocks(self):
         self.started_at = time.monotonic()
         self.connected.set()
-        self.duration = 30 if self.kind == "stop" else 1 + self.repetitions * 2.0 + 5
         total = int(self.duration * RATE)
         pcm = np.zeros(total, dtype="<i2")
         for i in range(self.repetitions):
@@ -195,15 +194,25 @@ class Bench:
                       "Test playback interrupts the current source. Automatic music restoration is not in this bench."]}
         self.results.insert(0, result)
         del self.results[30:]
+        if self.config["route"] == "airplay":
+            result["warnings"].append("AirPlay baseline includes sender decoding and metadata prefetch; this is not a receiver-only buffering measurement.")
         try:
             self.test["phase"] = "synchronizing microphone"
-            await self.device.begin(result["id"], min(120000, (repetitions * 2 + 45) * 1000))
+            capture_margin = 65 if self.config["route"] == "airplay" else 45
+            await self.device.begin(result["id"], min(120000, (repetitions * 2 + capture_margin) * 1000))
             await asyncio.sleep(.4)
             if self.config["route"] == "http":
                 self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
                                                      verify_ssl=self.config["verify_tls"])
             elif self.config["route"] == "airplay":
-                self.transport = AirPlayTransport(device_host=self.config["wiim_host"])
+                async def read_wiim_state():
+                    reader = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
+                                                 verify_ssl=self.config["verify_tls"])
+                    try:
+                        return await reader.output_state()
+                    finally:
+                        await reader.close()
+                self.transport = AirPlayTransport(device_host=self.config["wiim_host"], state_reader=read_wiim_state)
             else:
                 if not self.slim:
                     raise ValueError(self.slim_error or "SlimProto server is not ready")
@@ -225,6 +234,7 @@ class Bench:
                 except asyncio.TimeoutError as exc:
                     raise ValueError("Speaker did not request the test stream within 12 seconds") from exc
             self.test["phase"] = "playing acoustic probes — remain quiet"
+            playback_delay_limit = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
             if kind == "stop":
                 await asyncio.sleep(5)
                 self.test["phase"] = "stopping playback"
@@ -237,8 +247,8 @@ class Bench:
                 await asyncio.sleep(5)
             else:
                 await asyncio.wait_for(self.stream.done.wait(), timeout=repetitions * 2 + 20)
-                self.test["phase"] = "listening for delayed speaker playback (up to 15 seconds)"
-                await asyncio.sleep(MAX_PLAYBACK_DELAY_SECONDS)
+                self.test["phase"] = f"listening for delayed speaker playback (up to {playback_delay_limit:g} seconds)"
+                await asyncio.sleep(playback_delay_limit)
             self.test["phase"] = "analysing microphone capture"
             await self.device.end()
             pcm, capture_start = self.device.recording()
@@ -256,7 +266,7 @@ class Bench:
                 # Each marker gets its own bounded search window, avoiding pairing
                 # unrelated microphone bursts with a different output trial.
                 search_start = max(0, int((emitted - capture_start - .1) * RATE))
-                search_end = min(len(pcm), int((emitted - capture_start + MAX_PLAYBACK_DELAY_SECONDS + len(probe) / RATE) * RATE))
+                search_end = min(len(pcm), int((emitted - capture_start + playback_delay_limit + len(probe) / RATE) * RATE))
                 detection = await asyncio.to_thread(detect_probe, pcm[search_start:search_end], probe)
                 trial = {"trial": i + 1, **detection, "latency_ms": None,
                          "search_duration_seconds": round(max(0, search_end - search_start) / RATE, 3),
@@ -282,7 +292,7 @@ class Bench:
                 raise ValueError(self.stream.error)
             result["status"] = "measured" if result["summary"]["valid_trials"] else "unavailable"
             if result["status"] == "unavailable":
-                result["warnings"].append("Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the 15-second search limit also cannot be measured.")
+                result["warnings"].append(f"Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the {playback_delay_limit:g}-second search limit also cannot be measured.")
         except asyncio.CancelledError:
             interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation", "phase": self.test.get("phase")})
             result["interruption"] = {**interruption, "elapsed_seconds": round(time.monotonic() - started, 3)}
@@ -317,6 +327,11 @@ class Bench:
                     await asyncio.wait_for(self.transport.stop(), timeout=8)
                 except Exception as exc:
                     result["warnings"].append("Player stop could not be confirmed: " + str(exc))
+                if self.config["route"] == "airplay":
+                    try:
+                        result["transport"]["receiver_after"] = await asyncio.wait_for(self.transport.receiver_output_state(), timeout=3)
+                    except Exception as exc:
+                        result["warnings"].append("WiiM output-state readback unavailable: " + (str(exc) or type(exc).__name__))
                 if self.transport is not self.slim:
                     with suppress(Exception):
                         await self.transport.close()
@@ -495,19 +510,24 @@ def create_audio(bench):
         content_type = "audio/wav" if bench.config["codec"] == "wav" else "audio/flac"
         if raw_pcm:
             content_type = f"audio/pcm;rate={RATE};bitrate=16;channels=1"
+        headers = {"Content-Type": content_type, "Cache-Control": "no-store"}
+        finite_wav = bench.config["route"] == "airplay" and bench.config["codec"] == "wav"
+        data_bytes = int(active.duration * RATE) * 2
+        if finite_wav:
+            headers["Content-Length"] = str(44 + data_bytes)
         if request.method == "HEAD":
-            return web.Response(headers={"Content-Type": content_type, "Cache-Control": "no-store"})
+            return web.Response(headers=headers)
         if active.consumed:
             raise web.HTTPGone(text="A measurement stream cannot be replayed")
         active.consumed = True
-        response = web.StreamResponse(headers={"Content-Type": content_type, "Cache-Control": "no-store"})
+        response = web.StreamResponse(headers=headers)
         await response.prepare(request)
         process = None
         encoder_task = None
         try:
             if bench.config["codec"] == "wav":
                 if not raw_pcm:
-                    await response.write(wav_header())
+                    await response.write(wav_header(data_bytes=data_bytes if finite_wav else None))
                 async for chunk in active.blocks(): await response.write(chunk)
             else:
                 process = await asyncio.create_subprocess_exec("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "pipe:0", "-c:a", "flac", "-compression_level", "0", "-flush_packets", "1", "-f", "flac", "pipe:1", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)

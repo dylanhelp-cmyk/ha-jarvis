@@ -1,20 +1,20 @@
-# Install and update — App 0.1.6 / firmware 0.1.3
+# Install and update — App 0.1.7 / firmware 0.1.3
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**App 0.1.6:** pins the compatible SRP dependency to fix the reproduced AirPlay authentication TypeError. Update the App only; keep **firmware 0.1.3**. Run one **AirPlay / WAV** latency test at comfortable volume and export diagnostics. Receiver playback and latency still need this test. The SlimProto PCM format correction remains included. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
+**App 0.1.7:** fixes silent AirPlay decoding with finite WAV lengths and uses your current WiiM volume rather than the sender's default. Update the App only; keep **firmware 0.1.3**. Set a comfortable WiiM volume yourself, run one **AirPlay / WAV** latency test, allow up to **60 seconds**, then export diagnostics. Confirm whether tones are audible and volume stays at your chosen level. This baseline includes known sender metadata preloading, so startup may be long and its latency is not receiver-only buffering. The SlimProto PCM correction remains included. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.6** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.7** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.
 
 Native control uses HTTPS with certificate verification enabled. If the receiver reports a self-signed certificate error, the advanced setting lets you explicitly disable verification for this configured LAN receiver. It is never disabled automatically.
 
-The App does not adjust amplifier volume. Test signals use a modest digital level, but set a comfortable listening volume yourself. This bench interrupts the active speaker source and does **not** restore music automatically yet.
+Set a comfortable amplifier volume yourself; test signals use a modest digital level. For AirPlay, the App reads the WiiM's current level and supplies that same level to the sender, avoiding its default volume change. It never guesses a level or unmutes the receiver. This bench interrupts the active speaker source and does **not** restore music automatically yet.
 
 ## Prepare Voice PE in ESPHome Builder
 

@@ -45,11 +45,13 @@ def make_probe(seed: int = 0) -> np.ndarray:
     return (np.concatenate(parts) * 32767).astype("<i2")
 
 
-def wav_header(rate: int = RATE) -> bytes:
+def wav_header(rate: int = RATE, data_bytes: int | None = None) -> bytes:
     # Streaming WAV uses a conventional unknown/very large data length. Some
     # receivers reject this framing; that is a capability failure, not success.
-    return struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 0xFFFFFFFF, b"WAVE",
-                       b"fmt ", 16, 1, 1, rate, rate * 2, 2, 16, b"data", 0xFFFFFFFF)
+    if data_bytes is not None and (data_bytes < 0 or data_bytes % 2 or data_bytes > 0xFFFFFFFF - 36):
+        raise ValueError("Invalid mono PCM16 WAV length")
+    return struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 0xFFFFFFFF if data_bytes is None else data_bytes + 36, b"WAVE",
+                       b"fmt ", 16, 1, 1, rate, rate * 2, 2, 16, b"data", 0xFFFFFFFF if data_bytes is None else data_bytes)
 
 
 def _features(pcm: np.ndarray) -> np.ndarray:

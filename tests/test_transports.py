@@ -5,7 +5,7 @@ import struct
 import unittest
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import AsyncMock, create_autospec
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 from jarvis.transports import AirPlayTransport, NativeHTTPTransport, SlimProtoTransport, TransportError
 
@@ -106,6 +106,16 @@ class NativeHTTPTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(self.commands[-1], "setPlayerCmd:stop")
         self.assertFalse(self.adapter.active)
+
+    async def test_output_state_is_read_only_and_validated(self):
+        self.body = b'{"vol":"47","mute":"0","mode":"1","status":"stop"}'
+        state = await self.adapter.output_state()
+        self.assertEqual(state['volume_percent'], 47)
+        self.assertFalse(state['muted'])
+        self.assertEqual(self.commands, ['getPlayerStatus'])
+        self.body = b'{"vol":"NaN","mute":"0"}'
+        with self.assertRaisesRegex(TransportError, 'valid volume'):
+            await self.adapter.output_state()
 
     async def test_unsupported_codec_does_not_send_a_command(self):
         with self.assertRaisesRegex(TransportError, "Unsupported"):
@@ -269,6 +279,33 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
         await self.adapter.stop()
         self.connection.remote_control.stop.assert_awaited_once()
         self.assertFalse(self.adapter.active)
+
+    async def test_airplay_context_uses_receiver_volume_instead_of_default(self):
+        from pyatv.protocols.raop import RaopAudio
+        from pyatv.protocols.raop.protocols import StreamContext
+        context = StreamContext()
+        audio = RaopAudio(SimpleNamespace(context=context, stream_client=None), Mock())
+        self.connection.audio = audio
+        self.adapter._state_reader = AsyncMock(return_value={'volume_percent':47, 'muted':False})
+        self.assertEqual(audio.volume, 33)  # actual library default before preparation
+        await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.assertAlmostEqual(audio.volume, 47)
+        self.assertTrue(audio.has_changed_volume)
+        self.adapter._state_reader.assert_awaited_once()
+
+    async def test_muted_receiver_is_not_unmuted_or_streamed(self):
+        self.connection.audio = SimpleNamespace(set_volume=AsyncMock())
+        self.adapter._state_reader = AsyncMock(return_value={'volume_percent':47, 'muted':True})
+        with self.assertRaisesRegex(TransportError, 'muted'):
+            await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.connection.audio.set_volume.assert_not_awaited()
+        self.connection.stream.stream_file.assert_not_awaited()
+
+    async def test_unreadable_volume_never_falls_back_to_library_default(self):
+        self.adapter._state_reader = AsyncMock(side_effect=TransportError('cannot read volume'))
+        with self.assertRaisesRegex(TransportError, 'cannot read volume'):
+            await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.connection.stream.stream_file.assert_not_awaited()
 
     async def test_failed_stream_remains_visible(self):
         self.connection.stream.stream_file.side_effect = RuntimeError("decoder rejected source")

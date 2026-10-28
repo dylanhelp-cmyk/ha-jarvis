@@ -1,3 +1,10 @@
+# 0.1.7
+
+- Fix reproduced silent AirPlay decoding by serving this finite test's actual WAV lengths and Content-Length. HTTP/WAV and SlimProto framing are unchanged.
+- Read the current WiiM volume/mute before AirPlay, set the sender context to that same level instead of pyatv's 33% default, and export before/after output state. Muted/zero/unknown volume fails clearly without guessing or unmuting.
+- The current pyatv URL source preloads during metadata parsing; the baseline includes that software delay. Allow a 30-second acoustic search and label this limitation; do not treat its result as receiver-only latency.
+- App-only update; keep firmware 0.1.3. Set your comfortable WiiM level yourself, run one AirPlay/WAV test, allow up to 60 seconds, and export diagnostics. Confirm whether tones are audible and volume remains at your chosen level.
+
 # 0.1.6
 
 - Pin srptools 1.0.1 for pyatv 0.18.0: srptools 2.0.0 makes the private-key argument keyword-only, causing the reported SRPClientSession TypeError before audio fetch.
