@@ -266,7 +266,8 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
         self.connection = SimpleNamespace(stream=SimpleNamespace(stream_file=AsyncMock(side_effect=stream)),
                                           remote_control=SimpleNamespace(stop=AsyncMock(side_effect=stop)),
                                           close=lambda: set())
-        self.adapter = AirPlayTransport("127.0.0.1", connection=self.connection, stop_timeout=0.05)
+        self.adapter = AirPlayTransport("127.0.0.1", connection=self.connection, stop_timeout=0.05,
+            streamer=lambda connection, url, telemetry, codec: connection.stream.stream_file(url))
 
     async def asyncTearDown(self):
         await self.adapter.close()

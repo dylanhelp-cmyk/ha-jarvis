@@ -144,6 +144,8 @@ function renderResults(data) {
     }
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));
+    const sender = result.transport?.sender;
+    if (sender) card.append(node('p', 'result-meta', `AirPlay sender software: source setup ${milliseconds(sender.source_open_ms)} · first PCM supplied ${milliseconds(sender.first_pcm_handed_to_raop_ms)} after sender start · longest PCM read wait ${milliseconds(sender.max_pcm_read_wait_ms)}. These are not audible-output measurements.`));
     const estimates = (result.trials || []).map((trial) => trial.clock_uncertainty_ms).filter((value) => typeof value === 'number' && Number.isFinite(value));
     if (estimates.length) card.append(node('p', 'result-meta', `Clock/detector estimate: ±${Math.max(...estimates).toFixed(1)} ms. Microphone pipeline delay is uncalibrated; this is not a total uncertainty bound.`));
     if (result.kind === 'stability') {

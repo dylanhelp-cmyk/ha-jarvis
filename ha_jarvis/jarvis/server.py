@@ -195,7 +195,7 @@ class Bench:
         self.results.insert(0, result)
         del self.results[30:]
         if self.config["route"] == "airplay":
-            result["warnings"].append("AirPlay baseline includes sender decoding and metadata prefetch; this is not a receiver-only buffering measurement.")
+            result["warnings"].append("AirPlay sender timings are software milestones; only microphone detections measure audible output. Microphone pipeline delay remains uncalibrated.")
         try:
             self.test["phase"] = "synchronizing microphone"
             capture_margin = 65 if self.config["route"] == "airplay" else 45
@@ -335,6 +335,8 @@ class Bench:
                 if self.transport is not self.slim:
                     with suppress(Exception):
                         await self.transport.close()
+                if self.config["route"] == "airplay":
+                    result["transport"]["sender"] = self.transport.snapshot().get("sender")
                 self.transport = None
             if self.stream:
                 self.stream.stop_requested.set()

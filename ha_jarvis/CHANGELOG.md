@@ -1,3 +1,10 @@
+# 0.1.8
+
+- Replace AirPlay's generated-audio handoff with a bounded streaming source that skips tag scanning. Decode/resample in worker threads so network and microphone handling stay responsive.
+- Preserve pyatv's session authentication, encryption, volume handling and teardown. Keep HTTP marker timestamps tied to actual paced production; do not cache a completed recording or infer audible latency from software readiness.
+- Export source setup, first PCM handoff and decoder read-wait timings separately from acoustic measurements. Retain WiiM volume preservation and firmware 0.1.3.
+- App-only update. Run one AirPlay/WAV playback latency test at comfortable volume, allow completion, and export diagnostics. Speaker latency and stable playback still require your measurement.
+
 # 0.1.7
 
 - Fix reproduced silent AirPlay decoding by serving this finite test's actual WAV lengths and Content-Length. HTTP/WAV and SlimProto framing are unchanged.

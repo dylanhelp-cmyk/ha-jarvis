@@ -341,15 +341,16 @@ class SlimProtoTransport(Transport):
 class AirPlayTransport(Transport):
     """Real RAOP baseline via pyatv, retaining the connection for same-session stop.
 
-    pyatv may buffer/decode/resample HTTP audio. This adapter makes no low-latency
-    or progressive-decoder guarantee. An unpaired receiver can require setup.
+    Generated HTTP audio uses a progressive decoder with metadata disabled.
+    Receiver buffering remains independent. An unpaired receiver can require setup.
     """
 
     name = "airplay"
 
     def __init__(self, device_host: str, *,
                  connection: Any = None, scan_timeout: float = 5.0,
-                 stop_timeout: float = 5.0, state_reader: Callable[..., Any] | None = None) -> None:
+                 stop_timeout: float = 5.0, state_reader: Callable[..., Any] | None = None,
+                 streamer: Callable[..., Any] | None = None) -> None:
         super().__init__()
         self.device_host = device_host
         self.scan_timeout = scan_timeout
@@ -357,6 +358,14 @@ class AirPlayTransport(Transport):
         self._connection = connection
         self._stream_task: asyncio.Task | None = None
         self._state_reader = state_reader
+        self._streamer = streamer
+        self._sender: dict[str, Any] | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        result = super().snapshot()
+        result['sender'] = ({key: value for key, value in self._sender.items()
+                             if not key.startswith('_')} if self._sender else None)
+        return result
 
     @staticmethod
     def available() -> bool:
@@ -408,8 +417,12 @@ class AirPlayTransport(Transport):
                 await self._connection.audio.set_volume(output_state["volume_percent"])
                 self._event("sender_volume_selected", volume_percent=output_state["volume_percent"],
                             policy="use receiver level read immediately before playback")
-            self._event("stream_task_started", note="pyatv handles decoding and receiver buffering")
-            self._stream_task = asyncio.create_task(self._connection.stream.stream_file(stream_url))
+            from .airplay_source import progressive_stream_file, sender_telemetry
+            self._sender = sender_telemetry()
+            self._event("stream_task_started", note="Progressive HTTP decoder; handoff timing is software only")
+            sender = self._streamer or progressive_stream_file
+            self._stream_task = asyncio.create_task(sender(
+                self._connection, stream_url, self._sender, _codec(config)))
             self._stream_task.add_done_callback(self._completed)
             self.active = True
             # Surface synchronous setup errors without waiting for the whole stream.
@@ -474,6 +487,8 @@ class AirPlayTransport(Transport):
     def _completed(self, task: asyncio.Task) -> None:
         self.active = False
         if task.cancelled():
+            if self._sender is not None:
+                self._sender['cancelled'] = True
             self._event("stream_task_cancelled")
             return
         error = task.exception()
