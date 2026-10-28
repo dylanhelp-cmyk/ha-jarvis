@@ -23,7 +23,7 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
-from .audio import RATE, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
+from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, capture_health, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
 from .device import Device
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -226,10 +226,20 @@ class Bench:
                 await asyncio.sleep(5)
             else:
                 await asyncio.wait_for(self.stream.done.wait(), timeout=repetitions * 2 + 20)
-                await asyncio.sleep(3)
+                self.test["phase"] = "listening for delayed speaker playback (up to 15 seconds)"
+                await asyncio.sleep(MAX_PLAYBACK_DELAY_SECONDS)
             self.test["phase"] = "analysing microphone capture"
             await self.device.end()
             pcm, capture_start = self.device.recording()
+            result["capture"] = capture_health(pcm)
+            frames = self.device.frames
+            result["capture"]["frames"] = len(frames)
+            if len(frames) > 1:
+                span_ms = (frames[-1].capture_ms - frames[0].capture_ms) % (2 ** 32)
+                sample_span_ms = (frames[-1].first_sample - frames[0].first_sample) * 1000 / RATE
+                result["capture"]["sample_clock_span_ms"] = round(sample_span_ms, 1)
+                result["capture"]["timestamp_span_ms"] = span_ms
+                result["capture"]["span_difference_ms"] = round(span_ms - sample_span_ms, 1)
             if kind == "stop":
                 detection = await asyncio.to_thread(detect_stop, pcm, capture_start, result["stop_command_at"])
                 result["trials"].append({"trial": 1, **detection,
@@ -241,9 +251,10 @@ class Bench:
                 # Each marker gets its own bounded search window, avoiding pairing
                 # unrelated microphone bursts with a different output trial.
                 search_start = max(0, int((emitted - capture_start - .1) * RATE))
-                search_end = min(len(pcm), int((emitted - capture_start + 4.5) * RATE))
+                search_end = min(len(pcm), int((emitted - capture_start + MAX_PLAYBACK_DELAY_SECONDS + len(probe) / RATE) * RATE))
                 detection = await asyncio.to_thread(detect_probe, pcm[search_start:search_end], probe)
                 trial = {"trial": i + 1, **detection, "latency_ms": None,
+                         "search_duration_seconds": round(max(0, search_end - search_start) / RATE, 3),
                          "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 4, 2)}
                 if detection["status"] == "detected":
                     audible = capture_start + search_start / RATE + detection["offset_seconds"]
@@ -265,6 +276,8 @@ class Bench:
             if self.stream.error:
                 raise ValueError(self.stream.error)
             result["status"] = "measured" if result["summary"]["valid_trials"] else "unavailable"
+            if result["status"] == "unavailable":
+                result["warnings"].append("Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the 15-second search limit also cannot be measured.")
         except asyncio.CancelledError:
             result["status"] = "cancelled"
             raise

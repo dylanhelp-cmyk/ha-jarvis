@@ -117,7 +117,7 @@ function renderResults(data) {
   results.forEach((result) => {
     const card = node('article', 'result-card');
     const top = node('div', 'result-top');
-    top.append(node('h3', '', labels[result.kind] || result.kind || 'Audio test'), node('span', 'tag', result.status || 'Unknown'));
+    top.append(node('h3', '', labels[result.kind] || result.kind || 'Audio test'), node('span', 'tag', result.status === 'unavailable' ? 'Completed · measurement unavailable' : result.status || 'Unknown'));
     card.append(top);
     const when = new Date(result.started_at);
     const date = Number.isNaN(when.getTime()) ? 'Time unavailable' : when.toLocaleString();
@@ -128,6 +128,12 @@ function renderResults(data) {
       const metric = node('div'); metric.append(node('span', 'metric-label', label), node('span', 'metric-value', value)); metrics.append(metric);
     });
     card.append(metrics);
+    if (result.capture) {
+      const health = result.capture;
+      const level = (value) => typeof value === 'number' ? `${value.toFixed(1)} dBFS` : 'digital silence';
+      card.append(node('p', 'result-meta', `Microphone: ${health.duration_seconds}s captured · RMS ${level(health.rms_dbfs)} · peak ${level(health.peak_dbfs)} · ${((health.clipped_fraction || 0) * 100).toFixed(2)}% clipped.`));
+      if (health.signal === 'digital_silence') card.append(node('p', 'result-warning', 'Microphone frames contain only zeros. Increasing speaker volume cannot resolve digital silence.'));
+    }
     if (result.error) card.append(node('p', 'result-warning', `Test error: ${result.error}`));
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));

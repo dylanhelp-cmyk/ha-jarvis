@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from jarvis.audio import RATE, FRAME, decode_frame, make_probe, detect_probe, detect_stop, detect_stability, summarize
+from jarvis.audio import RATE, FRAME, MAX_PLAYBACK_DELAY_SECONDS, capture_health, decode_frame, make_probe, detect_probe, detect_stop, detect_stability, summarize
 
 
 class AudioTests(unittest.TestCase):
@@ -29,6 +29,26 @@ class AudioTests(unittest.TestCase):
         result = detect_probe(np.zeros(RATE * 2, dtype="<i2"), make_probe())
         self.assertEqual(result["status"], "unavailable")
         self.assertNotIn("offset_seconds", result)
+
+    def test_capture_health_distinguishes_silence_low_level_and_clipping(self):
+        silent = capture_health(np.zeros(RATE, dtype="<i2"))
+        self.assertEqual(silent["signal"], "digital_silence")
+        self.assertIsNone(silent["rms_dbfs"])
+        quiet = capture_health(np.full(RATE, 10, dtype="<i2"))
+        self.assertEqual(quiet["signal"], "nonzero")
+        self.assertLess(quiet["rms_dbfs"], -60)
+        clipped = capture_health(np.full(RATE, -32768, dtype="<i2"))
+        self.assertEqual(clipped["clipped_fraction"], 1)
+        self.assertEqual(clipped["peak_dbfs"], 0)
+
+    def test_heavily_buffered_probe_detected_without_accepting_noise(self):
+        probe = make_probe(513)
+        captured = np.random.default_rng(7).normal(0, 5, RATE * 17).astype("<i2")
+        self.assertEqual(detect_probe(captured, probe)["status"], "unavailable")
+        captured[RATE * 12:RATE * 12 + len(probe)] += probe // 2
+        found = detect_probe(captured, probe)
+        self.assertEqual(found["status"], "detected", found)
+        self.assertAlmostEqual(found["offset_seconds"], 12, delta=.012)
 
     def test_repeated_ambiguous_probe_is_rejected(self):
         probe = make_probe()
@@ -62,14 +82,14 @@ class AudioTests(unittest.TestCase):
 
     def test_overlapping_trial_windows_keep_unique_probe_pairings(self):
         probes = [make_probe(i + 513) for i in range(3)]
-        for delay in (.1, .5, 1, 2, 3):
-            captured = np.zeros(RATE * 12, dtype="<i2")
+        for delay in (.1, .5, 1, 2, 3, 6, 12, 15):
+            captured = np.zeros(RATE * 24, dtype="<i2")
             for i, probe in enumerate(probes):
                 offset = int((.1 + i * 2 + delay) * RATE)
                 captured[offset:offset + len(probe)] = probe
             for i, probe in enumerate(probes):
                 start = max(0, int((.1 + i * 2 - .1) * RATE))
-                end = int((.1 + i * 2 + 4.5) * RATE)
+                end = int((.1 + i * 2 + MAX_PLAYBACK_DELAY_SECONDS + len(probe) / RATE) * RATE)
                 match = detect_probe(captured[start:end], probe)
                 self.assertEqual(match["status"], "detected", (delay, i, match))
                 self.assertAlmostEqual(start / RATE + match["offset_seconds"] - (.1 + i * 2), delay, delta=.012)

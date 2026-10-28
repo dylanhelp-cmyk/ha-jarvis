@@ -1,13 +1,13 @@
-# Install and update — 0.1.1
+# Install and update — 0.1.2
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**Firmware 0.1.2:** addresses the startup/reconnect watchdog path. The App remains 0.1.1 and does not need updating for this correction. Rebuild your existing Builder entry after its five-minute Git cache expires; confirm `jarvis.voice_pe_testbench version 0.1.2` before flashing. If the device cannot stay online, use USB. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
+**App 0.1.2:** extends delayed-playback measurements and adds microphone health diagnostics. Update the App; keep working **firmware 0.1.2** (no reflash for this App update). Firmware 0.1.2 addresses the earlier startup/reconnect watchdog path. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.1** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.2** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.
@@ -39,7 +39,7 @@ Recovery: restore your saved configuration through Builder/USB, or use the [offi
 ## Run the first test
 
 1. Leave Voice PE in its normal listening position. Keep the room quiet and the WiiM idle. Confirm volume and speaker readiness in the interface.
-2. Start **Playback latency**. Three different local probes play. Repeat the batch once from idle and once with the stream/path warmed. Do not change route settings mid-batch.
+2. Start **Playback latency**. Three different local probes play. The bench listens for a further 15 seconds after streaming to detect buffered playback; a batch takes about 30–45 seconds. Repeat the batch once from idle and once with the stream/path warmed. Do not change route settings mid-batch. If the WiiM rejects HTTPS verification with a self-signed certificate error, disable **Verify WiiM HTTPS certificate** for that LAN receiver and save.
 3. Read the **emitted-marker → microphone-detected sound** measurements separately from the first **control request → sound** startup estimate, which includes a 100 ms probe lead-in. These are playback-path measurements, not assistant end-of-speech latency.
 4. Try **Stop response**, one trial per run. It issues a real stop while a 30-second pilot is still available, then listens for acoustic silence. Use **Stream stability** for a continuous pilot and repeated probes. Noise can invalidate acoustic measurements; missing signals are unavailable, never zero.
 5. Export diagnostics and share the result. Export contains numeric results and redacts configured addresses/tokens; no microphone recording is retained.

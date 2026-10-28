@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 RATE = 16000
+MAX_PLAYBACK_DELAY_SECONDS = 15.0
 FRAME = struct.Struct("<4sBBHIQI")
 
 
@@ -62,6 +63,22 @@ def _features(pcm: np.ndarray) -> np.ndarray:
     return np.stack([np.sqrt(power[:, a:b].sum(axis=1)) for a, b in zip(edges[:-1], edges[1:])], axis=1)
 
 
+def capture_health(pcm: np.ndarray) -> dict:
+    """Aggregate signal health only; no recording or time-resolved envelope."""
+    samples = pcm.astype(np.float64)
+    if not len(samples):
+        return {"samples": 0, "duration_seconds": 0, "signal": "empty"}
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    peak = float(np.max(np.abs(samples)))
+    def dbfs(value):
+        return round(20 * math.log10(value / 32768), 1) if value else None
+    return {"samples": len(samples), "duration_seconds": round(len(samples) / RATE, 3),
+            "rms_dbfs": dbfs(rms), "peak_dbfs": dbfs(peak),
+            "zero_fraction": round(float(np.mean(samples == 0)), 4),
+            "clipped_fraction": round(float(np.mean(np.abs(samples) >= 32760)), 6),
+            "signal": "digital_silence" if peak == 0 else "nonzero"}
+
+
 def detect_probe(captured: np.ndarray, probe: np.ndarray) -> dict:
     """Spectral normalized matching tolerates independent audio clock phase.
 
@@ -90,7 +107,8 @@ def detect_probe(captured: np.ndarray, probe: np.ndarray) -> dict:
     alternatives[max(0, peak - exclusion):peak + exclusion + 1] = 0
     competing = float(np.max(alternatives))
     if confidence < .65 or competing > confidence - .045:
-        return {"status": "unavailable", "reason": "Absent or ambiguous acoustic probe", "confidence": confidence}
+        return {"status": "unavailable", "reason": "Probe match too weak" if confidence < .65 else "Multiple competing probe matches",
+                "confidence": confidence, "competing_confidence": round(competing, 4)}
     return {"status": "detected", "offset_seconds": peak * 64 / RATE, "confidence": confidence,
             "resolution_ms": 4.0, "method": "normalized spectral sequence match"}
 
