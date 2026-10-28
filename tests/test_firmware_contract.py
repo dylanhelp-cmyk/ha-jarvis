@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -39,7 +40,9 @@ class FirmwareContractTests(unittest.TestCase):
 
     def test_actual_cpp_encoder_matches_wire_struct(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
-        if compiler is None:
+        command = [compiler] if compiler else ([sys.executable, "-m", "ziglang", "c++"]
+                   if importlib.util.find_spec("ziglang") else None)
+        if command is None:
             self.skipTest("Host C++ compiler unavailable; firmware compile also checks the ABI with static_assert")
         source = r'''
 #include <cstdio>
@@ -54,7 +57,7 @@ int main() {
             tmp = Path(folder)
             cpp, exe = tmp / "contract.cpp", tmp / "contract.exe"
             cpp.write_text(source)
-            subprocess.run([compiler, "-std=c++17", "-I", str(FIRMWARE / "components/jarvis_stream"), str(cpp), "-o", str(exe)], check=True, capture_output=True)
+            subprocess.run([*command, "-std=c++17", "-I", str(FIRMWARE / "components/jarvis_stream"), str(cpp), "-o", str(exe)], check=True, capture_output=True, timeout=180)
             actual = bytes.fromhex(subprocess.check_output([str(exe)], text=True))
         self.assertEqual(actual, struct.pack("<4sBBHIQI", b"JPCM", 1, 1, 320, 0x12345678, 0x123456789abcdef0, 0xfedcba98))
 

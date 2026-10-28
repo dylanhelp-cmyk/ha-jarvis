@@ -1,6 +1,9 @@
 #include "jarvis_stream.h"
+#include "fault_diagnostics.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "esphome/components/json/json_util.h"
 #include "esphome/components/network/util.h"
@@ -12,6 +15,8 @@ static const char *const TAG = "jarvis_stream";
 uint32_t JarvisStream::now_ms_() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 void JarvisStream::setup() {
+  std::snprintf(boot_id_, sizeof(boot_id_), "%08lx%08lx", static_cast<unsigned long>(esp_random()),
+                static_cast<unsigned long>(esp_random()));
   audio_queue_ = xQueueCreate(16, sizeof(AudioPacket));
   control_queue_ = xQueueCreate(8, sizeof(Control));
   outgoing_queue_ = xQueueCreate(8, sizeof(Outgoing));
@@ -69,10 +74,12 @@ void JarvisStream::network_worker_() {
         lifecycle.started(esp_websocket_client_start(client_) == ESP_OK, now);
         break;
       case NetworkAction::STOP:
+        intentional_stop_ = true;
         active_ = false; authenticated_ = false; connected_ = false;
         ++epoch_;
         // This API may wait indefinitely. Only this worker may call it; never the ESPHome loop.
         esp_websocket_client_stop(client_);
+        intentional_stop_ = false;
         worker_reset_ = false;  // FINISH during intentional stop is already accounted for.
         lifecycle.stopped(now_ms_());
         break;
@@ -93,8 +100,11 @@ void JarvisStream::network_worker_() {
       for (int i = 0; i < 8 && xQueueReceive(outgoing_queue_, &outgoing, 0) == pdTRUE; ++i) {
         if (outgoing.epoch != epoch_) continue;
         if (outgoing.capture_generation && (!active_ || outgoing.capture_generation != generation_)) continue;
+        const uint32_t sending_connection = connection_generation_.load();
+        const uint32_t sending_capture = outgoing.capture_generation ? outgoing.capture_generation : generation_.load();
         const int sent = esp_websocket_client_send_text(client_, outgoing.text, outgoing.length, pdMS_TO_TICKS(100));
         if (sent != outgoing.length) {
+          record_fault_at_(FaultReason::CONTROL_SEND_FAILED, sending_connection, sending_capture);
           ESP_LOGW(TAG, "Resetting transport: control send failed (sent=%d expected=%u)", sent,
                    static_cast<unsigned>(outgoing.length));
           request_transport_reset_();
@@ -108,9 +118,11 @@ void JarvisStream::network_worker_() {
                            xQueueReceive(audio_queue_, &packet, 0) == pdTRUE; ++i) {
         if (packet.generation != generation_) continue;
         const size_t bytes = HEADER_BYTES + packet.samples * 2;
+        const uint32_t sending_connection = connection_generation_.load();
         const int sent = esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes,
                                                        pdMS_TO_TICKS(30));
         if (sent != static_cast<int>(bytes)) {
+          record_fault_at_(FaultReason::PCM_SEND_FAILED, sending_connection, packet.generation);
           ESP_LOGW(TAG, "Resetting transport: PCM send failed (sent=%d expected=%u)", sent,
                    static_cast<unsigned>(bytes));
           request_transport_reset_();
@@ -128,6 +140,7 @@ void JarvisStream::websocket_event(void *arg, esp_event_base_t, int32_t event, v
 
 void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *data) {
   if (event == WEBSOCKET_EVENT_FINISH) {
+    if (!intentional_stop_ && !shutting_down_) record_fault_(FaultReason::WEBSOCKET_UNEXPECTED_FINISH);
     // Covers an unexpected library-task exit; worker reaps it and retries.
     worker_reset_ = true;
     return;
@@ -135,6 +148,7 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
   if (shutting_down_) return;
   Control control{};
   if (event == WEBSOCKET_EVENT_CONNECTED) {
+    ++connection_generation_;
     control.epoch = ++epoch_;
     connected_ = true;
     authenticated_ = false;
@@ -143,6 +157,11 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
     incoming_.clear();
     control.kind = 1;
   } else if (event == WEBSOCKET_EVENT_DISCONNECTED || event == WEBSOCKET_EVENT_CLOSED || event == WEBSOCKET_EVENT_ERROR) {
+    if (!intentional_stop_) {
+      record_fault_(event == WEBSOCKET_EVENT_ERROR ? FaultReason::WEBSOCKET_ERROR :
+                    event == WEBSOCKET_EVENT_CLOSED ? FaultReason::WEBSOCKET_CLOSED :
+                    FaultReason::WEBSOCKET_DISCONNECTED, data);
+    }
     connected_ = false;
     authenticated_ = false;
     active_ = false;  // privacy gate closes from the network task immediately
@@ -151,32 +170,44 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
     return;
   } else if (event == WEBSOCKET_EVENT_DATA) {
     // Only complete bounded text messages are control input. Handle transport chunking.
+    if (data == nullptr) { record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return; }
     if (data->op_code == 0x9 || data->op_code == 0xA) return;
     if (data->op_code != 0x1 || data->payload_len >= static_cast<int>(sizeof(control.text)) ||
-        data->payload_len < 0 || data->data_len < 0 || data->payload_offset < 0) {
+        data->payload_len < 0 || data->data_len < 0 || data->payload_offset < 0 ||
+        data->payload_offset > data->payload_len || data->data_len > data->payload_len - data->payload_offset ||
+        (data->data_len > 0 && data->data_ptr == nullptr)) {
+      record_fault_(FaultReason::MALFORMED_MESSAGE);
       request_transport_reset_(); return;
     }
     if (data->payload_offset == 0) incoming_.clear();
-    if (static_cast<size_t>(data->payload_offset) != incoming_.size()) { request_transport_reset_(); return; }
-    incoming_.append(data->data_ptr, data->data_len);
+    if (static_cast<size_t>(data->payload_offset) != incoming_.size()) {
+      record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return;
+    }
+    if (data->data_len > 0) incoming_.append(data->data_ptr, data->data_len);
     if (incoming_.size() != static_cast<size_t>(data->payload_len)) return;
-    if (!data->fin) { request_transport_reset_(); return; }
+    if (!data->fin) { record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return; }
     control.kind = 2;
     control.epoch = epoch_;
     std::memcpy(control.text, incoming_.data(), incoming_.size());
   } else return;
-  if (xQueueSend(control_queue_, &control, 0) != pdTRUE) request_transport_reset_();
+  if (xQueueSend(control_queue_, &control, 0) != pdTRUE) {
+    record_fault_(FaultReason::CONTROL_QUEUE_FULL); request_transport_reset_();
+  }
 }
 
 bool JarvisStream::send_json_(const std::string &text, bool capture_start) {
   if (!connected_ || shutting_down_) return false;
   Outgoing outgoing{};
-  if (text.size() >= sizeof(outgoing.text)) { request_transport_reset_(); return false; }
+  if (text.size() >= sizeof(outgoing.text)) {
+    record_fault_(FaultReason::OUTGOING_MESSAGE_TOO_LARGE); request_transport_reset_(); return false;
+  }
   outgoing.epoch = epoch_;
   outgoing.capture_generation = capture_start ? generation_.load() : 0;
   outgoing.length = text.size();
   std::memcpy(outgoing.text, text.data(), text.size());
-  if (xQueueSend(outgoing_queue_, &outgoing, 0) != pdTRUE) { request_transport_reset_(); return false; }
+  if (xQueueSend(outgoing_queue_, &outgoing, 0) != pdTRUE) {
+    record_fault_(FaultReason::OUTGOING_QUEUE_FULL); request_transport_reset_(); return false;
+  }
   return true;
 }
 
@@ -199,6 +230,42 @@ void JarvisStream::set_muted(bool muted) {
   if (muted) active_ = false;
 }
 
+void JarvisStream::record_fault_(FaultReason reason, const esp_websocket_event_data_t *data) {
+  record_fault_at_(reason, connection_generation_.load(), generation_.load(), data);
+}
+
+void JarvisStream::record_fault_at_(FaultReason reason, uint32_t connection_generation, uint32_t capture_generation,
+                                  const esp_websocket_event_data_t *data) {
+  FaultDetails details{};
+  if (data != nullptr) {
+    // Copy only numeric diagnostics supplied by the pinned client's event.
+    // In particular, do not read errno after a send or retain event payloads.
+    details.has_error = reason == FaultReason::WEBSOCKET_ERROR || reason == FaultReason::WEBSOCKET_DISCONNECTED;
+    if (details.has_error) {
+      const auto &error = data->error_handle;
+      details.ws_error = error.error_type;
+      details.http_status = error.esp_ws_handshake_status_code;
+      details.has_transport_error = error.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT;
+      if (details.has_transport_error) {
+        details.esp_tls_error = error.esp_tls_last_esp_err;
+        details.esp_tls_stack_error = error.esp_tls_stack_err;
+        details.esp_tls_flags = error.esp_tls_cert_verify_flags;
+        details.socket_errno = error.esp_transport_sock_errno;
+      }
+    }
+    details.ws_close_code = data->close_status_code;
+  }
+  const auto record = fault_history_.record(reason, now_ms_(), connection_generation, capture_generation, details);
+  ESP_LOGW(TAG, "Transport fault #%lu: %s (connection=%lu capture=%lu)",
+           static_cast<unsigned long>(record.sequence), FAULT_NAMES[static_cast<size_t>(reason)],
+           static_cast<unsigned long>(record.connection_generation), static_cast<unsigned long>(record.capture_generation));
+}
+
+void JarvisStream::diagnostics_json_(JsonObject out) {
+  const auto snapshot = fault_history_.snapshot();
+  write_fault_diagnostics(out, snapshot, boot_id_, now_ms_(), connection_generation_.load(), generation_.load());
+}
+
 void JarvisStream::send_state_() {
   send_json_(json::build_json([this](JsonObject root) {
     root["type"] = "status";
@@ -206,11 +273,14 @@ void JarvisStream::send_state_() {
     root["capturing"] = active_.load();
     root["raw_ready"] = hardware_ready_;
     root["xmos_version"] = xmos_version_;
+    diagnostics_json_(root["diagnostics"].to<JsonObject>());
   }));
 }
 
 void JarvisStream::command_(const char *text) {
-  json::parse_json(std::string(text), [this](JsonObject root) {
+  bool visited = false;
+  json::parse_json(std::string(text), [this, &visited](JsonObject root) {
+    visited = true;
     const std::string type = root["type"] | "";
     if (type == "hello_ok") { authenticated_ = true; send_state_(); return true; }
     if (!authenticated_) return false;
@@ -249,12 +319,15 @@ void JarvisStream::command_(const char *text) {
       active_ = true;
       if (!send_json_(json::build_json([&](JsonObject out) {
         out["type"] = "capture_started"; out["capture_id"] = id;
+        out["connection_generation"] = connection_generation_.load();
+        out["capture_generation"] = generation_.load();
         out["first_sample"] = 0; out["device_time_ms"] = now_ms_();
         out["timing"] = "estimated_callback_minus_block_duration";
       }), true)) stop_capture_("transport_error");
     }
     return true;
   });
+  if (!visited) record_fault_(FaultReason::MALFORMED_MESSAGE);
 }
 
 void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
@@ -313,6 +386,7 @@ void JarvisStream::loop() {
   const uint32_t now = now_ms_();
   const bool network_ready = network::is_connected();
   if (!network_ready && network_ready_.exchange(false)) {
+    record_fault_(FaultReason::WIFI_LOST);
     // A brief Wi-Fi flap may leave TCP apparently alive. Force a fresh hello on recovery.
     request_transport_reset_();
   } else if (network_ready) network_ready_ = true;
@@ -339,6 +413,7 @@ void JarvisStream::loop() {
         out["firmware"] = ESPHOME_PROJECT_VERSION; out["firmware_project"] = ESPHOME_PROJECT_NAME;
         out["xmos_version"] = xmos_version_;
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
+        diagnostics_json_(out["diagnostics"].to<JsonObject>());
       }));
     } else command_(control.text);
   }

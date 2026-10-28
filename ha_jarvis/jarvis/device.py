@@ -2,11 +2,54 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 import numpy as np
 
 from .audio import capture_health, decode_frame, RATE
+
+
+def parse_diagnostics(value):
+    """Only retain the bounded, credential-free firmware telemetry schema."""
+    if not isinstance(value, dict) or value.get("schema") != 1:
+        return None
+    boot = value.get("boot_id")
+    if not isinstance(boot, str) or not re.fullmatch(r"[0-9a-f]{16}", boot):
+        return None
+    def uint(number):
+        if type(number) is not int or not 0 <= number <= 0xFFFFFFFF:
+            raise ValueError("Invalid telemetry counter")
+        return number
+    def fault(record):
+        if record is None:
+            return None
+        if not isinstance(record, dict) or not isinstance(record.get("reason"), str) or not re.fullmatch(r"[a-z_]{1,64}", record["reason"]):
+            raise ValueError("Invalid telemetry reason")
+        parsed = {"reason": record["reason"]}
+        for key in ("sequence", "uptime_ms", "connection_generation", "capture_generation"):
+            parsed[key] = uint(record[key])
+        for key in ("ws_error", "esp_tls_error", "esp_tls_stack_error", "esp_tls_flags", "errno", "http_status", "ws_close_code"):
+            if key in record:
+                number = record[key]
+                if type(number) is not int or not -(2 ** 31) <= number <= 0xFFFFFFFF:
+                    raise ValueError("Invalid SDK error value")
+                parsed[key] = number
+        return parsed
+    try:
+        parsed = {"schema": 1, "boot_id": boot}
+        for key in ("uptime_ms", "connection_generation", "capture_generation", "fault_sequence"):
+            parsed[key] = uint(value[key])
+        counts = value.get("fault_counts", {})
+        if not isinstance(counts, dict) or len(counts) > 16:
+            return None
+        parsed["fault_counts"] = {key: uint(count) for key, count in counts.items()
+                                  if isinstance(key, str) and re.fullmatch(r"[a-z_]{1,64}", key)}
+        parsed["root_fault"] = fault(value.get("root_fault"))
+        parsed["last_fault"] = fault(value.get("last_fault"))
+        return parsed
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 class Device:
@@ -25,6 +68,7 @@ class Device:
         self.last_seq = None
         self.stop_info = None
         self.last_frame_at = None
+        self.capture_session = {}
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -43,6 +87,10 @@ class Device:
             raise ValueError("Device clock sync failed; acoustic timing is unavailable")
 
     def receive_json(self, message):
+        if "diagnostics" in message:
+            diagnostics = parse_diagnostics(message["diagnostics"])
+            if diagnostics is not None:
+                self.info["diagnostics"] = diagnostics
         kind = message.get("type")
         if kind == "clock_sync":
             sent = self.sync_pending.pop(str(message.get("id")), None)
@@ -53,6 +101,10 @@ class Device:
                     self.clock_rtt_ms = rtt
                     self.clock_offset_ms = (sent + received) / 2 - float(message["device_time_ms"])
         elif kind == "capture_started" and message.get("capture_id") == self.capture_id:
+            for key in ("connection_generation", "capture_generation"):
+                number = message.get(key)
+                if type(number) is int and 0 <= number <= 0xFFFFFFFF:
+                    self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
             for key in ("muted", "capturing", "raw_ready", "xmos_version"):
@@ -113,6 +165,8 @@ class Device:
         self.next_sample = self.last_seq = None
         self.stop_info = self.last_frame_at = None
         self.capture_id = capture_id
+        diagnostics = self.info.get("diagnostics", {})
+        self.capture_session = {key: diagnostics[key] for key in ("boot_id", "connection_generation") if key in diagnostics}
         self.started.clear()
         self.stopped.clear()
         await self.sync()

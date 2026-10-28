@@ -4,14 +4,21 @@
 #include "esphome/core/component.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/microphone/microphone_source.h"
+#include "esphome/components/json/json_util.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "network_lifecycle.h"
+#include "fault_history.h"
 #include "protocol.h"
 
 namespace esphome::jarvis_stream {
+struct FaultLock {
+  void enter() { portENTER_CRITICAL(&mux); }
+  void exit() { portEXIT_CRITICAL(&mux); }
+  portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+};
 class JarvisStream : public Component, public i2c::I2CDevice {
  public:
   void set_microphone(microphone::MicrophoneSource *mic) { mic_ = mic; }
@@ -29,7 +36,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
 
  protected:
   struct AudioPacket { uint32_t generation; uint16_t samples; uint8_t wire[HEADER_BYTES + MAX_SAMPLES * 2]; };
-  struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; char text[1024]; };
+  struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; char text[2048]; };
   struct Control { uint32_t epoch; uint8_t kind; char text[768]; };
   static void network_worker(void *arg);
   void network_worker_();
@@ -43,6 +50,10 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void stop_capture_(const char *reason);
   bool verify_hardware_();
   void send_state_();
+  void record_fault_(FaultReason reason, const esp_websocket_event_data_t *data = nullptr);
+  void record_fault_at_(FaultReason reason, uint32_t connection_generation, uint32_t capture_generation,
+                        const esp_websocket_event_data_t *data = nullptr);
+  void diagnostics_json_(JsonObject out);
   static uint32_t now_ms_();
   microphone::MicrophoneSource *mic_{nullptr};
   esp_websocket_client_handle_t client_{nullptr};
@@ -51,7 +62,11 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   std::string server_url_, device_id_, token_, capture_id_, incoming_;
   std::atomic<bool> active_{false}, authenticated_{false}, connected_{false}, muted_{true}, transport_fault_{false};
   std::atomic<bool> network_ready_{false}, worker_reset_{false}, shutting_down_{false};
+  std::atomic<bool> intentional_stop_{false};
   std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
+  std::atomic<uint32_t> connection_generation_{0};
+  FaultHistory<FaultLock> fault_history_;
+  char boot_id_[17]{};
   portMUX_TYPE capture_lock_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t sample_counter_{0};
   uint32_t sequence_{0}, deadline_{0};

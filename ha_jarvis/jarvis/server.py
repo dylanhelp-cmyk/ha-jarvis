@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import suppress
+from collections import deque
 from datetime import datetime, timezone
 import io
 import ipaddress
@@ -27,6 +28,7 @@ from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, make_probe, detect_probe, d
 from .device import Device
 
 ROOT = Path(__file__).resolve().parent.parent
+CONNECTION_TEST_SECONDS = 60
 DEFAULTS = {"wiim_host": "", "stream_base_url": "", "route": "http", "codec": "wav",
             "repetitions": 3, "verify_tls": True, "slimproto_player_id": "",
             "slimproto_port": 3483}
@@ -135,6 +137,40 @@ class Bench:
         self.transport = None
         self.slim = None
         self.slim_error = None
+        self.firmware_observations = deque(maxlen=20)
+
+    def observe_firmware(self):
+        diagnostics = self.device.info.get("diagnostics")
+        if diagnostics is None:
+            return
+        identity = tuple(diagnostics[key] for key in ("boot_id", "connection_generation", "fault_sequence"))
+        duplicate = False
+        if self.firmware_observations:
+            previous = self.firmware_observations[-1]["diagnostics"]
+            if identity == tuple(previous[key] for key in ("boot_id", "connection_generation", "fault_sequence")):
+                duplicate = True
+        observed = datetime.now(timezone.utc)
+        observation = {"observed_at": observed.isoformat(), "diagnostics": diagnostics}
+        if not duplicate:
+            self.firmware_observations.append(observation)
+        # A reconnect may describe a failed capture, but only an exact boot and
+        # generation match establishes that the root event belongs to that test.
+        for result in self.results:
+            if result.get("interruption", {}).get("reason") != "device_disconnected":
+                continue
+            if result.get("firmware_followup", {}).get("linked_root_fault") is not None:
+                continue
+            ended = datetime.fromisoformat(result["started_at"]).timestamp() + result.get("elapsed_seconds", 0)
+            if not 0 <= observed.timestamp() - ended <= 120:
+                continue
+            session = result.get("device_session", {})
+            same_boot = diagnostics["boot_id"] == session.get("boot_id")
+            root = diagnostics.get("root_fault")
+            linked = root if same_boot and root and all(root.get(key) == session.get(key)
+                for key in ("connection_generation", "capture_generation")) else None
+            result["firmware_followup"] = {**observation, "same_boot": same_boot if "boot_id" in session else None,
+                                          "linked_root_fault": linked}
+            break
 
     def save(self):
         temporary = self.path.with_suffix(".tmp")
@@ -194,12 +230,26 @@ class Bench:
                       "Test playback interrupts the current source. Automatic music restoration is not in this bench."]}
         self.results.insert(0, result)
         del self.results[30:]
-        if self.config["route"] == "airplay":
+        if kind == "connection":
+            result["warnings"] = ["Silent microphone connection test: no speaker playback or cloud calls. Only aggregate diagnostics are retained."]
+        elif self.config["route"] == "airplay":
             result["warnings"].append("AirPlay sender timings are software milestones; only microphone detections measure audible output. Microphone pipeline delay remains uncalibrated.")
         try:
             self.test["phase"] = "synchronizing microphone"
             capture_margin = 65 if self.config["route"] == "airplay" else 45
-            await self.device.begin(result["id"], min(120000, (repetitions * 2 + capture_margin) * 1000))
+            duration_ms = int((CONNECTION_TEST_SECONDS + 5) * 1000) if kind == "connection" else min(120000, (repetitions * 2 + capture_margin) * 1000)
+            await self.device.begin(result["id"], duration_ms)
+            result["device_session"] = dict(self.device.capture_session)
+            if kind == "connection":
+                self.test["phase"] = "checking microphone connection — no speaker playback"
+                await asyncio.sleep(CONNECTION_TEST_SECONDS)
+                await self.device.end()
+                if not self.device.frames:
+                    raise ValueError("No microphone frames received")
+                if self.device.errors:
+                    raise ValueError("; ".join(dict.fromkeys(self.device.errors)))
+                result.update(status="passed", metric="microphone_connection")
+                return
             await asyncio.sleep(.4)
             if self.config["route"] == "http":
                 self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
@@ -311,6 +361,7 @@ class Bench:
             # A late disconnect must not cancel the cleanup that stops playback
             # and clears the microphone recording after an earlier failure.
             self.test["finishing"] = True
+            result["device_session"] = dict(self.device.capture_session)
             result["capture_at_end"] = self.device.capture_diagnostics()
             result["elapsed_seconds"] = round(time.monotonic() - started, 3)
             result["ended_phase"] = result.get("interruption", {}).get("phase", self.test.get("phase"))
@@ -397,16 +448,16 @@ def create_ui(bench):
         data = await request.json()
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
-        if data.get("comfortable_volume_confirmed") is not True:
+        if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
         if not bench.device.snapshot()["connected"] or bench.device.info.get("muted"):
             raise ValueError("Pair and unmute Voice PE first")
         kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "stop", "stability") or type(repetitions) is not int or not 1 <= repetitions <= 20:
+        if kind not in ("latency", "stop", "stability", "connection") or type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Invalid test type or repetition count")
-        if not bench.config["wiim_host"] or not bench.config["stream_base_url"]:
+        if kind != "connection" and (not bench.config["wiim_host"] or not bench.config["stream_base_url"]):
             raise ValueError("Save the WiiM and speaker-reachable stream addresses first")
-        if bench.config["codec"] == "flac" and not shutil.which("ffmpeg"):
+        if kind != "connection" and bench.config["codec"] == "flac" and not shutil.which("ffmpeg"):
             raise ValueError("FLAC requires ffmpeg; it is included in the HA App image")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
@@ -423,7 +474,8 @@ def create_ui(bench):
         status["device"] = {k:v for k,v in status["device"].items() if k not in ("device_id", "ip", "mac")}
         status["transports"]["slimproto"]["clients"] = []
         body = {"version": __version__, "config": config, "status": status,
-                "results": bench.results, "audio_retained": False, "cloud_calls": 0}
+                "results": bench.results, "firmware_observations": list(bench.firmware_observations),
+                "audio_retained": False, "cloud_calls": 0}
         def redact_identifiers(value):
             if isinstance(value, dict):
                 return {key: "[redacted]" if key in ("player_id", "advertised_host", "device_id") else redact_identifiers(item)
@@ -483,12 +535,15 @@ def create_audio(bench):
             bench.device.ws = ws
             accepted = True
             bench.device.info = {k:message[k] for k in ("device_id", "sample_rate", "muted", "firmware", "xmos_version") if k in message}
+            bench.device.receive_json(message)
+            bench.observe_firmware()
             await ws.send_json({"type": "hello_ok", "protocol": 1})
             async for frame in ws:
                 if frame.type == WSMsgType.BINARY:
                     bench.device.receive_pcm(frame.data)
                 elif frame.type == WSMsgType.TEXT:
                     bench.device.receive_json(json.loads(frame.data))
+                    bench.observe_firmware()
                     if bench.device.info.get("muted") and bench.test["running"]:
                         asyncio.create_task(bench.cancel("device_muted"))
         except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:

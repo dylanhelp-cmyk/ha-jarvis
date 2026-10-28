@@ -9,7 +9,7 @@ esphome:
   min_version: 2026.10.0
   project:
     name: jarvis.voice_pe_testbench
-    version: "0.1.3"
+    version: "0.1.4"
   on_boot:
     priority: -100
     then:

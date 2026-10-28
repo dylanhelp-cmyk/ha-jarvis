@@ -1,3 +1,10 @@
+# 0.1.9
+
+- Export firmware 0.1.4's bounded RAM fault history after reconnect, including boot/connection/capture identities. Match a reported first fault to a failed test only when all identities agree; distinguish a changed boot ID without inventing a restart cause.
+- Add a user-started **Microphone connection** test: 60 seconds of silent capture, no speaker control or cloud calls, aggregate diagnostics only.
+- Update both App and firmware for this diagnostic revision. This does not change network timing or claim to fix the intermittent disconnect.
+- Run one Microphone connection test. If it disconnects, wait until Voice PE reconnects before exporting diagnostics. If it passes, export once; no repeated playback tests or log watching needed.
+
 # 0.1.8
 
 - Replace AirPlay's generated-audio handoff with a bounded streaming source that skips tag scanning. Decode/resample in worker threads so network and microphone handling stay responsive.

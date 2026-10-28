@@ -1,6 +1,7 @@
 """Explicit-test PCM transport for Home Assistant Voice PE."""
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import json
 from urllib.parse import urlsplit
 from esphome.components import esp32, i2c, microphone
 from esphome.const import CONF_ID, CONF_MICROPHONE
@@ -23,6 +24,14 @@ def raw_microphone(value):
         raise cv.Invalid("Acoustic PCM requires channel 0, 16-bit output and unity gain")
     return value
 
+def hello_identity_budget(value):
+    # Reserve the remainder of the fixed 2048-byte outgoing slot for bounded
+    # diagnostics and hello metadata, including worst-case numeric values.
+    identity = {key: value[key] for key in ("device_id", "token")}
+    if len(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 512:
+        raise cv.Invalid("JSON-encoded device_id and token must fit 512 bytes including field names")
+    return value
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema({
         cv.GenerateID(): cv.declare_id(JarvisStream),
@@ -31,6 +40,7 @@ CONFIG_SCHEMA = cv.All(
         cv.Required("device_id"): cv.All(cv.string_strict, cv.Length(min=1, max=64)),
         cv.Required("token"): cv.All(cv.string_strict, cv.Length(min=32, max=256)),
     }).extend(cv.COMPONENT_SCHEMA).extend(i2c.i2c_device_schema(0x42)),
+    hello_identity_budget,
     cv.only_with_framework("esp-idf"),
 )
 FINAL_VALIDATE_SCHEMA = cv.Schema({

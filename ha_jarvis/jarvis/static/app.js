@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability'};
+const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', connection: 'Microphone connection'};
 let status = null;
 let dirty = false;
 let configured = false;
@@ -33,20 +33,22 @@ function configValues() {
 }
 function updateReadiness() {
   const running = Boolean(status?.test?.running);
-  const readyText = kind === 'stop' ? 'Ready for one local stop trial.' : 'Ready for three local onset trials.';
+  const speakerTest = kind !== 'connection';
+  document.querySelector('.preflight').hidden = !speakerTest;
+  const readyText = !speakerTest ? 'Ready for a silent 60-second microphone test.' : kind === 'stop' ? 'Ready for one local stop trial.' : 'Ready for three local onset trials.';
   let reason = readyText;
   if (!status) reason = 'Waiting for the bench connection.';
   else if (running) reason = 'Test in progress. You can stop it at any time.';
   else if (!configLoaded) reason = 'Connection settings are unavailable. Refresh this page to retry.';
   else if (dirty) reason = 'Save your changed connection settings first.';
-  else if (!configured) reason = 'Save a WiiM address and reachable stream URL first.';
+  else if (speakerTest && !configured) reason = 'Save a WiiM address and reachable stream URL first.';
   else if (!status.device?.connected) reason = 'Connect the microphone device before testing.';
   else if (status.device?.muted) reason = 'Unmute the microphone device before testing.';
   else if (status.device?.raw_ready !== true) reason = 'Waiting for verified raw microphone / XMOS readiness.';
-  else if (!status.transports?.[$('route').value]?.available) reason = 'The selected transport is not available.';
-  else if ($('codec').value === 'flac' && status.codecs?.flac === false) reason = 'FLAC requires ffmpeg. Select WAV or install the supported encoder.';
-  else if ($('route').value === 'slimproto' && !(status.transports?.slimproto?.clients || []).some((player) => player.connected && (!$('slimproto-player').value || player.player_id === $('slimproto-player').value))) reason = 'Connect the selected WiiM player to this SlimProto service first.';
-  else if (!$('volume-confirmed').checked || !$('idle-confirmed').checked) reason = 'Confirm listening volume and speaker readiness above.';
+  else if (speakerTest && !status.transports?.[$('route').value]?.available) reason = 'The selected transport is not available.';
+  else if (speakerTest && $('codec').value === 'flac' && status.codecs?.flac === false) reason = 'FLAC requires ffmpeg. Select WAV or install the supported encoder.';
+  else if (speakerTest && $('route').value === 'slimproto' && !(status.transports?.slimproto?.clients || []).some((player) => player.connected && (!$('slimproto-player').value || player.player_id === $('slimproto-player').value))) reason = 'Connect the selected WiiM player to this SlimProto service first.';
+  else if (speakerTest && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm listening volume and speaker readiness above.';
   const ready = reason === readyText;
   $('readiness').textContent = reason;
   $('run-test').disabled = !ready || busy;
@@ -123,10 +125,11 @@ function renderResults(data) {
     card.append(top);
     const when = new Date(result.started_at);
     const date = Number.isNaN(when.getTime()) ? 'Time unavailable' : when.toLocaleString();
-    card.append(node('p', 'result-meta', `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${result.wire_format === 'pcm_s16le' ? 'PCM' : String(result.codec || '—').toUpperCase()}`));
+    card.append(node('p', 'result-meta', result.kind === 'connection' ? `${date} · Voice PE → Jarvis · no speaker playback` : `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${result.wire_format === 'pcm_s16le' ? 'PCM' : String(result.codec || '—').toUpperCase()}`));
     const metrics = node('div', 'metrics');
     const stopMetric = result.kind === 'stop';
-    [[stopMetric ? 'Median stop → silence' : 'Median onset latency', milliseconds(result.summary?.median_ms)], ['95th percentile', milliseconds(result.summary?.p95_ms)], ['Valid trials', `${result.summary?.valid_trials ?? 0} / ${result.trials?.length ?? 0}`]].forEach(([label, value]) => {
+    const values = result.kind === 'connection' ? [['Captured', `${result.capture?.duration_seconds ?? '—'} s`], ['Frames received', result.capture?.frames ?? '—'], ['Outcome', result.status || '—']] : [[stopMetric ? 'Median stop → silence' : 'Median onset latency', milliseconds(result.summary?.median_ms)], ['95th percentile', milliseconds(result.summary?.p95_ms)], ['Valid trials', `${result.summary?.valid_trials ?? 0} / ${result.trials?.length ?? 0}`]];
+    values.forEach(([label, value]) => {
       const metric = node('div'); metric.append(node('span', 'metric-label', label), node('span', 'metric-value', value)); metrics.append(metric);
     });
     card.append(metrics);
@@ -142,6 +145,10 @@ function renderResults(data) {
       card.append(node('p', 'result-meta', `Ended after ${interruption.elapsed_seconds ?? '—'}s · ${interruption.reason} · phase: ${interruption.phase || 'unknown'}.`));
       if (interruption.protocol_error || interruption.socket_error) card.append(node('p', 'result-warning', interruption.protocol_error || interruption.socket_error));
     }
+    const followup = result.firmware_followup;
+    if (followup?.linked_root_fault) card.append(node('p', 'result-warning', `Voice PE reported: ${followup.linked_root_fault.reason.replaceAll('_', ' ')}. Matched to this capture after reconnect.`));
+    else if (followup?.same_boot === false) card.append(node('p', 'result-warning', 'Voice PE reconnected with a new boot ID. The restart cause is unavailable.'));
+    else if (followup) card.append(node('p', 'result-meta', 'Reconnection diagnostics received; no firmware fault was conclusively matched to this capture.'));
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));
     const sender = result.transport?.sender;
@@ -217,7 +224,7 @@ $('run-test').addEventListener('click', async () => {
   busy = true; updateReadiness();
   try {
     await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: kind === 'stop' ? 1 : 3, comfortable_volume_confirmed: true})});
-    announce(`${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
+    announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
   } catch (error) {announce(error.message, true);}
   finally {busy = false; updateReadiness();}

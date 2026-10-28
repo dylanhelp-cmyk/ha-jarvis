@@ -1,13 +1,13 @@
-# Install and update — App 0.1.8 / firmware 0.1.3
+# Install and update — App 0.1.9 / firmware 0.1.4
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**App 0.1.8:** replaces the AirPlay metadata-preloading handoff with a bounded streaming source. Update the App only; keep **firmware 0.1.3**. Set a comfortable WiiM volume yourself, run one **AirPlay / WAV** latency test, allow up to **60 seconds**, then export diagnostics. Check whether playback sounds normal and volume stays at your chosen level. Sender setup/PCM timings are displayed separately from microphone-measured sound; they do not establish speaker latency. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
+**App 0.1.9 + firmware 0.1.4:** update both to collect disconnect evidence without watching logs. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.4** before installing. In Jarvis, select **Microphone connection** and start one silent 60-second test. No speaker playback or cloud calls occur. If it drops, wait for Voice PE to reconnect before exporting diagnostics. If it passes, export once; do not repeat playback just to provoke a failure. Fault history lives in RAM and survives reconnect, not reboot; boot IDs identify a new startup. This is a diagnostic revision, not a claimed network fix. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.8** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.9** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.

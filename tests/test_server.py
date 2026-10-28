@@ -186,6 +186,43 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await second.close()
         await ws.close()
 
+    async def test_silent_connection_test_never_constructs_a_speaker_transport(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
+                            'sample_rate':16000, 'channels':1})
+        await ws.receive_json()
+        async def begin(capture_id, duration_ms):
+            self.bench.device.capture_id = capture_id
+            self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\0'*4)
+        async def end():
+            self.bench.device.capture_id = None
+            self.bench.device.stopped.set()
+        with patch.object(self.bench.device, 'begin', begin), patch.object(self.bench.device, 'end', end), \
+             patch('jarvis.server.CONNECTION_TEST_SECONDS', .01), \
+             patch('jarvis.transports.NativeHTTPTransport') as native, patch('jarvis.transports.AirPlayTransport') as airplay:
+            response = await self.ui.post('/api/tests', json={'kind':'connection'})
+            self.assertEqual(response.status, 202)
+            await asyncio.wait_for(self.bench.task, 2)
+            native.assert_not_called()
+            airplay.assert_not_called()
+        self.assertEqual(self.bench.results[0]['status'], 'passed')
+        self.assertEqual(self.bench.results[0]['metric'], 'microphone_connection')
+        self.assertNotIn('stream', self.bench.results[0])
+        self.assertIsNone(self.bench.stream)
+        await ws.close()
+
+    async def test_authenticated_reconnect_telemetry_is_exported(self):
+        from test_device_diagnostics import diagnostics
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
+                            'sample_rate':16000, 'channels':1, 'diagnostics':diagnostics()})
+        await ws.receive_json()
+        response = await self.ui.get('/api/diagnostics')
+        body = await response.json()
+        self.assertEqual(body['firmware_observations'][0]['diagnostics']['root_fault']['reason'], 'pcm_send_failed')
+        self.assertNotIn(self.bench.config['device_token'], json.dumps(body))
+        await ws.close()
+
     async def test_stale_stream_url_cannot_be_replayed(self):
         response = await self.audio.get('/stream/made-up.wav')
         self.assertEqual(response.status, 404)
