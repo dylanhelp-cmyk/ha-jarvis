@@ -1,5 +1,5 @@
 name: HA Jarvis Audio Bench
-version: "0.1.5"
+version: "0.1.6"
 slug: ha_jarvis
 description: User-operated wireless audio tests for Jarvis. No cloud calls.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis

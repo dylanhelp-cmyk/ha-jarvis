@@ -1,13 +1,13 @@
-# Install and update — App 0.1.5 / firmware 0.1.3
+# Install and update — App 0.1.6 / firmware 0.1.3
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**App 0.1.5:** adds AirPlay setup diagnostics and surfaces background sender failures. Update the App only; keep **firmware 0.1.3**. This revision does not claim to fix AirPlay connection failures. Run one **AirPlay / WAV** latency test at comfortable volume, then export diagnostics even if it is silent; no further repeats are needed. The SlimProto PCM format correction from 0.1.4 remains included. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
+**App 0.1.6:** pins the compatible SRP dependency to fix the reproduced AirPlay authentication TypeError. Update the App only; keep **firmware 0.1.3**. Run one **AirPlay / WAV** latency test at comfortable volume and export diagnostics. Receiver playback and latency still need this test. The SlimProto PCM format correction remains included. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the firmware's separate Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.5** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.6** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.

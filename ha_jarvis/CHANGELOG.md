@@ -1,3 +1,9 @@
+# 0.1.6
+
+- Pin srptools 1.0.1 for pyatv 0.18.0: srptools 2.0.0 makes the private-key argument keyword-only, causing the reported SRPClientSession TypeError before audio fetch.
+- Reproduced the failure locally with 2.0.0; regression now exercises actual legacy AirPlay initialization and a complete in-memory HAP SRP key/proof exchange using dummy credentials with 1.0.1.
+- App-only dependency fix; firmware stays 0.1.3. Update the App, run one AirPlay/WAV latency test at comfortable volume, and export diagnostics. Offline authentication checks do not establish receiver playback or acoustic latency.
+
 # 0.1.5
 
 - Surface background AirPlay sender errors immediately while waiting for source fetch, instead of hiding them behind a blank timeout.
