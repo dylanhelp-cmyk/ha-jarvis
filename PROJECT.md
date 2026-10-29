@@ -1,0 +1,60 @@
+# HA Jarvis: agreed scope and progress
+
+Project continuity record derived from the user's original requirements and accepted plan. New user instructions take precedence. Last updated: 29 October 2026.
+
+## Intended experience
+
+- Home Assistant assistant with a concise British-style, Jarvis-like personality.
+- Local **Hey Jarvis** wake; exactly **Yes sir** once as acknowledgment. Cached acknowledgment is interface feedback, not evidence of cloud readiness.
+- Fast conversational speech, follow-ups and spoken interruptions, including while delegated home-control work runs.
+- Control only entities exposed to Assist through local `/api/mcp/assist`. Discover tools and relay them through application-executed functions. Administrative tools and HA credentials stay outside models.
+- User-friendly configuration/test interface: ordinary voice/personality/device/volume/inactivity settings, advanced technical tuning, explicit Start/Cancel and useful diagnostics.
+- Interrupt music for conversation and restore it where supported; identify sources that cannot resume. Proactive monitoring/alerts are deferred.
+
+Hardware: Intel Home Assistant OS host, Home Assistant Voice Preview Edition managed through ESPHome Builder, and wireless WiiM amplifier/ceiling speakers as primary output. Separate speakers on Voice PE's 3.5 mm jack are a last resort requiring the user's decision. The previous GPT-Live App was stopped to avoid interference.
+
+## Architecture agreed for implementation
+
+- Home Assistant OS App with asynchronous Python service, ingress UI and isolated audio dependencies; custom repository-managed Voice PE firmware.
+- Firmware retains ESPHome hardware support, local wake, native API, OTA, physical mute and LEDs; authenticated, versioned PCM connection with sample counters and capture timestamps.
+- Planned host echo cancellation: WebRTC AudioProcessing/AEC3 with outgoing audio reference, measured acoustic delay and drift handling. Verify raw microphone access/XMOS compatibility and acoustic performance. Custom firmware alone does not solve external-speaker echo.
+- The accepted cloud plan names GPT-Live (`gpt-live-1`) for full-duplex speech and Responses delegation, initially GPT-6 Luna at low reasoning. These are planning choices, not verified API identifiers or implemented dependencies. Verify current official availability, identifiers, costs and capabilities before integrating; resolve any mismatch explicitly.
+- Start cloud transport evaluation with WebRTC, compare WebSocket under equivalent repeated trials, and select from measured conversational behavior. One first-audio benchmark is insufficient.
+
+## Required conversation behavior
+
+- Capture opening speech immediately using bounded, timestamped buffering. Measure queue age/overflow; never silently truncate or speed up speech to catch up. Overflow/connection failure gives a clear retry state.
+- Capture during replies. Interruptions stop queued playback; cancelled audio must never return after reconnect.
+- Confirm tool outcomes before announcing success, checking resulting state where available. Timed-out actions may have unknown outcomes; never blindly repeat them or speak duplicate success announcements.
+- The model can request closure for clear endings using the existing conversation/delegation flow. The App decides: required work and audible playback finish, then a **2-second grace period**; new speech cancels closure.
+- A completed command, finished reply or ambiguous “thanks” alone does not establish an ending. Otherwise use adjustable **10-second inactivity** after playback and pending work finish. Meaningful speech resets it immediately; users can continue without waiting for closure. Noise/echo volume alone is insufficient.
+- Keep recent context temporarily in memory across wakes without repeating completed actions. Close gracefully, collect final usage and leave local wake active. Connected cloud silence may be billable.
+- Credentials stay local; audio and transcript retention default off.
+
+## Gates and acceptance
+
+1. **Local audio bench (current):** user-operated pairing, routes, start/cancel, measurements/export. No OpenAI calls. Screen progressive HTTP PCM/WAV and FLAC, SlimProto/Squeezelite, and a short AirPlay baseline; Chromecast only if the first two approaches fail. Repeat promising routes under comparable conditions. Measure cold/warm audible onset, stop-to-silence/stale playback, stability/speed/drift, queue health and simultaneous-speech echo/voice preservation. Choose from acoustic evidence. If no wireless route supports the intended experience, present evidence before building further; user decides any wired fallback.
+2. **Input/echo and route acceptance:** establish usable capture, repeated stable playback/cancellation and acoustic echo handling with preserved user speech. Route/timing changes can invalidate echo alignment. Raw access, silence or synthetic checks do not prove echo cancellation.
+3. **Conversational vertical slice:** wake acknowledgment, immediate capture, selected cloud transport, natural follow-ups/interruption and session lifecycle. Paid trials require user Start. Keep local feedback and cloud readiness distinct.
+4. **Assist control and usable configuration:** restricted MCP tools, verified outcomes/unknown-timeout handling, supported music restoration and configuration UI. Validate exposure enforcement and recovery as well as ordinary commands.
+5. **Acceptance:** ordinary warm end-of-speech → audible response median **≤1 second**, estimated p95 **≤1.5 seconds**. Report sample count, cold startup and device-action latency separately. Verify opening words, follow-ups, interruptions, acoustic echo, exposure enforcement, truthful failures, cancellation/reconnect and advertised music restoration. Exercise explicit sign-offs, ambiguous thanks, post-command follow-ups, grace-period speech, thinking pauses, pending tools and background noise. Broader documentation/polish follows usable integration.
+
+Gates describe evidence needed, not permission for automatic hardware testing. Parallel offline work is useful only when it advances a gate without committing to an unvalidated path.
+
+## Current evidence and next step
+
+- Published **App 0.1.10 / firmware 0.1.5**, code commit `1c77314`. User installation and next acoustic test are pending. 103 offline tests passed; firmware compiled for ESP32-S3. No hardware verification for this revision yet.
+- Earlier approximate marker → microphone onset: HTTP/WAV 7.25 s (cold 8.05 s); HTTP/FLAC 3.62 s (cold 4.20 s); SlimProto PCM 3.00 s (cold 4.66 s); streaming AirPlay 1.80–1.85 s (cold 3.30 s). These are different trial sets, not an equivalent repeated comparison or assistant end-of-speech measurements. Microphone pipeline delay is uncalibrated. No route has passed the conversational target or full acceptance.
+- An eager AirPlay source scan previously introduced about 12 s of software buffering. A bounded progressive source removed that delay while preserving sender authentication/encryption/session teardown. AirPlay remains a candidate; the user previously achieved shorter delay with it.
+- Latest completed hardware captures had intact frame/sample continuity but weak later probes and unreliable pilot analysis. The old pilot overlapped probes, and its absolute energy cutoff could create misleading gap counts. The update separates signals, calibrates against quiet-room noise and requires reliable pilot evidence before reporting measured continuity. Low-volume hardware performance remains to be measured; no automatic volume increase.
+- Intermittent Voice PE disconnect persists in prior evidence. Matching retained boot/connection/capture IDs established a WebSocket failure without a reboot or recorded Wi-Fi loss. Cause remains unconfirmed. Firmware 0.1.5 disables default Wi-Fi light power saving and retains intermediate TCP error evidence; this is not a proven fix. PCM/control deadlines and buffering are unchanged.
+- **Next user test:** update both, wait for Builder's five-minute repository cache as needed, confirm firmware 0.1.5, set comfortable audible WiiM volume, run **one AirPlay/WAV Stream stability** test. Expect three probes then a continuous tone. Export after completion, or after reconnect if it drops. Inspect that result before requesting another revision/test.
+- **Next engineering decision:** assess reliable probe/continuity and disconnect evidence, then identify the smallest remaining route/stop/echo tests needed to choose the wireless path. Avoid another transport rewrite or diagnostic expansion without a specific observed blocker. Escalate an unresolved physical latency limit to the user rather than endlessly tuning backend code.
+
+## Measurement rules learned
+
+- Measure sound at the listener, not session connection, stream fetch or PCM handoff. Separate cold setup, steady-state turns, source queue time, backend work and physical playback delay.
+- Requested buffering is not actual delay. Watch skipping, startup acceleration, clock drift, dropped audio and backlog; software speed cannot remove receiver buffering.
+- Use multiple signals and repeatability/confidence checks; spectral matching may work when waveform correlation does not. Missing or echo-suppressed detection is unavailable, never zero.
+- Turn completion and conversation completion differ. Account for pending work and actual audible playback; loudness alone cannot determine speech or closure.
+- Every troubleshooting revision needs an observed problem, a bounded hypothesis, appropriate offline verification and one focused user procedure. Record inconclusive results honestly. Do not repeat the same hardware trial without a change or a defined repeatability question.
