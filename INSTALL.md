@@ -1,15 +1,15 @@
-# Install and update — App 0.1.10 / firmware 0.1.5
+# Install and update — App 0.1.11 / firmware 0.1.6
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**App 0.1.10 + firmware 0.1.5:** update both. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.5** before installing. The stability pilot now follows the probes, avoiding interference, and uses a quiet-room reference instead of an absolute volume cutoff. Weak or unreliable audio reports unavailable continuity. Firmware disables Wi-Fi power saving and retains additional TCP error detail; the intermittent disconnect's cause remains unconfirmed. No volume increase is automatic.
+**App 0.1.11 + firmware 0.1.6:** update both. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.6** before installing. This revision tests a modest PCM send-timeout increase from 30 to 100 ms, with the audio queue capacity unchanged. It records successful/failed send durations, maximum firmware queue residence and the last failed send's returned/expected bytes. Measurements survive reconnect in RAM and are matched to the exact capture in the App. The SDK's separate waits mean 100 ms is not a hard call-duration bound. The cause of the earlier disconnects remains unconfirmed; a passing trial alone does not prove a fix.
 
 **This revision's test:** select **AirPlay / WAV → Stream stability**, set a comfortable audible WiiM volume yourself, and start once. Expect three probes followed by a continuous tone. Allow completion, then export diagnostics even if measurements are unavailable. If Voice PE disconnects, wait for it to reconnect before exporting. No OpenAI calls occur. Fault history survives reconnect in RAM, but resets at reboot. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.10** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.11** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.
@@ -60,4 +60,4 @@ Do not expose LAN audio port 8099 or the SlimProto listener to the internet. The
 
 ## Development validation
 
-Offline checks use synthetic audio, fake receivers and loopback APIs. Install `ha_jarvis/requirements.txt` in a development environment and run `python tools/check.py`. The original firmware passed a real ESP32-S3 compile/link; repository packaging was validated/code-generated on ESPHome 2026.10.0. The Home Assistant container image still needs its first build in your HA installation; Docker Desktop's Linux engine was not running here.
+Offline checks use synthetic audio, fake receivers and loopback APIs. Install `ha_jarvis/requirements.txt` in a development environment and run `python tools/check.py`. Firmware 0.1.6 passed a real ESP32-S3 compile/link on ESPHome 2026.10.0. Container images build in your HA installation; no local Docker image build was run for this revision.

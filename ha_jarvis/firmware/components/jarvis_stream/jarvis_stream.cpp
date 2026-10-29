@@ -100,6 +100,18 @@ void JarvisStream::network_worker_() {
       for (int i = 0; i < 8 && xQueueReceive(outgoing_queue_, &outgoing, 0) == pdTRUE; ++i) {
         if (outgoing.epoch != epoch_) continue;
         if (outgoing.capture_generation && (!active_ || outgoing.capture_generation != generation_)) continue;
+        // Stop controls are serialized after the worker's preceding PCM send
+        // returns, so its acknowledgement includes that send's final metrics.
+        if (outgoing.refresh_diagnostics) {
+          JsonDocument document = json::parse_json(reinterpret_cast<const uint8_t *>(outgoing.text), outgoing.length);
+          outgoing.length = refresh_stop_pcm_diagnostics(document, pcm_send_history_.snapshot(),
+                                                         outgoing.text, sizeof(outgoing.text));
+          if (outgoing.length == 0) {
+            record_fault_(FaultReason::OUTGOING_MESSAGE_TOO_LARGE);
+            request_transport_reset_();
+            break;
+          }
+        }
         const uint32_t sending_connection = connection_generation_.load();
         const uint32_t sending_capture = outgoing.capture_generation ? outgoing.capture_generation : generation_.load();
         const int sent = esp_websocket_client_send_text(client_, outgoing.text, outgoing.length, pdMS_TO_TICKS(100));
@@ -119,8 +131,13 @@ void JarvisStream::network_worker_() {
         if (packet.generation != generation_) continue;
         const size_t bytes = HEADER_BYTES + packet.samples * 2;
         const uint32_t sending_connection = connection_generation_.load();
+        const uint32_t send_started = now_ms_();
+        const uint32_t queue_age = send_started - packet.enqueued_ms;
         const int sent = esp_websocket_client_send_bin(client_, reinterpret_cast<const char *>(packet.wire), bytes,
-                                                       pdMS_TO_TICKS(30));
+                                                       pdMS_TO_TICKS(PCM_SEND_TIMEOUT_MS));
+        const uint32_t send_finished = now_ms_();
+        pcm_send_history_.record(sending_connection, packet.generation, sent, bytes,
+                                 send_finished - send_started, queue_age, send_finished);
         if (sent != static_cast<int>(bytes)) {
           record_fault_at_(FaultReason::PCM_SEND_FAILED, sending_connection, packet.generation);
           ESP_LOGW(TAG, "Resetting transport: PCM send failed (sent=%d expected=%u)", sent,
@@ -195,7 +212,7 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
   }
 }
 
-bool JarvisStream::send_json_(const std::string &text, bool capture_start) {
+bool JarvisStream::send_json_(const std::string &text, bool capture_start, bool refresh_diagnostics) {
   if (!connected_ || shutting_down_) return false;
   Outgoing outgoing{};
   if (text.size() >= sizeof(outgoing.text)) {
@@ -203,6 +220,7 @@ bool JarvisStream::send_json_(const std::string &text, bool capture_start) {
   }
   outgoing.epoch = epoch_;
   outgoing.capture_generation = capture_start ? generation_.load() : 0;
+  outgoing.refresh_diagnostics = refresh_diagnostics;
   outgoing.length = text.size();
   std::memcpy(outgoing.text, text.data(), text.size());
   if (xQueueSend(outgoing_queue_, &outgoing, 0) != pdTRUE) {
@@ -264,6 +282,7 @@ void JarvisStream::record_fault_at_(FaultReason reason, uint32_t connection_gene
 void JarvisStream::diagnostics_json_(JsonObject out) {
   const auto snapshot = fault_history_.snapshot();
   write_fault_diagnostics(out, snapshot, boot_id_, now_ms_(), connection_generation_.load(), generation_.load());
+  write_pcm_send_diagnostics(out, pcm_send_history_.snapshot());
 }
 
 void JarvisStream::send_state_() {
@@ -315,6 +334,7 @@ void JarvisStream::command_(const char *text) {
       ++generation_; sample_counter_ = 0; sequence_ = 0; deadline_ = now_ms_() + duration;
       portEXIT_CRITICAL(&capture_lock_);
       acknowledged_generation_ = 0;
+      pcm_send_history_.start(connection_generation_.load(), generation_.load());
       // Arm locally, but the worker sends no PCM until this acknowledgement is actually transmitted.
       active_ = true;
       if (!send_json_(json::build_json([&](JsonObject out) {
@@ -351,6 +371,7 @@ void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
     const uint32_t stamp = callback_ms - static_cast<uint32_t>((samples - offset) * 1000 / 16000);
     encode_header(packet.wire, packet.samples, sequence, first_sample, stamp);
     std::memcpy(packet.wire + HEADER_BYTES, data.data() + offset * 2, packet.samples * 2);
+    packet.enqueued_ms = now_ms_();
     if (xQueueSend(audio_queue_, &packet, 0) != pdTRUE) ++dropped_;
   }
 }
@@ -368,7 +389,8 @@ void JarvisStream::stop_capture_(const char *reason) {
     send_json_(json::build_json([&](JsonObject out) {
       out["type"] = "capture_stopped"; out["capture_id"] = capture_id_;
       out["reason"] = reason; out["samples_seen"] = count; out["dropped_frames"] = dropped_.load();
-    }));
+      diagnostics_json_(out["diagnostics"].to<JsonObject>());
+    }), false, true);
   }
   capture_id_.clear();
 }

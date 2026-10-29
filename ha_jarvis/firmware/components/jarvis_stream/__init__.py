@@ -25,7 +25,7 @@ def raw_microphone(value):
     return value
 
 def hello_identity_budget(value):
-    # Reserve the remainder of the fixed 2048-byte outgoing slot for bounded
+    # Reserve the remainder of the fixed 3072-byte outgoing slot for bounded
     # diagnostics and hello metadata, including worst-case numeric values.
     identity = {key: value[key] for key in ("device_id", "token")}
     if len(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 350:

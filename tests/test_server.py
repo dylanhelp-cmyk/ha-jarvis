@@ -208,14 +208,19 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await ws.close()
 
     async def test_silent_connection_test_never_constructs_a_speaker_transport(self):
+        from test_device_diagnostics import diagnostics, pcm_summary
         ws = await self.audio.ws_connect('/device')
         await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
                             'sample_rate':16000, 'channels':1})
         await ws.receive_json()
         async def begin(capture_id, duration_ms):
             self.bench.device.capture_id = capture_id
+            self.bench.device.capture_session = {'boot_id':'a'*16, 'connection_generation':1, 'capture_generation':3}
             self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\0'*4)
         async def end():
+            self.bench.device.receive_json({'type':'capture_stopped', 'capture_id':self.bench.device.capture_id,
+                'reason':'requested', 'dropped_frames':0,
+                'diagnostics':{**diagnostics(), 'pcm_send':pcm_summary()}})
             self.bench.device.capture_id = None
             self.bench.device.stopped.set()
         with patch.object(self.bench.device, 'begin', begin), patch.object(self.bench.device, 'end', end), \
@@ -228,19 +233,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             airplay.assert_not_called()
         self.assertEqual(self.bench.results[0]['status'], 'passed')
         self.assertEqual(self.bench.results[0]['metric'], 'microphone_connection')
+        self.assertEqual(self.bench.results[0]['firmware_pcm'], pcm_summary())
         self.assertNotIn('stream', self.bench.results[0])
         self.assertIsNone(self.bench.stream)
         await ws.close()
 
     async def test_authenticated_reconnect_telemetry_is_exported(self):
-        from test_device_diagnostics import diagnostics
+        from test_device_diagnostics import diagnostics, pcm_summary
         ws = await self.audio.ws_connect('/device')
         await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
-                            'sample_rate':16000, 'channels':1, 'diagnostics':diagnostics()})
+                            'sample_rate':16000, 'channels':1,
+                            'diagnostics':{**diagnostics(), 'pcm_send':pcm_summary()}})
         await ws.receive_json()
         response = await self.ui.get('/api/diagnostics')
         body = await response.json()
         self.assertEqual(body['firmware_observations'][0]['diagnostics']['root_fault']['reason'], 'pcm_send_failed')
+        self.assertEqual(body['firmware_observations'][0]['diagnostics']['pcm_send'], pcm_summary())
         self.assertNotIn(self.bench.config['device_token'], json.dumps(body))
         await ws.close()
 

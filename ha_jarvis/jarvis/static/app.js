@@ -146,6 +146,14 @@ function renderResults(data) {
       if (interruption.protocol_error || interruption.socket_error) card.append(node('p', 'result-warning', interruption.protocol_error || interruption.socket_error));
     }
     const followup = result.firmware_followup;
+    const pcm = result.firmware_pcm;
+    if (pcm) {
+      const longestSend = pcm.send_count ? milliseconds(pcm.max_success_duration_ms) : 'unavailable';
+      const queueAge = pcm.send_count + pcm.failed_send_count ? milliseconds(pcm.max_queue_age_ms) : 'unavailable';
+      card.append(node('p', 'result-meta', `Voice PE upload: ${pcm.send_count} successful sends · ${pcm.failed_send_count} failed · longest successful send ${longestSend} · maximum firmware queue residence ${queueAge}. Queue residence excludes network and microphone pipeline delay.`));
+      const failure = pcm.last_failed_send;
+      if (failure) card.append(node('p', 'result-warning', `Last failed PCM send: returned ${failure.returned_bytes} / ${failure.expected_bytes} bytes after ${milliseconds(failure.duration_ms)}. A zero return alone does not prove a timeout.`));
+    }
     if (followup?.linked_root_fault) card.append(node('p', 'result-warning', `Voice PE reported: ${followup.linked_root_fault.reason.replaceAll('_', ' ')}. Matched to this capture after reconnect.`));
     else if (followup?.same_boot === false) card.append(node('p', 'result-warning', 'Voice PE reconnected with a new boot ID. The restart cause is unavailable.'));
     else if (followup) card.append(node('p', 'result-meta', 'Reconnection diagnostics received; no firmware fault was conclusively matched to this capture.'));

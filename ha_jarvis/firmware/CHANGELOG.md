@@ -1,3 +1,13 @@
+# 0.1.6 - measure PCM sends with a modestly longer wait
+
+- Increase the PCM send API timeout from 30 to 100 ms to test the observed send-failure hypothesis. Keep control sends at 100 ms. Underlying lock/poll/socket phases mean this is not a hard per-call deadline or a proven fix.
+- Retain a bounded per-capture `diagnostics.pcm_send` snapshot under the boot/connection/capture identities. Report successful/failed send counts, separate maximum SDK call durations, maximum enqueue-to-dequeue residence, and the latest failed return/expected bytes/duration/uptime. Preserve zero/negative returns. Stop/reconnect retains the summary; a new accepted capture replaces it and ignores stale old send returns.
+- Include diagnostics in `capture_stopped`, refreshing the PCM summary in the sending worker after its preceding PCM call returns. Preserve an older capture's snapshot if a newer capture already replaced the retained summary.
+- Increase outgoing **text control** slots from 2048 to 3072 bytes for the combined fault/send envelope; keep the 350-byte encoded identity budget. The 16-slot audio queue, PCM protocol, callback's nonblocking enqueue, capture limits and failure/reset behavior are unchanged. Do not retry a failed frame on the same connection.
+- Fifteen firmware regressions passed, including production numeric recording/serialization, capture reset/retention, zero/negative/short failures, concurrent snapshots, stale attribution, worker stop refresh and worst-case JSON bounds. Fully compiled/linked for ESP32-S3 with dummy secrets. These measurements do not establish acoustic latency or hardware reliability. No hardware was contacted/flashed/restarted.
+
+Update the accompanying App revision, rebuild the existing Builder entry after its five-minute cache expires and confirm **0.1.6**. Run one **AirPlay / WAV - Stream stability** trial with the full existing observation tail, then export after completion or reconnection. Development images contain dummy credentials and are not installation artifacts.
+
 # 0.1.5 — awake Wi-Fi and retain the SDK transport event
 
 - Set Wi-Fi power saving to `NONE` in the shared repository package and enforce it through ESPHome's supported final-validation helper. Existing local repository entries inherit the policy without file copying. ESPHome's ESP32 default was `LIGHT`; [Espressif's ESP32-S3 / ESP-IDF 5.5.6 guidance](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32s3/api-guides/wifi.html#wi-fi-power-saving-mode) recommends disabling modem sleep to minimize real-time receive delay, at increased power consumption. This removes a source of latency; the reported drop is not proven to have been caused by power saving.

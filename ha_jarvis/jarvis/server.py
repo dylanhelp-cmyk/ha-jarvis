@@ -149,12 +149,24 @@ class Bench:
         duplicate = False
         if self.firmware_observations:
             previous = self.firmware_observations[-1]["diagnostics"]
-            if identity == tuple(previous[key] for key in ("boot_id", "connection_generation", "fault_sequence")):
+            if (identity == tuple(previous[key] for key in ("boot_id", "connection_generation", "fault_sequence"))
+                    and previous.get("pcm_send") == diagnostics.get("pcm_send")):
                 duplicate = True
         observed = datetime.now(timezone.utc)
         observation = {"observed_at": observed.isoformat(), "diagnostics": diagnostics}
         if not duplicate:
             self.firmware_observations.append(observation)
+        # Per-capture measurements can arrive with a clean stop or after reconnect.
+        # Fault sequence alone does not identify a capture, nor does the current
+        # connection generation on a reconnected hello.
+        pcm = diagnostics.get("pcm_send")
+        if pcm is not None:
+            for result in self.results:
+                session = result.get("device_session", {})
+                if diagnostics["boot_id"] == session.get("boot_id") and all(
+                    pcm.get(key) == session.get(key) for key in ("connection_generation", "capture_generation")):
+                    result["firmware_pcm"] = pcm
+                    break
         # A reconnect may describe a failed capture, but only an exact boot and
         # generation match establishes that the root event belongs to that test.
         for result in self.results:
@@ -402,6 +414,7 @@ class Bench:
             with suppress(Exception):
                 await self.device.end()
             result["capture"] = self.device.capture_diagnostics()
+            self.observe_firmware()
             self.device.frames.clear()
             result["summary"] = summarize(result["trials"])
             self.test = {"running": False, "phase": "idle"}

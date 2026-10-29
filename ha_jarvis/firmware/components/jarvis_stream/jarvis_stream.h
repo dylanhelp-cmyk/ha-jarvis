@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "network_lifecycle.h"
 #include "fault_history.h"
+#include "pcm_send_history.h"
 #include "protocol.h"
 
 namespace esphome::jarvis_stream {
@@ -35,8 +36,8 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void wake_word(const std::string &word);
 
  protected:
-  struct AudioPacket { uint32_t generation; uint16_t samples; uint8_t wire[HEADER_BYTES + MAX_SAMPLES * 2]; };
-  struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; char text[2048]; };
+  struct AudioPacket { uint32_t generation; uint32_t enqueued_ms; uint16_t samples; uint8_t wire[HEADER_BYTES + MAX_SAMPLES * 2]; };
+  struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; bool refresh_diagnostics; char text[3072]; };
   struct Control { uint32_t epoch; uint8_t kind; char text[768]; };
   static void network_worker(void *arg);
   void network_worker_();
@@ -46,7 +47,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void receive_event_(int32_t event, esp_websocket_event_data_t *data);
   void microphone_data_(const std::vector<uint8_t> &data);
   void command_(const char *text);
-  bool send_json_(const std::string &text, bool capture_start = false);
+  bool send_json_(const std::string &text, bool capture_start = false, bool refresh_diagnostics = false);
   void stop_capture_(const char *reason);
   bool verify_hardware_();
   void send_state_();
@@ -66,6 +67,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
   std::atomic<uint32_t> connection_generation_{0};
   FaultHistory<FaultLock> fault_history_;
+  PcmSendHistory<FaultLock> pcm_send_history_;
   char boot_id_[17]{};
   portMUX_TYPE capture_lock_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t sample_counter_{0};

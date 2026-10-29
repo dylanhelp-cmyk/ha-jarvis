@@ -36,6 +36,27 @@ def parse_diagnostics(value):
                     raise ValueError("Invalid SDK error value")
                 parsed[key] = number
         return parsed
+    def pcm_send(summary):
+        if summary is None:
+            return None
+        try:
+            if not isinstance(summary, dict):
+                return None
+            parsed = {key: uint(summary[key]) for key in (
+                "connection_generation", "capture_generation", "send_count", "failed_send_count",
+                "max_success_duration_ms", "max_failed_duration_ms", "max_queue_age_ms")}
+            failure = summary.get("last_failed_send")
+            parsed["last_failed_send"] = None
+            if failure is not None:
+                returned = failure["returned_bytes"]
+                if type(returned) is not int or not -(2 ** 31) <= returned < 2 ** 31:
+                    return None
+                parsed["last_failed_send"] = {"returned_bytes": returned,
+                    **{key: uint(failure[key]) for key in ("expected_bytes", "duration_ms", "uptime_ms")}}
+            return parsed
+        except (ValueError, KeyError, TypeError):
+            # Optional telemetry cannot invalidate otherwise useful fault history.
+            return None
     try:
         parsed = {"schema": 1, "boot_id": boot}
         for key in ("uptime_ms", "connection_generation", "capture_generation", "fault_sequence"):
@@ -48,6 +69,7 @@ def parse_diagnostics(value):
         parsed["root_fault"] = fault(value.get("root_fault"))
         parsed["last_fault"] = fault(value.get("last_fault"))
         parsed["transport_fault"] = fault(value.get("transport_fault"))
+        parsed["pcm_send"] = pcm_send(value.get("pcm_send"))
         return parsed
     except (ValueError, KeyError, TypeError):
         return None

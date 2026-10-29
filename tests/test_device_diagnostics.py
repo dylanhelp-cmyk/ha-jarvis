@@ -16,7 +16,67 @@ def diagnostics(boot='a' * 16, capture=3):
             'root_fault':root, 'last_fault':{**root, 'sequence':2, 'reason':'websocket_disconnected'}}
 
 
+def pcm_summary():
+    return {'connection_generation':1, 'capture_generation':3,
+            'send_count':2000, 'failed_send_count':1, 'max_success_duration_ms':38,
+            'max_failed_duration_ms':102, 'max_queue_age_ms':85,
+            'last_failed_send':{'returned_bytes':0, 'expected_bytes':536,
+                                'duration_ms':102, 'uptime_ms':34000}}
+
+
 class FirmwareDiagnosticsTests(unittest.TestCase):
+    def test_optional_pcm_summary_is_bounded_and_redacts_unknown_fields(self):
+        value = diagnostics()
+        self.assertIsNone(parse_diagnostics(value)['pcm_send'])
+        summary = pcm_summary()
+        summary['token'] = 'never-export'
+        summary['last_failed_send']['payload'] = 'never-export'
+        value['pcm_send'] = summary
+        parsed = parse_diagnostics(value)['pcm_send']
+        self.assertEqual(parsed['last_failed_send']['returned_bytes'], 0)
+        self.assertNotIn('token', parsed)
+        self.assertNotIn('payload', parsed['last_failed_send'])
+        for returned in (-1, 0, 500):
+            summary['last_failed_send']['returned_bytes'] = returned
+            self.assertEqual(parse_diagnostics(value)['pcm_send']['last_failed_send']['returned_bytes'], returned)
+        for bad in ({**summary, 'send_count':True}, {**summary, 'max_queue_age_ms':-1},
+                    {**summary, 'max_failed_duration_ms':2**32},
+                    {**summary, 'last_failed_send':{'returned_bytes':True}}, []):
+            parsed = parse_diagnostics({**value, 'pcm_send':bad})
+            self.assertIsNone(parsed['pcm_send'])
+            self.assertIsNotNone(parsed['root_fault'])
+
+    def test_capture_stop_accepts_final_pcm_summary_before_completion(self):
+        device = Device()
+        device.capture_id = 'test'
+        value = {**diagnostics(), 'pcm_send':pcm_summary()}
+        device.receive_json({'type':'capture_stopped', 'capture_id':'test', 'reason':'requested',
+                             'dropped_frames':0, 'diagnostics':value})
+        self.assertTrue(device.stopped.is_set())
+        self.assertEqual(device.info['diagnostics']['pcm_send'], pcm_summary())
+
+    def test_pcm_summary_links_only_exact_capture_even_after_root_was_linked(self):
+        bench = self.observe(diagnostics())
+        value = {**diagnostics(), 'pcm_send':pcm_summary()}
+        bench.device.info['diagnostics'] = parse_diagnostics(value)
+        bench.observe_firmware()
+        self.assertEqual(bench.results[0]['firmware_pcm'], pcm_summary())
+        self.assertEqual(len(bench.firmware_observations), 2)
+        bench.observe_firmware()
+        self.assertEqual(len(bench.firmware_observations), 2)
+        for mismatch in ({'connection_generation':2}, {'capture_generation':2}):
+            candidate = {**value, 'pcm_send':{**pcm_summary(), **mismatch}}
+            self.assertNotIn('firmware_pcm', self.observe(candidate).results[0])
+        self.assertNotIn('firmware_pcm', self.observe({**value, 'boot_id':'b'*16}).results[0])
+
+    def test_clean_result_can_receive_matched_pcm_without_fault_link(self):
+        bench = self.observe(diagnostics())
+        result = bench.results[0]
+        result['interruption'] = {}
+        bench.device.info['diagnostics'] = parse_diagnostics({**diagnostics(), 'pcm_send':pcm_summary()})
+        bench.observe_firmware()
+        self.assertEqual(result['firmware_pcm']['max_queue_age_ms'], 85)
+
     def test_parser_keeps_only_bounded_known_fields(self):
         value = diagnostics()
         value['token'] = 'do-not-retain'

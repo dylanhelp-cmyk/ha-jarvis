@@ -164,15 +164,27 @@ int main() {
   hello["device_id"] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
   hello["token"] = std::string(253, 't') + std::string(3, '"');
   hello["sample_rate"] = 16000; hello["channels"] = 1;
-  hello["firmware"] = "0.1.5"; hello["firmware_project"] = "jarvis.voice_pe_testbench";
+  hello["firmware"] = "0.1.6"; hello["firmware_project"] = "jarvis.voice_pe_testbench";
   hello["xmos_version"] = "1.3.1"; hello["muted"] = false; hello["raw_stage"] = "NONE";
   write_fault_diagnostics(hello["diagnostics"].to<JsonObject>(), state, "ffffffffffffffff", UINT32_MAX, UINT32_MAX, UINT32_MAX);
+  PcmSendSnapshot pcm;
+  pcm.valid = pcm.has_failure = true;
+  pcm.connection_generation = pcm.capture_generation = pcm.send_count = pcm.failed_send_count = UINT32_MAX;
+  pcm.max_success_duration_ms = pcm.max_failed_duration_ms = pcm.max_queue_age_ms = UINT32_MAX;
+  pcm.last_failed_send = {INT_MIN, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+  write_pcm_send_diagnostics(hello["diagnostics"].as<JsonObject>(), pcm);
   assert(!hello["diagnostics"]["root_fault"].containsKey("errno"));
   assert(hello["diagnostics"]["transport_fault"]["errno"] == INT_MIN);
   assert(hello["diagnostics"]["last_fault"]["errno"] == INT_MIN);
   std::string wire; serializeJson(document, wire);
   assert(wire.size() < OUTGOING_LIMIT);
   std::printf("worst-case hello: %u bytes; ", unsigned(wire.size()));
+  // Status and capture_stopped carry the same summary; bound their real fields.
+  hello.remove("device_id"); hello.remove("token");
+  hello["type"] = "capture_stopped"; hello["capture_id"] = std::string(128, '"');
+  hello["reason"] = "transport_error"; hello["samples_seen"] = UINT64_MAX;
+  hello["dropped_frames"] = UINT32_MAX;
+  wire.clear(); serializeJson(document, wire); assert(wire.size() < OUTGOING_LIMIT);
   document.clear();
   state.root.details = {}; state.last.details = {}; state.transport = {};
   write_fault_diagnostics(document.to<JsonObject>(), state, "ffffffffffffffff", 20, 3, 12);

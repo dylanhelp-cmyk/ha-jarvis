@@ -1,3 +1,9 @@
+# 0.1.11
+
+- Pair with firmware 0.1.6's PCM send-timeout experiment (30 → 100 ms). Audio queue capacity and failure/reset behavior remain unchanged; the SDK timeout is not a hard whole-call duration limit.
+- Display/export bounded per-capture successful/failed send durations, maximum firmware queue residence and failed-send byte counts. Match only exact boot/connection/capture identities, including clean completion and reconnect. Missing or invalid optional telemetry remains unavailable.
+- Update both App and firmware, then run one AirPlay/WAV Stream stability test at comfortable audible volume. Keep the normal observation period; export after completion or reconnect. This tests connection behavior and possible added queue delay without claiming the earlier fault is fixed.
+
 # 0.1.10
 
 - Play the continuous stability pilot after all three coded probes so it cannot weaken their detection. Calibrate continuity against quiet-room noise and a clear pilot reference; weak or interrupted reference audio reports unavailable, without misleading gap counts.
