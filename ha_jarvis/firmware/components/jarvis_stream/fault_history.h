@@ -28,7 +28,7 @@ struct FaultRecord {
 struct FaultSnapshot {
   uint32_t sequence{0};
   std::array<uint32_t, static_cast<size_t>(FaultReason::COUNT)> counts{};
-  FaultRecord root{}, last{};
+  FaultRecord root{}, last{}, transport{};
 };
 
 // Lock must provide enter()/exit(). Production uses a tiny FreeRTOS critical
@@ -47,8 +47,16 @@ template<class Lock> class FaultHistory {
     // A reconnect does not erase evidence. Only the first fault on a different
     // connected generation replaces the preceding incident's causal event.
     if (state_.root.sequence == 0 ||
-        static_cast<int32_t>(connection_generation - state_.root.connection_generation) > 0)
+        static_cast<int32_t>(connection_generation - state_.root.connection_generation) > 0) {
       state_.root = record;
+      state_.transport = {};
+    }
+    // The pinned client's send path reports generic ERROR before abort assigns
+    // TCP diagnostics to DISCONNECTED. Preserve that numeric event even when a
+    // later generic send-failed callback becomes last. Never patch root's codes.
+    if (details.has_transport_error && state_.transport.sequence == 0 &&
+        connection_generation == state_.root.connection_generation)
+      state_.transport = record;
     state_.last = record;
     lock_.exit();
     return record;

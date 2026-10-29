@@ -24,7 +24,7 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
-from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
+from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
 from .device import Device
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +93,9 @@ class Stream:
         if self.kind == "stability":
             t = np.arange(total) / RATE
             pilot = ((np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)) * .025 * 32767).astype("<i2")
-            pilot[:RATE] = 0
+            last_emitted, last_probe = self.markers[-1]
+            pilot_start = last_emitted - self.started_at + len(last_probe) / RATE + STABILITY_PILOT_GAP_SECONDS
+            pilot[:int(pilot_start * RATE)] = 0
             pilot[-RATE:] = 0
             pcm += pilot
         if self.kind == "stop":
@@ -340,9 +342,15 @@ class Bench:
                                 "max_schedule_lag_ms": round(self.stream.schedule_lag_ms, 2)}
             if self.stream.error:
                 raise ValueError(self.stream.error)
-            result["status"] = "measured" if result["summary"]["valid_trials"] else "unavailable"
+            complete = bool(result["summary"]["valid_trials"])
+            if kind == "stability":
+                complete = complete and result.get("stability", {}).get("status") == "measured"
+            result["status"] = "measured" if complete else "unavailable"
             if result["status"] == "unavailable":
-                result["warnings"].append(f"Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the {playback_delay_limit:g}-second search limit also cannot be measured.")
+                if kind == "stability" and result["summary"]["valid_trials"]:
+                    result["warnings"].append("Playback onset was measured, but continuity could not be established. Do not interpret unavailable stability as zero dropouts.")
+                else:
+                    result["warnings"].append(f"Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the {playback_delay_limit:g}-second search limit also cannot be measured.")
         except asyncio.CancelledError:
             interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation", "phase": self.test.get("phase")})
             result["interruption"] = {**interruption, "elapsed_seconds": round(time.monotonic() - started, 3)}

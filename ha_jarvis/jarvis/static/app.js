@@ -157,10 +157,11 @@ function renderResults(data) {
     if (estimates.length) card.append(node('p', 'result-meta', `Clock/detector estimate: ±${Math.max(...estimates).toFixed(1)} ms. Microphone pipeline delay is uncalibrated; this is not a total uncertainty bound.`));
     if (result.kind === 'stability') {
       const continuity = result.stability;
+      if (typeof continuity?.pilot_snr_db === 'number') card.append(node('p', 'result-meta', `Pilot quality: ${continuity.pilot_snr_db.toFixed(1)} dB above estimated baseline · reference coverage ${Math.round((continuity.reference_coverage || 0) * 100)}%.`));
       const missing = (result.trials || []).filter((trial) => trial.latency_ms == null).length;
       card.append(node('p', 'result-meta', `Missing onset probes: ${missing} / ${result.trials?.length || 0}.`));
       if (continuity?.status === 'measured') {
-        card.append(node('p', 'result-meta', `Continuity: ${continuity.dropout_count ?? 0} dropout(s) · ${milliseconds(continuity.dropout_ms)} total · longest gap ${milliseconds(continuity.longest_gap_ms)} · observed ${milliseconds(continuity.observed_ms)}.`));
+        card.append(node('p', 'result-meta', `Pilot continuity: ${continuity.dropout_count ?? 0} gap(s) · ${milliseconds(continuity.dropout_ms)} total · longest gap ${milliseconds(continuity.longest_gap_ms)} · observed ${milliseconds(continuity.observed_ms)}.`));
         if (continuity.method) card.append(node('p', 'result-meta', `Continuity method: ${continuity.method}`));
       } else card.append(node('p', 'result-warning', `Continuity unavailable: ${continuity?.reason || 'insufficient acoustic evidence.'}`));
     }

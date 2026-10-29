@@ -1,13 +1,15 @@
-# Install and update — App 0.1.9 / firmware 0.1.4
+# Install and update — App 0.1.10 / firmware 0.1.5
 
 This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
 
-**App 0.1.9 + firmware 0.1.4:** update both to collect disconnect evidence without watching logs. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.4** before installing. In Jarvis, select **Microphone connection** and start one silent 60-second test. No speaker playback or cloud calls occur. If it drops, wait for Voice PE to reconnect before exporting diagnostics. If it passes, export once; do not repeat playback just to provoke a failure. Fault history lives in RAM and survives reconnect, not reboot; boot IDs identify a new startup. This is a diagnostic revision, not a claimed network fix. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
+**App 0.1.10 + firmware 0.1.5:** update both. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.5** before installing. The stability pilot now follows the probes, avoiding interference, and uses a quiet-room reference instead of an absolute volume cutoff. Weak or unreliable audio reports unavailable continuity. Firmware disables Wi-Fi power saving and retains additional TCP error detail; the intermittent disconnect's cause remains unconfirmed. No volume increase is automatic.
+
+**This revision's test:** select **AirPlay / WAV → Stream stability**, set a comfortable audible WiiM volume yourself, and start once. Expect three probes followed by a continuous tone. Allow completion, then export diagnostics even if measurements are unavailable. If Voice PE disconnects, wait for it to reconnect before exporting. No OpenAI calls occur. Fault history survives reconnect in RAM, but resets at reboot. In HA's ESPHome pairing dialog, use the **Voice PE IP and port 6053**; the Jarvis server URL uses the **HA host IP and port 8099**.
 
 ## Install the Home Assistant OS App
 
 1. [Add the HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis). Alternatively, open **Settings → Apps → Install app → ⋮ → Repositories** and add `https://github.com/dylanhelp-cmyk/ha-jarvis`.
-2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.9** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
+2. Find **HA Jarvis Audio Bench** under **HA Jarvis**, and install version **0.1.10** or later. Refresh/check for updates if it has not appeared yet. If experimental Apps are hidden, enable Advanced mode in your HA profile.
 3. Start the App and select **Open Web UI**. The interface is available through authenticated HA ingress, not a public web port. No ZIP/file copying or GitHub token is needed. The first image build downloads dependencies and can take several minutes.
 
 In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as the stream base URL. Begin with **Native HTTP / WAV**. Save settings before downloading firmware.

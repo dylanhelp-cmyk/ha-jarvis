@@ -15,6 +15,24 @@ FIRMWARE = ROOT / "ha_jarvis" / "firmware"
 
 class FirmwareContractTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("esphome"), "ESPHome is an optional firmware development dependency")
+    def test_final_validation_requires_awake_wifi_before_codegen(self):
+        from esphome.components import microphone, wifi
+        from esphome.core import CORE
+
+        spec = importlib.util.spec_from_file_location("jarvis_firmware_wifi_schema", FIRMWARE / "components/jarvis_stream/__init__.py")
+        component = importlib.util.module_from_spec(spec)
+        # Isolate microphone graph lookup; execute the actual final-validation
+        # pipeline and ESPHome's supported Wi-Fi policy registration helper.
+        with patch.object(microphone, "final_validate_microphone_source_schema", return_value=lambda value: value), \
+             patch.dict(CORE.data, {}, clear=True):
+            spec.loader.exec_module(component)
+            component.FINAL_VALIDATE_SCHEMA({"microphone": {}})
+            self.assertTrue(CORE.data[wifi.POWER_SAVE_OFF_REASONS_KEY])
+            self.assertNotIn(wifi.POWER_SAVE_APPLIED_KEY, CORE.data)
+        package = (FIRMWARE / "voice-pe-package.yaml").read_text()
+        self.assertIn("wifi:\n  power_save_mode: NONE", package)
+
+    @unittest.skipUnless(importlib.util.find_spec("esphome"), "ESPHome is an optional firmware development dependency")
     def test_component_codegen_enables_independent_websocket_transmit_lock(self):
         import asyncio
         from esphome.components import esp32

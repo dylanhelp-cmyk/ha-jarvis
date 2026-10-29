@@ -13,7 +13,8 @@ import zipfile
 from aiohttp.test_utils import TestClient, TestServer
 from jarvis.server import Bench, Stream, create_ui, create_audio, validate_config
 from jarvis.device import Device
-from jarvis.audio import FRAME, wav_header
+from jarvis.audio import FRAME, RATE, make_probe, wav_header, detect_probe
+import numpy as np
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
@@ -40,7 +41,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('device_token', body['config'])
 
     @asynccontextmanager
-    async def running_test(self):
+    async def running_test(self, kind='latency'):
         """Exercise actual test task and WS handling with a fake speaker only."""
         ws = await self.audio.ws_connect('/device')
         await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
@@ -56,7 +57,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             entered.set()
         transport = Mock(play=AsyncMock(side_effect=play), stop=AsyncMock(), close=AsyncMock(), snapshot=Mock(return_value={}))
         with patch('jarvis.transports.NativeHTTPTransport', return_value=transport), patch.object(self.bench.device, 'begin', begin):
-            response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
+            response = await self.ui.post('/api/tests', json={'kind':kind, 'comfortable_volume_confirmed':True})
             self.assertEqual(response.status, 202)
             await asyncio.wait_for(entered.wait(), 2)
             try:
@@ -127,6 +128,26 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bench.test['running'])
             self.assertEqual(self.bench.device.frames, [])
             self.assertEqual(self.bench.results[0]['status'], 'failed')
+
+    async def test_onset_alone_cannot_report_stability_as_measured(self):
+        async with self.running_test(kind='stability'):
+            start = 100.0
+            probe = make_probe(513)
+            pcm = np.zeros(RATE * 12, dtype='<i2')
+            pcm[int(.12 * RATE):int(.12 * RATE) + len(probe)] = probe
+            self.bench.stream.started_at = start
+            self.bench.stream.markers = [(start + .1, probe)]
+            self.bench.device.clock_rtt_ms = 20
+            with patch('jarvis.server.MAX_PLAYBACK_DELAY_SECONDS', .05), \
+                 patch.object(self.bench.device, 'end', AsyncMock()), \
+                 patch.object(self.bench.device, 'recording', return_value=(pcm, start)):
+                self.bench.stream.connected.set()
+                self.bench.stream.done.set()
+                await asyncio.wait_for(self.bench.task, 2)
+            result = self.bench.results[0]
+            self.assertEqual(result['summary']['valid_trials'], 1, result)
+            self.assertEqual(result['stability']['status'], 'unavailable')
+            self.assertEqual(result['status'], 'unavailable')
 
     async def test_test_requires_user_confirmation_and_paired_mic(self):
         response = await self.ui.post('/api/tests', json={'kind':'latency'})
@@ -311,6 +332,18 @@ class DeviceTests(unittest.TestCase):
                        {'device_token':'a'*40,'stream_base_url':'http://127.0.0.1:8099'},
                        {'device_token':'a'*40,'stream_base_url':'http://192.168.1.4:8099/private'}]:
             with self.assertRaises(ValueError): validate_config(config)
+
+
+class StreamSignalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stability_preserves_every_probe_before_continuous_pilot(self):
+        stream = Stream('stability', 3)
+        ticks = iter([0.0])
+        with patch('jarvis.server.time', SimpleNamespace(monotonic=lambda:next(ticks, 100.0))):
+            pcm = np.frombuffer(b''.join([chunk async for chunk in stream.blocks()]), dtype='<i2')
+        for _, probe in stream.markers:
+            detection = detect_probe(pcm, probe)
+            self.assertEqual(detection['status'], 'detected', detection)
+            self.assertGreater(detection['confidence'], .99)
 
 
 if __name__ == '__main__': unittest.main()

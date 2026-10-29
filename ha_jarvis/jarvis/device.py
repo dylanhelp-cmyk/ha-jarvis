@@ -47,6 +47,7 @@ def parse_diagnostics(value):
                                   if isinstance(key, str) and re.fullmatch(r"[a-z_]{1,64}", key)}
         parsed["root_fault"] = fault(value.get("root_fault"))
         parsed["last_fault"] = fault(value.get("last_fault"))
+        parsed["transport_fault"] = fault(value.get("transport_fault"))
         return parsed
     except (ValueError, KeyError, TypeError):
         return None

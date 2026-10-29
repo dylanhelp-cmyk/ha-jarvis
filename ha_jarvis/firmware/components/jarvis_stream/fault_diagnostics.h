@@ -35,5 +35,10 @@ inline void write_fault_diagnostics(JsonObject out, const FaultSnapshot &snapsho
   for (size_t i = 0; i < snapshot.counts.size(); ++i) counts[FAULT_NAMES[i]] = snapshot.counts[i];
   write_fault_record(out, "root_fault", snapshot.root);
   write_fault_record(out, "last_fault", snapshot.last);
+  // Avoid serializing duplicate numeric records; root/last already export them.
+  if (snapshot.transport.sequence == snapshot.root.sequence || snapshot.transport.sequence == snapshot.last.sequence)
+    out["transport_fault"] = nullptr;
+  else
+    write_fault_record(out, "transport_fault", snapshot.transport);
 }
 }  // namespace esphome::jarvis_stream

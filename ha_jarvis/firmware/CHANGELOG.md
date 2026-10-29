@@ -1,3 +1,12 @@
+# 0.1.5 — awake Wi-Fi and retain the SDK transport event
+
+- Set Wi-Fi power saving to `NONE` in the shared repository package and enforce it through ESPHome's supported final-validation helper. Existing local repository entries inherit the policy without file copying. ESPHome's ESP32 default was `LIGHT`; [Espressif's ESP32-S3 / ESP-IDF 5.5.6 guidance](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32s3/api-guides/wifi.html#wi-fi-power-saving-mode) recommends disabling modem sleep to minimize real-time receive delay, at increased power consumption. This removes a source of latency; the reported drop is not proven to have been caused by power saving.
+- Preserve the first numeric TCP SDK event as optional `diagnostics.transport_fault`. The pinned client can dispatch a generic `ERROR` before its abort path supplies TCP/TLS/socket diagnostics on `DISCONNECTED`; a later generic PCM-send failure previously displaced that middle event. Keep the original root reason/codes unchanged, and omit the supplemental record when root/last already contain it. Reconnect retention and exact boot/connection/capture identities remain intact.
+- Keep outgoing slots at 2048 bytes and limit encoded identity fields to 350 bytes combined; maximum-length 64-byte ASCII IDs and 256-byte ASCII tokens still fit. Test the real serializer's largest valid three-record envelope and the SDK's generic-error → numeric-disconnect → PCM-failure ordering offline.
+- Keep the 30 ms PCM timeout, 100 ms control timeout, audio protocol, capture limits and reconnect/lifecycle behavior unchanged. No firmware was flashed or device restarted during development.
+
+Rebuild the existing local entry in ESPHome Builder after its five-minute repository cache expires and confirm **0.1.5** before installing. The policy and additional retained SDK evidence need a new device build; development images contain dummy credentials and are not installation artifacts.
+
 # 0.1.4 — retain disconnect evidence in RAM
 
 - Export bounded `diagnostics` in both `hello` and `status`, including after reconnect. A random boot ID, monotonic uptime and connection/capture generations identify the affected boot and capture. `capture_started` includes both generations for exact App correlation.

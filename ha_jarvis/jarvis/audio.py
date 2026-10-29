@@ -9,6 +9,7 @@ import numpy as np
 
 RATE = 16000
 MAX_PLAYBACK_DELAY_SECONDS = 15.0
+STABILITY_PILOT_GAP_SECONDS = .5
 FRAME = struct.Struct("<4sBBHIQI")
 
 
@@ -161,23 +162,37 @@ def detect_stop(captured: np.ndarray, capture_start: float, stop_at: float) -> d
 
 
 def detect_stability(captured, capture_start, stream_start, stream_duration, latency_ms, markers):
-    """Inspect continuous pilot between the coded probes in a quiet room."""
+    """Inspect a separate pilot after probes, with a quiet-room reference."""
     n, hop = 512, 80
+    if len(captured) < RATE * 2:
+        return {"status": "unavailable", "reason": "Capture too short for a pilot reference"}
     frames = np.lib.stride_tricks.sliding_window_view(captured.astype(float) / 32768, n)[::hop]
     power = np.abs(np.fft.rfft(frames * np.hanning(n), axis=1)) ** 2
     total = power[:, 10:110].sum(axis=1) + 1e-12
-    target = np.zeros(len(frames))
+    bands = []
     for hz in (937, 1579):
         index = int(round(hz * n / RATE))
-        target += power[:, index - 1:index + 2].sum(axis=1)
+        bands.append(power[:, index - 1:index + 2].sum(axis=1))
+    target = bands[0] + bands[1]
     times = capture_start + (np.arange(len(frames)) * hop + n / 2) / RATE
     lag = latency_ms / 1000
-    mask = (times > stream_start + lag + 1) & (times < stream_start + lag + stream_duration - 1)
+    pilot_start = max([stream_start + 1] + [emitted + len(probe) / RATE + STABILITY_PILOT_GAP_SECONDS for emitted, probe in markers]) + lag
+    mask = (times > pilot_start + .1) & (times < stream_start + lag + stream_duration - 1.1)
     for emitted, probe in markers:
         mask &= ~((times > emitted + lag - .1) & (times < emitted + lag + len(probe) / RATE + .1))
-    active = (target / total > .55) & (target > .001)
-    if np.count_nonzero(mask) < RATE / hop / 2 or np.count_nonzero(active & mask) < RATE / hop / 4:
-        return {"status": "unavailable", "reason": "Continuous pilot could not be established independently of probes"}
+    quiet = times < stream_start + lag - .15
+    reference = mask & (times < pilot_start + 1.1)
+    if np.count_nonzero(quiet) < RATE / hop / 4 or np.count_nonzero(reference) < RATE / hop / 2:
+        return {"status": "unavailable", "reason": "Insufficient quiet baseline or pilot reference"}
+    floor = max(float(np.percentile(target[quiet], 95)), 1e-12)
+    level = float(np.median(target[reference]))
+    snr_db = 10 * math.log10(max(level - floor, 1e-12) / floor)
+    active = (target / total > .55) & (target > max(floor * 6, level * .2))
+    coverage = float(np.mean(active[reference]))
+    evidence = {"pilot_snr_db": round(snr_db, 1), "reference_coverage": round(coverage, 3)}
+    both_bands = all(np.median(band[reference]) > max(float(np.percentile(band[quiet], 95)), 1e-12) * 4 for band in bands)
+    if snr_db < 8 or coverage < .9 or not both_bands:
+        return {"status": "unavailable", "reason": "Pilot too weak or interrupted to establish a reliable reference; gap counts are unavailable", **evidence}
     gaps, run = [], 0
     for valid, heard in zip(mask, active):
         if valid and not heard:
@@ -189,4 +204,4 @@ def detect_stability(captured, capture_start, stream_start, stream_duration, lat
     return {"status": "measured", "dropout_count": len(gaps),
             "dropout_ms": round(sum(gaps), 1), "longest_gap_ms": round(max(gaps, default=0), 1),
             "observed_ms": round(np.count_nonzero(mask) * hop / RATE * 1000, 1),
-            "method": "continuous two-band pilot outside probe windows; quiet-room estimate"}
+            **evidence, "method": "two-band pilot after probes; calibrated quiet-room estimate"}

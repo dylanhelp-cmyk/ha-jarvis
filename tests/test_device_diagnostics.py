@@ -24,6 +24,13 @@ class FirmwareDiagnosticsTests(unittest.TestCase):
         parsed = parse_diagnostics(value)
         self.assertNotIn('token', parsed)
         self.assertNotIn('url', parsed['root_fault'])
+        self.assertIsNone(parsed['transport_fault'])
+        value['transport_fault'] = {**value['root_fault'], 'sequence':3,
+                                    'reason':'websocket_disconnected', 'errno':104,
+                                    'url':'do-not-retain'}
+        parsed = parse_diagnostics(value)
+        self.assertEqual(parsed['transport_fault']['errno'], 104)
+        self.assertNotIn('url', parsed['transport_fault'])
         for bad in ({**value, 'schema':2}, {**value, 'boot_id':'invalid'},
                     {**value, 'uptime_ms':-1}, {**value, 'fault_counts':{'x':True}}):
             self.assertIsNone(parse_diagnostics(bad))

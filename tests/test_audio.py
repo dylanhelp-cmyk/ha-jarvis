@@ -95,14 +95,43 @@ class AudioTests(unittest.TestCase):
                 self.assertAlmostEqual(start / RATE + match["offset_seconds"] - (.1 + i * 2), delay, delta=.012)
 
     def test_continuous_pilot_distinguishes_gap_from_stable_playback(self):
-        t = np.arange(RATE * 8) / RATE
+        t = np.arange(RATE * 10) / RATE
         captured = ((np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)) * 1000).astype("<i2")
-        good = detect_stability(captured, 0, 0, 8, 0, [])
+        captured[:RATE * 2] = 0
+        captured[RATE * 8:] = 0
+        good = detect_stability(captured, 0, 1, 8, 0, [])
         self.assertEqual(good["dropout_count"], 0)
-        captured[RATE*3:RATE*4] = 0
-        bad = detect_stability(captured, 0, 0, 8, 0, [])
+        captured[RATE*5:RATE*6] = 0
+        bad = detect_stability(captured, 0, 1, 8, 0, [])
         self.assertEqual(bad["dropout_count"], 1)
         self.assertGreater(bad["dropout_ms"], 900)
+
+    def test_clean_low_level_pilot_does_not_require_high_absolute_volume(self):
+        t = np.arange(RATE * 10) / RATE
+        for amplitude in (1000, 50, 3):
+            captured = ((np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)) * amplitude).astype('<i2')
+            captured[:RATE * 2] = 0
+            captured[RATE * 8:] = 0
+            result = detect_stability(captured, 0, 1, 8, 0, [])
+            self.assertEqual(result['status'], 'measured', result)
+            self.assertEqual(result['dropout_count'], 0)
+
+    def test_weak_pilot_is_unavailable_instead_of_false_dropout_counts(self):
+        captured = np.random.default_rng(5).normal(0, 20, RATE * 10).astype('<i2')
+        t = np.arange(RATE * 6) / RATE
+        captured[RATE*2:RATE*8] += (np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)).astype('<i2')
+        result = detect_stability(captured, 0, 1, 8, 0, [])
+        self.assertEqual(result['status'], 'unavailable', result)
+        self.assertNotIn('dropout_count', result)
+
+    def test_interrupted_reference_cannot_certify_continuity(self):
+        t = np.arange(RATE * 10) / RATE
+        captured = ((np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)) * 1000).astype('<i2')
+        captured[:RATE*2] = 0
+        captured[int(RATE*2.2):int(RATE*2.7)] = 0
+        result = detect_stability(captured, 0, 1, 8, 0, [])
+        self.assertEqual(result['status'], 'unavailable', result)
+        self.assertNotIn('dropout_count', result)
 
 
 if __name__ == "__main__": unittest.main()

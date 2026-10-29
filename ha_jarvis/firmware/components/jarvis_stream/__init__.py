@@ -3,7 +3,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import json
 from urllib.parse import urlsplit
-from esphome.components import esp32, i2c, microphone
+from esphome.components import esp32, i2c, microphone, wifi
 from esphome.const import CONF_ID, CONF_MICROPHONE
 
 DEPENDENCIES = ["esp32", "wifi", "i2c"]
@@ -28,8 +28,8 @@ def hello_identity_budget(value):
     # Reserve the remainder of the fixed 2048-byte outgoing slot for bounded
     # diagnostics and hello metadata, including worst-case numeric values.
     identity = {key: value[key] for key in ("device_id", "token")}
-    if len(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 512:
-        raise cv.Invalid("JSON-encoded device_id and token must fit 512 bytes including field names")
+    if len(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 350:
+        raise cv.Invalid("JSON-encoded device_id and token must fit 350 bytes including field names")
     return value
 
 CONFIG_SCHEMA = cv.All(
@@ -43,9 +43,13 @@ CONFIG_SCHEMA = cv.All(
     hello_identity_budget,
     cv.only_with_framework("esp-idf"),
 )
-FINAL_VALIDATE_SCHEMA = cv.Schema({
+def low_latency_wifi(config):
+    wifi.force_power_save_off("Jarvis PCM streaming keeps Wi-Fi awake for bounded real-time sends")
+    return config
+
+FINAL_VALIDATE_SCHEMA = cv.All(cv.Schema({
     cv.Required(CONF_MICROPHONE): microphone.final_validate_microphone_source_schema("jarvis_stream", sample_rate=16000),
-}, extra=cv.ALLOW_EXTRA)
+}, extra=cv.ALLOW_EXTRA), low_latency_wifi)
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])

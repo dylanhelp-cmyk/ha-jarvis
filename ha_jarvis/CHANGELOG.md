@@ -1,3 +1,10 @@
+# 0.1.10
+
+- Play the continuous stability pilot after all three coded probes so it cannot weaken their detection. Calibrate continuity against quiet-room noise and a clear pilot reference; weak or interrupted reference audio reports unavailable, without misleading gap counts.
+- Require a measured continuity result before marking a stability test measured. Show pilot signal-to-noise and reference coverage in the interface. Volume remains under your control.
+- Pair with firmware 0.1.5: disable Wi-Fi power saving and retain the SDK's intermediate TCP error details across reconnect. The earlier disconnect's cause remains unconfirmed; PCM deadlines and buffering are unchanged.
+- Update both App and firmware, then run one AirPlay/WAV Stream stability test at comfortable audible volume. Export after completion or reconnection; no further repeats needed for this revision.
+
 # 0.1.9
 
 - Export firmware 0.1.4's bounded RAM fault history after reconnect, including boot/connection/capture identities. Match a reported first fault to a failed test only when all identities agree; distinguish a changed boot ID without inventing a restart cause.
