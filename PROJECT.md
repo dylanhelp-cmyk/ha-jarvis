@@ -1,6 +1,12 @@
 # HA Jarvis: agreed scope and progress
 
-Project continuity record derived from the user's original requirements and accepted plan. New user instructions take precedence. Last updated: 29 October 2026.
+Project continuity record derived from the user's original requirements and accepted plan. New user instructions take precedence. Last updated: 3 November 2026.
+
+## Current testing authority and objective
+
+The user now delegates project installation, firmware deployment and hardware/audio tests to the agent, superseding the original user-operated workflow below. Continue measuring and improving initial startup and conversational response delay until further changes have diminishing returns; do not replace this goal with a software-only benchmark or route-only acceptance. The initial OpenAI API-test spending cap is US$5 total. API credentials stay local and are never pasted into chat or committed. Runtime exports and household details stay in ignored local data files.
+
+Use repeated acoustic trials and separate cold startup, warm playback, actual end-of-speech responses, interruptions, queue age and reliability. Prefer a few evidence-driven changes to repeated blind revisions. For this optimization run, regard two successive plausible changes with less than 100 ms repeatable gain (or gains smaller than trial variation), unacceptable stability/echo tradeoffs, or a verified receiver/cloud floor as diminishing-return evidence for that path. This is an operational stopping rule, not a claim of global optimality; retain the original latency targets and report unmet requirements honestly. Real conversational measurements require implementing the cloud slice and echo handling, not merely declaring playback-path tuning complete.
 
 ## Intended experience
 

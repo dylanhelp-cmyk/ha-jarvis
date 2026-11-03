@@ -83,7 +83,7 @@ def capture_health(pcm: np.ndarray) -> dict:
 
 
 def detect_probe(captured: np.ndarray, probe: np.ndarray) -> dict:
-    """Spectral normalized matching tolerates independent audio clock phase.
+    """Match spectral timing independently of phase and fixed channel EQ.
 
     Report no result for clipped, ambiguous or absent signals. Offset is from
     capture start; clock and microphone pipeline uncertainty is added by caller.
@@ -93,16 +93,28 @@ def detect_probe(captured: np.ndarray, probe: np.ndarray) -> dict:
     if np.mean(np.abs(captured.astype(float)) >= 32760) > .005:
         return {"status": "unavailable", "reason": "Microphone clipped", "confidence": 0.0}
     a, b = _features(captured), _features(probe)
+    # A global spectral cosine confuses the room/speaker frequency response
+    # with a different sequence: seeds containing more attenuated tones score
+    # lower even with clean audio. Center and normalize each band's temporal
+    # pattern separately. Template variance supplies fixed weights, so neither
+    # receiver EQ nor a loud unrelated band can choose the matching evidence.
+    b = b - np.mean(b, axis=0)
+    template_energy = np.sum(b * b, axis=0)
+    total_template_energy = float(np.sum(template_energy))
+    if total_template_energy <= 1e-9:
+        return {"status": "unavailable", "reason": "Probe has no spectral sequence", "confidence": 0.0}
     length = len(a) + len(b) - 1
     fft_len = 1 << (length - 1).bit_length()
-    corr = np.zeros(len(a) - len(b) + 1)
+    score = np.zeros(len(a) - len(b) + 1)
     for band in range(b.shape[1]):
         c = np.fft.irfft(np.fft.rfft(a[:, band], fft_len) * np.fft.rfft(b[::-1, band], fft_len), fft_len)
-        corr += c[len(b) - 1:len(a)]
-    energy = np.sum(a * a, axis=1)
-    cumulative = np.concatenate(([0.0], np.cumsum(energy)))
-    denom = np.sqrt(np.maximum(0, cumulative[len(b):] - cumulative[:-len(b)]) * np.sum(b * b))
-    score = np.divide(corr, denom, out=np.zeros_like(corr), where=denom > 1e-9)
+        corr = c[len(b) - 1:len(a)]
+        cumulative = np.concatenate(([0.0], np.cumsum(a[:, band])))
+        squares = np.concatenate(([0.0], np.cumsum(a[:, band] ** 2)))
+        energy = squares[len(b):] - squares[:-len(b)] - (cumulative[len(b):] - cumulative[:-len(b)]) ** 2 / len(b)
+        denom = np.sqrt(np.maximum(0, energy) * template_energy[band])
+        normalized = np.divide(corr, denom, out=np.zeros_like(corr), where=denom > 1e-9)
+        score += np.clip(normalized, -1, 1) * template_energy[band] / total_template_energy
     peak = int(np.argmax(score))
     confidence = min(1.0, max(0.0, float(score[peak])))
     alternatives = score.copy()
@@ -113,7 +125,7 @@ def detect_probe(captured: np.ndarray, probe: np.ndarray) -> dict:
         return {"status": "unavailable", "reason": "Probe match too weak" if confidence < .65 else "Multiple competing probe matches",
                 "confidence": confidence, "competing_confidence": round(competing, 4)}
     return {"status": "detected", "offset_seconds": peak * 64 / RATE, "confidence": confidence,
-            "resolution_ms": 4.0, "method": "normalized spectral sequence match"}
+            "resolution_ms": 4.0, "method": "per-band centered normalized spectral sequence match"}
 
 
 def summarize(trials: list[dict]) -> dict:

@@ -12,7 +12,8 @@ import numpy as np
 from pyatv.protocols.raop import RaopStream
 from pyatv.protocols.raop.protocols import StreamContext
 from pyatv.protocols.raop.protocols.airplayv2 import AirPlayV2
-from pyatv.protocols.raop.stream_client import StreamClient
+from pyatv.protocols.raop.packets import SyncPacket
+from pyatv.protocols.raop.stream_client import ControlClient, StreamClient
 from pyatv.settings import Settings
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
@@ -157,7 +158,7 @@ class AirPlayDecodeTests(unittest.IsolatedAsyncioTestCase):
 class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
     def connection(self, initialize=None):
         context = StreamContext()
-        manager = SimpleNamespace(acquire=Mock(),
+        manager = SimpleNamespace(acquire=Mock(), context=context,
             setup=AsyncMock(return_value=(SimpleNamespace(initialize=initialize or AsyncMock()), context)),
             teardown=AsyncMock())
         release = Mock()
@@ -179,6 +180,7 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
         release.assert_called_once()
         self.assertIs(raop.open_source, original_open)
         self.assertNotIn('stream_file', vars(stream))
+        self.assertNotIn('reset', vars(manager.context))
 
     async def test_cancel_keeps_upstream_release_teardown_and_globals(self):
         from pyatv.protocols import raop
@@ -197,6 +199,102 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
         manager.teardown.assert_awaited_once()
         release.assert_called_once()
         self.assertIs(raop.open_source, original_open)
+        self.assertNotIn('reset', vars(manager.context))
+
+    async def test_latency_controls_real_sender_sync_and_restores_context(self):
+        from pyatv.protocols import raop
+        original_open = raop.open_source
+        original_class_reset = StreamContext.reset
+        for latency_ms in (1500, 500):
+            connection, stream, manager, release = self.connection()
+            context = manager.context
+            original_latency = context.latency
+            audio = SimpleNamespace(has_changed_volume=True, volume=47, set_volume=AsyncMock())
+            stream.audio = audio
+            rtsp = SimpleNamespace(session_id=123, connection=SimpleNamespace(remote_ip='127.0.0.1'),
+                record=AsyncMock(), flush=AsyncMock(), teardown=AsyncMock())
+            protocol = AirPlayV2(context, rtsp)
+            key = bytes(range(32))
+            protocol._cipher = Chacha20Cipher8byteNonce(key, key)
+            protocol.start_feedback = AsyncMock()
+            client = StreamClient(rtsp, context, protocol, Settings())
+            client.initialize = AsyncMock()
+            client.control_client = ControlClient(context, client._packet_backlog)
+            sync_transport = SimpleNamespace(sendto=Mock(), close=Mock())
+            client.control_client.connection_made(sync_transport)
+            client.timing_server = SimpleNamespace(close=Mock())
+            collector = PacketCollector()
+            collector.close = Mock()
+            client.loop = SimpleNamespace(create_datagram_endpoint=AsyncMock(return_value=(collector, None)))
+            manager.setup = AsyncMock(return_value=(client, context))
+            # Exercise real send_audio/reset, real pacing, encrypted audio and sync.
+            # Only the HTTP source and network sockets are replaced.
+            remaining = 2
+            async def readframes(count):
+                nonlocal remaining
+                if remaining:
+                    remaining -= 1
+                    return b'\x00\x01' * (count * 2)
+                return b''
+            source = SimpleNamespace(duration=0, readframes=readframes, close=AsyncMock())
+            telemetry = sender_telemetry()
+            with patch('jarvis.airplay_source.ProgressiveAudioSource.open', AsyncMock(return_value=source)):
+                options = {} if latency_ms == 1500 else {'latency_ms': latency_ms}
+                await progressive_stream_file(connection, 'http://127.0.0.1/test.wav', telemetry,
+                                              **options)
+            sync_transport.sendto.assert_called()
+            packet = SyncPacket.decode(sync_transport.sendto.call_args_list[0].args[0])
+            expected_samples = 44100 * latency_ms // 1000
+            self.assertEqual(packet.now - packet.now_without_latency, expected_samples)
+            self.assertEqual(telemetry['requested_airplay_latency_ms'], latency_ms)
+            self.assertEqual(telemetry['selected_airplay_latency_samples'], expected_samples)
+            self.assertEqual(telemetry['selected_airplay_sample_rate_hz'], 44100)
+            self.assertGreater(len(collector.packets), 2)
+            self.assertNotIn('reset', vars(context))
+            self.assertIs(StreamContext.reset, original_class_reset)
+            self.assertIs(raop.open_source, original_open)
+            self.assertEqual(context.latency, original_latency)
+            context.reset()
+            self.assertEqual(context.latency, 66150)
+            source.close.assert_awaited_once()
+            manager.teardown.assert_awaited_once()
+            release.assert_called_once()
+
+    async def test_existing_context_reset_is_restored_after_cancel_or_error(self):
+        for cancelled in (False, True):
+            entered = asyncio.Event()
+            connection, stream, manager, release = self.connection()
+            context = manager.context
+            original_reset = Mock(wraps=context.reset)
+            context.reset = original_reset
+            async def initialize(properties):
+                context.sample_rate = 48000
+                context.reset()
+                self.assertEqual(context.latency, 24000)
+                entered.set()
+                if cancelled:
+                    await asyncio.Event().wait()
+                raise RuntimeError('after context reset')
+            manager.setup.return_value[0].initialize = initialize
+            telemetry = sender_telemetry()
+            task = asyncio.create_task(progressive_stream_file(
+                connection, 'http://127.0.0.1/test.wav', telemetry, latency_ms=500))
+            await entered.wait()
+            if cancelled:
+                task.cancel()
+            with self.assertRaises(asyncio.CancelledError if cancelled else RuntimeError):
+                await task
+            self.assertIs(context.reset, original_reset)
+            self.assertEqual(telemetry['selected_airplay_latency_samples'], 24000)
+            self.assertEqual(telemetry['selected_airplay_sample_rate_hz'], 48000)
+
+    async def test_invalid_latency_fails_before_session_acquire(self):
+        connection, stream, manager, release = self.connection()
+        for latency_ms in (249, 2001, True, 500.5, '500'):
+            with self.assertRaisesRegex(ValueError, '250 to 2000'):
+                progressive_stream_file(connection, 'http://127.0.0.1/test.wav',
+                                        sender_telemetry(), latency_ms=latency_ms)
+        manager.acquire.assert_not_called()
 
     async def test_version_drift_fails_before_session_acquire(self):
         connection, stream, manager, release = self.connection()

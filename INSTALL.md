@@ -1,6 +1,6 @@
-# Install and update — App 0.1.11 / firmware 0.1.6
+# Install and update — App 0.1.12 / firmware 0.1.6
 
-This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. You control installation, firmware flashing and every audible test. Keep the previous GPT-Live App stopped.
+This is the **local wireless audio bench**, not the conversational assistant yet. It makes **no OpenAI calls**. On 3 November the user delegated project updates and tests to the agent. Keep the previous GPT-Live App stopped. App 0.1.12 adds requested AirPlay timing under Advanced settings, more room-tolerant probe detection and local API-key entry under OpenAI test preparation. Saving a key starts no paid session; the agreed initial API-test cap is US$5.
 
 **App 0.1.11 + firmware 0.1.6:** update both. Rebuild your existing Builder entry after the five-minute Git cache expires and confirm firmware **0.1.6** before installing. This revision tests a modest PCM send-timeout increase from 30 to 100 ms, with the audio queue capacity unchanged. It records successful/failed send durations, maximum firmware queue residence and the last failed send's returned/expected bytes. Measurements survive reconnect in RAM and are matched to the exact capture in the App. The SDK's separate waits mean 100 ms is not a hard call-duration bound. The cause of the earlier disconnects remains unconfirmed; a passing trial alone does not prove a fix.
 

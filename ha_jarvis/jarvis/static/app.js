@@ -29,7 +29,7 @@ function announce(message, error = false) {
   $('notice').hidden = !message;
 }
 function configValues() {
-  return {wiim_host: $('wiim-host').value.trim(), stream_base_url: $('stream-base-url').value.trim(), route: $('route').value, codec: $('codec').value, repetitions: 3, device_token: $('device-token').value.trim(), verify_tls: $('verify-tls').checked, slimproto_port: Number($('slimproto-port').value), slimproto_player_id: $('slimproto-player').value};
+  return {wiim_host: $('wiim-host').value.trim(), stream_base_url: $('stream-base-url').value.trim(), route: $('route').value, codec: $('codec').value, repetitions: 3, device_token: $('device-token').value.trim(), verify_tls: $('verify-tls').checked, slimproto_port: Number($('slimproto-port').value), slimproto_player_id: $('slimproto-player').value, airplay_latency_ms: Number($('airplay-latency').value)};
 }
 function updateReadiness() {
   const running = Boolean(status?.test?.running);
@@ -258,7 +258,7 @@ $('copy-token').addEventListener('click', async () => {
 async function initialize() {
   try {
     const config = await api('api/config');
-    for (const key of ['wiim_host', 'stream_base_url', 'route', 'codec', 'device_token', 'slimproto_port', 'slimproto_player_id']) {
+    for (const key of ['wiim_host', 'stream_base_url', 'route', 'codec', 'device_token', 'slimproto_port', 'slimproto_player_id', 'airplay_latency_ms']) {
       const field = document.querySelector(`[name="${key}"]`);
       if (config[key] !== undefined) {
         if (key === 'slimproto_player_id' && config[key]) {
@@ -273,6 +273,15 @@ async function initialize() {
   } catch (error) {$('save-state').textContent = 'Could not load settings'; announce(error.message, true);}
   await poll(); updateReadiness();
 }
+$('cloud-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const settings = await api('api/cloud', {method: 'PUT', body: JSON.stringify({api_key: $('openai-key').value.trim()})});
+    $('openai-key').value = '';
+    $('cloud-state').textContent = settings.api_key_configured ? 'Key saved locally. Cloud sessions remain disabled in this revision.' : 'No key configured.';
+  } catch (error) { $('cloud-state').textContent = error.message; }
+});
+api('api/cloud').then((settings) => { $('cloud-state').textContent = settings.api_key_configured ? 'API key configured locally; cloud tests remain disabled.' : 'API key needed before live conversation benchmarks.'; }).catch(() => { $('cloud-state').textContent = 'Credential status unavailable.'; });
 document.addEventListener('visibilitychange', () => {if (!document.hidden) poll();});
 initialize();
 setInterval(poll, 2000);

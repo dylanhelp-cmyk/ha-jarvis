@@ -26,12 +26,13 @@ import numpy as np
 from . import __version__
 from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
 from .device import Device
+from .cloud_settings import CloudSettings
 
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
 DEFAULTS = {"wiim_host": "", "stream_base_url": "", "route": "http", "codec": "wav",
             "repetitions": 3, "verify_tls": True, "slimproto_player_id": "",
-            "slimproto_port": 3483}
+            "slimproto_port": 3483, "airplay_latency_ms": 1500}
 
 
 def validate_config(value):
@@ -58,6 +59,8 @@ def validate_config(value):
         raise ValueError("verify_tls must be a boolean")
     if type(config["slimproto_port"]) is not int or not 1024 <= config["slimproto_port"] <= 65535:
         raise ValueError("SlimProto port must be between 1024 and 65535")
+    if type(config["airplay_latency_ms"]) is not int or not 250 <= config["airplay_latency_ms"] <= 2000:
+        raise ValueError("Requested AirPlay latency must be between 250 and 2000 ms")
     token = config.get("device_token", "")
     if len(token) < 32 or len(token) > 128 or not all(c.isalnum() or c in "-_" for c in token):
         raise ValueError("Device token must contain 32–128 URL-safe characters")
@@ -117,6 +120,7 @@ class Bench:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cloud_settings = CloudSettings(self.data_dir)
         self.path = self.data_dir / "settings.json"
         self.firmware_secrets_path = self.data_dir / "firmware-secrets.json"
         self.config = {**DEFAULTS, "device_token": secrets.token_urlsafe(32)}
@@ -288,8 +292,11 @@ class Bench:
             url = self.config["stream_base_url"].rstrip("/") + "/stream/" + self.stream.id + "." + extension
             self.test["phase"] = "waiting for speaker stream"
             play_requested = time.monotonic()
-            await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1, "sample_size": 16})
+            await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1,
+                                            "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"]})
             result["wire_format"] = "pcm_s16le" if extension == "pcm" else extension
+            if self.config["route"] == "airplay":
+                result["requested_airplay_latency_ms"] = self.config["airplay_latency_ms"]
             if self.config["route"] == "airplay":
                 await self.transport.wait_for_stream(self.stream.connected, timeout=12)
             else:
@@ -454,6 +461,13 @@ def create_ui(bench):
     async def index(request):
         return web.FileResponse(ROOT / "jarvis/static/index.html")
     async def status(request): return web.json_response(bench.status())
+    async def cloud_settings(request):
+        if request.method == "PUT":
+            data = await request.json()
+            if not isinstance(data, dict) or set(data) != {"api_key"}:
+                raise ValueError("Only local API key entry is supported")
+            bench.cloud_settings.set_key(data["api_key"])
+        return web.json_response(bench.cloud_settings.public())
     async def config(request):
         if request.method == "PUT":
             if bench.test["running"]:
@@ -527,6 +541,8 @@ def create_ui(bench):
     app.router.add_get("/", index)
     app.router.add_static("/static/", ROOT / "jarvis/static")
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/cloud", cloud_settings)
+    app.router.add_put("/api/cloud", cloud_settings)
     app.router.add_get("/api/config", config)
     app.router.add_put("/api/config", config)
     app.router.add_post("/api/tests", start)

@@ -267,7 +267,13 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
                                           remote_control=SimpleNamespace(stop=AsyncMock(side_effect=stop)),
                                           close=lambda: set())
         self.adapter = AirPlayTransport("127.0.0.1", connection=self.connection, stop_timeout=0.05,
-            streamer=lambda connection, url, telemetry, codec: connection.stream.stream_file(url))
+            streamer=lambda connection, url, telemetry, codec, latency_ms: connection.stream.stream_file(url))
+
+    async def test_requested_sender_latency_reaches_session_adapter(self):
+        self.adapter._streamer = AsyncMock()
+        await self.adapter.play('http://127.0.0.1/stream.wav', {'airplay_latency_ms': 500})
+        self.adapter._streamer.assert_awaited_once_with(
+            self.connection, 'http://127.0.0.1/stream.wav', self.adapter._sender, 'wav', 500)
 
     async def asyncTearDown(self):
         await self.adapter.close()

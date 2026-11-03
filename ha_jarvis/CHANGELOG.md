@@ -1,3 +1,10 @@
+# 0.1.12
+
+- Add a bounded per-session AirPlay timing request (250–2000 ms; unchanged 1500 ms default), restored after playback. Preserve upstream authentication, encryption, volume and cancellation; actual delay still needs acoustic measurement.
+- Normalize probe matching per frequency band to tolerate speaker/room EQ. Probe identities, clipping rejection, acceptance threshold and ambiguity margin remain unchanged.
+- Add local write-only OpenAI API-key entry and show the agreed US$5 initial API-test cap. Saving credentials opens no connection; cloud sessions remain disabled in this revision.
+- App-only update; firmware stays 0.1.6. The agent now operates controlled acoustic comparisons directly under the user's authorization.
+
 # 0.1.11
 
 - Pair with firmware 0.1.6's PCM send-timeout experiment (30 → 100 ms). Audio queue capacity and failure/reset behavior remain unchanged; the SDK timeout is not a hard whole-call duration limit.

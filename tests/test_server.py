@@ -40,6 +40,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_cloud_key_stays_local_and_never_enters_read_or_diagnostic_responses(self):
+        key = 'sk-test-local-only-' + 'x' * 32
+        response = await self.ui.put('/api/cloud', json={'api_key':key})
+        value = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(value['api_key_configured'])
+        self.assertFalse(value['enabled'])
+        self.assertEqual(value['budget_usd'], 5)
+        self.assertEqual(Bench(self.folder.name).cloud_settings.api_key, key)
+        for path in ('/api/cloud', '/api/status', '/api/config', '/api/diagnostics'):
+            response = await self.ui.get(path)
+            self.assertNotIn(key, await response.text())
+        response = await self.ui.put('/api/cloud', json={'api_key':'too short'})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.bench.cloud_settings.api_key, key)
+
+    async def test_airplay_timing_is_bounded_and_persists_without_starting_audio(self):
+        for value in (True, 249, 2001, 500.5):
+            response = await self.ui.put('/api/config', json={'airplay_latency_ms':value})
+            self.assertEqual(response.status, 400)
+        response = await self.ui.put('/api/config', json={'airplay_latency_ms':500})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(Bench(self.folder.name).config['airplay_latency_ms'], 500)
+        self.assertIsNone(self.bench.task)
+
     @asynccontextmanager
     async def running_test(self, kind='latency'):
         """Exercise actual test task and WS handling with a fake speaker only."""

@@ -3,7 +3,8 @@
 pyatv 0.18.0 has no public AudioSource injection API. Its URL opener parses
 optional metadata before playback and its InternetSource reads synchronously.
 Keep its complete session implementation, with a function-local source opener.
-No pyatv module, class, instance or global is modified, even during cancellation.
+No pyatv module, class or global is modified. A session-local context reset
+override selects the RTP/sync latency and is restored even during cancellation.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ import miniaudio
 from pyatv.const import Protocol, __version__
 from pyatv.protocols.raop import RaopStream
 from pyatv.protocols.raop.audio_source import AudioSource
+from pyatv.protocols.raop.protocols import StreamContext
 from pyatv.support.metadata import EMPTY_METADATA
 
 
@@ -216,7 +218,7 @@ def sender_telemetry():
             'cancelled': False, 'audible_onset_measured': False}
 
 
-def progressive_stream_file(connection, url, telemetry, codec='wav'):
+def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=1500):
     """Return the original RAOP session coroutine with a local source override.
 
     The supported public metadata arguments cannot prevent eager source metadata.
@@ -232,6 +234,14 @@ def progressive_stream_file(connection, url, telemetry, codec='wav'):
     stream = connection.stream.get(Protocol.RAOP)
     if type(stream) is not RaopStream:
         raise RuntimeError('Progressive AirPlay adapter requires a pyatv RAOP stream instance')
+    if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or not 250 <= latency_ms <= 2000:
+        raise ValueError('AirPlay sender latency must be an integer from 250 to 2000 ms')
+    context = stream.playback_manager.context
+    if type(context) is not StreamContext:
+        raise RuntimeError('Progressive AirPlay adapter requires a pyatv RAOP stream context')
+    telemetry['requested_airplay_latency_ms'] = latency_ms
+    telemetry['selected_airplay_latency_samples'] = None
+    telemetry['selected_airplay_sample_rate_hz'] = None
     async def open_bench_source(file, sample_rate, channels, sample_size):
         if file != url or not isinstance(file, str):
             raise ValueError('Progressive AirPlay source URL does not match this session')
@@ -241,4 +251,26 @@ def progressive_stream_file(connection, url, telemetry, codec='wav'):
     local = FunctionType(original.__code__, namespace, original.__name__,
                          original.__defaults__, original.__closure__)
     local.__kwdefaults__ = original.__kwdefaults__
-    return local(stream, url, metadata=EMPTY_METADATA)
+    async def stream_with_latency():
+        # send_audio resets the context immediately before scheduling packets.
+        # Keep that reset intact, then select only this session's RTP/sync offset.
+        # Neither packet pacing nor any pyatv class/module is modified.
+        original_reset = context.reset
+        had_instance_reset = 'reset' in vars(context)
+        original_instance_reset = vars(context).get('reset')
+        original_latency = context.latency
+        def reset():
+            original_reset()
+            context.latency = context.sample_rate * latency_ms // 1000
+            telemetry['selected_airplay_latency_samples'] = context.latency
+            telemetry['selected_airplay_sample_rate_hz'] = context.sample_rate
+        context.reset = reset
+        try:
+            await local(stream, url, metadata=EMPTY_METADATA)
+        finally:
+            if had_instance_reset:
+                context.reset = original_instance_reset
+            else:
+                del context.reset
+            context.latency = original_latency
+    return stream_with_latency()

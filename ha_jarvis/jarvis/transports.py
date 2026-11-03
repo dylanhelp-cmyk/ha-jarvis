@@ -422,7 +422,8 @@ class AirPlayTransport(Transport):
             self._event("stream_task_started", note="Progressive HTTP decoder; handoff timing is software only")
             sender = self._streamer or progressive_stream_file
             self._stream_task = asyncio.create_task(sender(
-                self._connection, stream_url, self._sender, _codec(config)))
+                self._connection, stream_url, self._sender, _codec(config),
+                config.get('airplay_latency_ms', 1500)))
             self._stream_task.add_done_callback(self._completed)
             self.active = True
             # Surface synchronous setup errors without waiting for the whole stream.

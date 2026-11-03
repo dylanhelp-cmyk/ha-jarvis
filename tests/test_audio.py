@@ -25,6 +25,56 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(detected["status"], "detected", detected)
         self.assertAlmostEqual(detected["offset_seconds"], .5, delta=.012)
 
+    @staticmethod
+    def room_capture(probe, gain=.03, noise=3):
+        # A causal two-pole low-pass models a fixed speaker/microphone EQ;
+        # delayed reflections add 17--119 ms of room decay. Each identity sees
+        # the same channel, rather than tailoring a filter to its symbols.
+        pole = .15 * .85 ** np.arange(128)
+        impulse = np.convolve(pole, pole)
+        impulse /= impulse.sum()
+        direct = np.pad(np.convolve(probe.astype(float), impulse) * gain, (0, 2000))
+        sound = direct.copy()
+        for delay, strength in ((271, .7), (577, -.5), (1027, .35), (1901, .2)):
+            sound[delay:] += direct[:-delay] * strength
+        captured = np.random.default_rng(20).normal(0, noise, RATE * 7)
+        captured[RATE:RATE + len(sound)] += sound
+        return captured.astype("<i2")
+
+    def test_fixed_channel_eq_room_decay_and_low_gain_preserve_all_trial_identities(self):
+        probes = [make_probe(seed) for seed in (513, 514, 515)]
+        for gain in (.1, .03):
+            for identity, probe in enumerate(probes):
+                captured = self.room_capture(probe, gain)
+                result = detect_probe(captured, probe)
+                self.assertEqual(result["status"], "detected", (identity, gain, result))
+                self.assertGreaterEqual(result["confidence"], .65)
+                self.assertAlmostEqual(result["offset_seconds"], 1, delta=.012)
+                for other in probes:
+                    if np.array_equal(other, probe):
+                        continue
+                    wrong = detect_probe(captured, other)
+                    self.assertEqual(wrong["status"], "unavailable", (identity, gain, wrong))
+                    self.assertNotIn("offset_seconds", wrong)
+
+    def test_room_probe_buried_in_noise_remains_unavailable(self):
+        for seed in (513, 514, 515):
+            probe = make_probe(seed)
+            result = detect_probe(self.room_capture(probe, gain=.0003, noise=20), probe)
+            self.assertEqual(result["status"], "unavailable", result)
+            self.assertNotIn("offset_seconds", result)
+
+    def test_stationary_and_modulated_unrelated_sound_cannot_match_probe(self):
+        t = np.arange(RATE * 17) / RATE
+        noise = np.random.default_rng(3).normal(0, 500, len(t))
+        sounds = (noise, 1000 * np.sin(2 * np.pi * 940 * t),
+                  noise * (.5 + .5 * np.sin(2 * np.pi * 11 * t)))
+        for sound in sounds:
+            for seed in (513, 514, 515):
+                result = detect_probe(sound.astype("<i2"), make_probe(seed))
+                self.assertEqual(result["status"], "unavailable", result)
+                self.assertNotIn("offset_seconds", result)
+
     def test_no_signal_is_unavailable_not_zero(self):
         result = detect_probe(np.zeros(RATE * 2, dtype="<i2"), make_probe())
         self.assertEqual(result["status"], "unavailable")
