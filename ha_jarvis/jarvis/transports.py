@@ -23,6 +23,9 @@ class TransportError(RuntimeError):
 
 
 MIME_TYPES = {"wav": "audio/wav", "flac": "audio/flac"}
+_AIRPLAY_DISCOVERY_CACHE: dict[str, tuple[float, Any]] = {}
+_AIRPLAY_DISCOVERY_TTL = 300.0
+_AIRPLAY_DISCOVERY_LIMIT = 16
 SLIMPROTO_REQUIREMENT = "aioslimproto @ https://github.com/music-assistant/aioslimproto/archive/f133feab2d94bc9be7e4704548e18be4bbc53727.zip"
 SLIM_PCM_RATES = {8000, 11000, 12000, 16000, 22000, 24000, 44100, 48000,
                   88200, 96000, 176400, 192000, 352800, 384000}
@@ -350,7 +353,8 @@ class AirPlayTransport(Transport):
     def __init__(self, device_host: str, *,
                  connection: Any = None, scan_timeout: float = 5.0,
                  stop_timeout: float = 5.0, state_reader: Callable[..., Any] | None = None,
-                 streamer: Callable[..., Any] | None = None) -> None:
+                 streamer: Callable[..., Any] | None = None,
+                 discovery_cache: dict[str, tuple[float, Any]] | None = None) -> None:
         super().__init__()
         self.device_host = device_host
         self.scan_timeout = scan_timeout
@@ -360,6 +364,8 @@ class AirPlayTransport(Transport):
         self._state_reader = state_reader
         self._streamer = streamer
         self._sender: dict[str, Any] | None = None
+        self._discovery_cache = _AIRPLAY_DISCOVERY_CACHE if discovery_cache is None else discovery_cache
+        self._uses_discovery = False
 
     def snapshot(self) -> dict[str, Any]:
         result = super().snapshot()
@@ -380,6 +386,22 @@ class AirPlayTransport(Transport):
         except ImportError as exc:
             raise TransportError("AirPlay unavailable: install pyatv==0.18.0") from exc
         loop = asyncio.get_running_loop()
+        self._uses_discovery = True
+        cached = self._discovery_cache.get(self.device_host)
+        if cached is not None:
+            age = time.monotonic() - cached[0]
+            if 0 <= age < _AIRPLAY_DISCOVERY_TTL:
+                self._event('raop_discovery_cache_hit', age_ms=round(age * 1000, 1))
+                try:
+                    # pyatv deep-copies config; never cache a connected facade.
+                    self._connection = await asyncio.wait_for(
+                        pyatv.connect(cached[1], loop, protocol=Protocol.RAOP), 5.0)
+                    self._event('raop_connected', discovery_cached=True)
+                    return
+                except Exception:
+                    # No stream has started: one fresh discovery/connect is safe.
+                    self._event('raop_cached_connect_failed')
+            self._discovery_cache.pop(self.device_host, None)
         configs = await pyatv.scan(loop, hosts=[self.device_host], protocol=Protocol.RAOP,
                                    timeout=self.scan_timeout)
         if len(configs) != 1:
@@ -392,8 +414,17 @@ class AirPlayTransport(Transport):
             self._event("raop_discovered", properties=properties, pairing=str(service.pairing))
             if service.pairing == PairingRequirement.Mandatory:
                 raise TransportError("RAOP receiver requires pairing; pairing is not implemented in this bench")
-        self._connection = await pyatv.connect(configs[0], loop, protocol=Protocol.RAOP)
-        self._event("raop_connected")
+        self._connection = await asyncio.wait_for(
+            pyatv.connect(configs[0], loop, protocol=Protocol.RAOP), 5.0)
+        now = time.monotonic()
+        for host, entry in list(self._discovery_cache.items()):
+            if not 0 <= now - entry[0] < _AIRPLAY_DISCOVERY_TTL:
+                self._discovery_cache.pop(host, None)
+        if len(self._discovery_cache) >= _AIRPLAY_DISCOVERY_LIMIT:
+            oldest = min(self._discovery_cache, key=lambda host: self._discovery_cache[host][0])
+            self._discovery_cache.pop(oldest, None)
+        self._discovery_cache[self.device_host] = (now, configs[0])
+        self._event("raop_connected", discovery_cached=False)
 
     async def play(self, stream_url: str, config: Mapping[str, Any]) -> None:
         _url(stream_url)
@@ -421,9 +452,11 @@ class AirPlayTransport(Transport):
             self._sender = sender_telemetry()
             self._event("stream_task_started", note="Progressive HTTP decoder; handoff timing is software only")
             sender = self._streamer or progressive_stream_file
+            source_options = ({'source_factory': config['source_factory']}
+                              if config.get('source_factory') is not None else {})
             self._stream_task = asyncio.create_task(sender(
                 self._connection, stream_url, self._sender, _codec(config),
-                config.get('airplay_latency_ms', 1500)))
+                config.get('airplay_latency_ms', 1500), **source_options))
             self._stream_task.add_done_callback(self._completed)
             self.active = True
             # Surface synchronous setup errors without waiting for the whole stream.
@@ -435,6 +468,8 @@ class AirPlayTransport(Transport):
             raise
         except Exception as exc:
             self.active = False
+            if self._uses_discovery:
+                self._discovery_cache.pop(self.device_host, None)
             self.last_error = str(exc) or type(exc).__name__
             self._event("play_failed", error=self.last_error, exception_type=type(exc).__name__)
             raise TransportError(f"AirPlay playback failed: {self.last_error}") from exc
@@ -494,6 +529,10 @@ class AirPlayTransport(Transport):
             return
         error = task.exception()
         if error is not None:
+            # Actual RAOP TCP/auth setup occurs inside stream_file, after connect.
+            # Invalidate for the next explicit trial; never replay failed audio.
+            if self._uses_discovery:
+                self._discovery_cache.pop(self.device_host, None)
             self.last_error = str(error) or type(error).__name__
             self._event("stream_failed", error=self.last_error, exception_type=type(error).__name__)
         else:

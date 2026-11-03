@@ -15,5 +15,6 @@ Read `PROJECT.md` before planning or changing this project. It records the user'
 ## Validation
 
 - Development checks: `.venv/Scripts/python.exe tools/check.py` on Windows, with development dependencies installed. Check changed browser JavaScript with `node --check`; use `git diff --check`.
+- This Windows sandbox can hang asyncio's local socket-pair initialization and deny compiler/temp caches. Run trusted offline loopback/async checks with the tool's escalated permission when needed; use ignored `data/` for scratch caches. Do not misdiagnose these known environment failures as transport regressions or relax timeouts to make checks pass.
 - For firmware changes, use relevant host checks and ESPHome validation/compile with dummy local secrets. Never distribute development binaries with dummy credentials as installation artifacts.
 - Offline tests cannot establish speaker latency, echo cancellation, room acoustics or receiver interoperability. Report missing measurements as unavailable. Avoid repeating broad checks without a new reason.

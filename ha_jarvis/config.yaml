@@ -1,7 +1,7 @@
 name: HA Jarvis Audio Bench
-version: "0.1.12"
+version: "0.1.13"
 slug: ha_jarvis
-description: User-operated wireless audio tests for Jarvis. No cloud calls.
+description: Local audio and explicitly started, budgeted cloud voice benchmarks for Jarvis.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis
 arch:
   - amd64

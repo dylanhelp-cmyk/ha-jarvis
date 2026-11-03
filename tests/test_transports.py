@@ -2,10 +2,11 @@
 import asyncio
 import inspect
 import struct
+import time
 import unittest
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import AsyncMock, Mock, create_autospec
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 from jarvis.transports import AirPlayTransport, NativeHTTPTransport, SlimProtoTransport, TransportError
 
@@ -370,6 +371,97 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
         task = self.adapter._stream_task
         await self.adapter.stop()
         self.assertTrue(task.cancelled())
+
+
+class AirPlayDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    def config(self):
+        from pyatv.const import PairingRequirement
+        return SimpleNamespace(get_service=Mock(return_value=SimpleNamespace(
+            properties={'sr': '44100'}, pairing=PairingRequirement.NotNeeded)))
+
+    async def test_discovery_reused_for_same_host_with_a_fresh_facade(self):
+        config = self.config()
+        cache = {}
+        connections = [SimpleNamespace(close=Mock(return_value=set())) for _ in range(2)]
+        with patch('pyatv.scan', AsyncMock(return_value=[config])) as scan, \
+             patch('pyatv.connect', AsyncMock(side_effect=connections)) as connect:
+            first = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+            await first._connect()
+            timestamp = cache['127.0.0.1'][0]
+            await first.close()
+            second = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+            await second._connect()
+            self.assertIs(second._connection, connections[1])
+            self.assertIsNot(second._connection, connections[0])
+            self.assertEqual(cache['127.0.0.1'][0], timestamp)  # no sliding expiry
+            self.assertTrue(any(e['event'] == 'raop_discovery_cache_hit' for e in second.events))
+            self.assertEqual(scan.await_count, 1)
+            self.assertEqual(connect.await_count, 2)
+            for call in connect.await_args_list:
+                self.assertIs(call.args[0], config)
+            await second.close()
+            for connection in connections:
+                connection.close.assert_called_once()
+
+    async def test_expired_or_different_host_is_scanned(self):
+        config = self.config()
+        for cached_host, cached_age in (('127.0.0.1', 301), ('127.0.0.2', 0)):
+            cache = {cached_host: (time.monotonic() - cached_age, self.config())}
+            with patch('pyatv.scan', AsyncMock(return_value=[config])) as scan, \
+                 patch('pyatv.connect', AsyncMock(return_value=SimpleNamespace())) as connect:
+                adapter = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+                await adapter._connect()
+                scan.assert_awaited_once()
+                self.assertEqual(scan.await_args.kwargs['hosts'], ['127.0.0.1'])
+                self.assertIs(connect.await_args.args[0], config)
+
+    async def test_bad_cached_connect_has_only_one_fresh_discovery_retry(self):
+        cached, fresh = self.config(), self.config()
+        cache = {'127.0.0.1': (time.monotonic(), cached)}
+        with patch('pyatv.scan', AsyncMock(return_value=[fresh])) as scan, \
+             patch('pyatv.connect', AsyncMock(side_effect=[RuntimeError('stale'), SimpleNamespace()])) as connect:
+            adapter = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+            await adapter._connect()
+            scan.assert_awaited_once()
+            self.assertEqual(connect.await_count, 2)
+            self.assertIs(connect.await_args_list[0].args[0], cached)
+            self.assertIs(connect.await_args_list[1].args[0], fresh)
+            self.assertIs(cache['127.0.0.1'][1], fresh)
+
+    async def test_failed_refresh_is_not_retried_again_or_cached(self):
+        cache = {'127.0.0.1': (time.monotonic(), self.config())}
+        with patch('pyatv.scan', AsyncMock(return_value=[self.config()])) as scan, \
+             patch('pyatv.connect', AsyncMock(side_effect=RuntimeError('connection failed'))) as connect:
+            adapter = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+            with self.assertRaisesRegex(RuntimeError, 'connection failed'):
+                await adapter._connect()
+            scan.assert_awaited_once()
+            self.assertEqual(connect.await_count, 2)
+            self.assertNotIn('127.0.0.1', cache)
+
+    async def test_stream_failure_invalidates_cache_without_replaying_audio(self):
+        cache = {}
+        sender = AsyncMock(side_effect=RuntimeError('RAOP setup failed'))
+        with patch('pyatv.scan', AsyncMock(return_value=[self.config()])) as scan, \
+             patch('pyatv.connect', AsyncMock(return_value=SimpleNamespace(close=lambda: set()))) as connect:
+            adapter = AirPlayTransport('127.0.0.1', discovery_cache=cache, streamer=sender)
+            with self.assertRaisesRegex(TransportError, 'RAOP setup failed'):
+                await adapter.play('http://127.0.0.1/test.wav', {})
+            self.assertNotIn('127.0.0.1', cache)
+            sender.assert_awaited_once()
+            scan.assert_awaited_once()
+            connect.assert_awaited_once()
+            await adapter.close()
+
+    async def test_cache_size_is_bounded(self):
+        now = time.monotonic()
+        cache = {str(index): (now - index, self.config()) for index in range(16)}
+        with patch('pyatv.scan', AsyncMock(return_value=[self.config()])), \
+             patch('pyatv.connect', AsyncMock(return_value=SimpleNamespace())):
+            await AirPlayTransport('127.0.0.1', discovery_cache=cache)._connect()
+        self.assertEqual(len(cache), 16)
+        self.assertNotIn('15', cache)
+        self.assertIn('127.0.0.1', cache)
 
 
 if __name__ == "__main__":

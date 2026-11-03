@@ -121,6 +121,7 @@ class Bench:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cloud_settings = CloudSettings(self.data_dir)
+        self.cloud_fixture = b""
         self.path = self.data_dir / "settings.json"
         self.firmware_secrets_path = self.data_dir / "firmware-secrets.json"
         self.config = {**DEFAULTS, "device_token": secrets.token_urlsafe(32)}
@@ -144,6 +145,7 @@ class Bench:
         self.slim = None
         self.slim_error = None
         self.firmware_observations = deque(maxlen=20)
+        self.airplay_discovery_cache = {}
 
     def observe_firmware(self):
         diagnostics = self.device.info.get("diagnostics")
@@ -197,6 +199,33 @@ class Bench:
             temporary.chmod(0o600)
         temporary.replace(self.path)
 
+    async def partial_playback_evidence(self, kind):
+        """Salvage scalar observations without passing an interrupted capture."""
+        if kind not in ("latency", "stability") or not self.stream or not self.stream.markers:
+            return None
+        try:
+            pcm, capture_start = self.device.recording()
+        except ValueError:
+            return None
+        horizon = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
+        trials = []
+        for index, (emitted, probe) in enumerate(self.stream.markers):
+            start = max(0, int((emitted - capture_start - .1) * RATE))
+            end = min(len(pcm), int((emitted - capture_start + horizon + len(probe) / RATE) * RATE))
+            detection = await asyncio.to_thread(detect_probe, pcm[start:end], probe)
+            trial = {"trial": index + 1, **detection, "latency_ms": None}
+            if detection["status"] == "detected" and self.stream.schedule_lag_ms <= 50:
+                latency = (capture_start + start / RATE + detection["offset_seconds"] - emitted) * 1000
+                if latency >= 0:
+                    trial["latency_ms"] = round(latency, 1)
+            trials.append(trial)
+        summary = summarize(trials)
+        if not summary["valid_trials"]:
+            return None
+        return {"scope": "Provisional observations from incomplete capture; test remains failed",
+                "trials": trials, "summary": summary,
+                "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 4, 2)}
+
     async def init_slim(self):
         if self.slim:
             await self.slim.close()
@@ -225,7 +254,8 @@ class Bench:
                                   "clients": self.slim.players() if self.slim else [], "reason": self.slim_error},
                     "airplay": {"available": True, "reason": "Baseline: requires an unpaired RAOP receiver; no automatic pairing"}},
                 "codecs": {"wav": True, "flac": shutil.which("ffmpeg") is not None},
-                "cloud": {"enabled": False, "reason": "Wireless audio validation comes first; this build has no OpenAI client"}}
+                "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
+                          "reason": "Explicit paid injected-input benchmark only; conversational assistant is not enabled"}}
 
     async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
@@ -280,7 +310,8 @@ class Bench:
                         return await reader.output_state()
                     finally:
                         await reader.close()
-                self.transport = AirPlayTransport(device_host=self.config["wiim_host"], state_reader=read_wiim_state)
+                self.transport = AirPlayTransport(device_host=self.config["wiim_host"], state_reader=read_wiim_state,
+                                                  discovery_cache=self.airplay_discovery_cache)
             else:
                 if not self.slim:
                     raise ValueError(self.slim_error or "SlimProto server is not ready")
@@ -422,6 +453,10 @@ class Bench:
                 await self.device.end()
             result["capture"] = self.device.capture_diagnostics()
             self.observe_firmware()
+            if result["status"] == "failed":
+                partial = await self.partial_playback_evidence(kind)
+                if partial is not None:
+                    result["partial_playback_evidence"] = partial
             self.device.frames.clear()
             result["summary"] = summarize(result["trials"])
             self.test = {"running": False, "phase": "idle"}
@@ -457,7 +492,7 @@ async def ingress_only(request, handler):
 
 
 def create_ui(bench):
-    app = web.Application(middlewares=[errors, ingress_only], client_max_size=8192)
+    app = web.Application(middlewares=[errors, ingress_only], client_max_size=262144)
     async def index(request):
         return web.FileResponse(ROOT / "jarvis/static/index.html")
     async def status(request): return web.json_response(bench.status())
@@ -467,7 +502,49 @@ def create_ui(bench):
             if not isinstance(data, dict) or set(data) != {"api_key"}:
                 raise ValueError("Only local API key entry is supported")
             bench.cloud_settings.set_key(data["api_key"])
-        return web.json_response(bench.cloud_settings.public())
+        return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
+                                  "benchmark_available": True,
+                                  "reason": "Paid injected-input benchmark requires explicit Start; conversational assistant remains disabled"})
+    async def cloud_fixture(request):
+        if bench.test["running"]:
+            raise web.HTTPConflict(text="Wait for the current test before replacing its fixture")
+        data = await request.json()
+        try:
+            pcm = base64.b64decode(data["pcm_b64"], validate=True)
+        except (ValueError, KeyError, TypeError):
+            raise ValueError("Supply a base64 PCM16LE mono 16 kHz test fixture") from None
+        if len(pcm) % 2 or not RATE // 2 <= len(pcm) // 2 <= RATE * 5:
+            raise ValueError("The synthetic fixture must contain 0.5 to 5 seconds of audio")
+        bench.cloud_fixture = pcm
+        return web.json_response({"fixture_loaded": True, "duration_seconds": len(pcm) / (RATE * 2), "retained_on_disk": False})
+    async def audio_capabilities(request):
+        try:
+            from .aec import HostAEC3
+            usable = len(HostAEC3().process(bytes(320), bytes(320))) == 320
+            return web.json_response({"native_aec3_usable": usable, "frame_ms": 10, "sample_rate": RATE,
+                                      "acoustically_verified": False, "clock_alignment_integrated": False})
+        except Exception as exc:
+            return web.json_response({"native_aec3_usable": False, "reason": type(exc).__name__})
+    async def cloud_start(request):
+        data = await request.json()
+        if bench.test["running"]:
+            raise web.HTTPConflict(text="A test is already running")
+        transport = data.get("transport", "webrtc")
+        if transport not in ("webrtc", "websocket"):
+            raise ValueError("Choose webrtc or websocket")
+        if not bench.cloud_settings.api_key or bench.cloud_settings.pending or not bench.cloud_fixture:
+            raise ValueError("A local API key, loaded synthetic fixture and confirmed prior finalization are required")
+        if bench.cloud_settings.spent_usd + .05 > bench.cloud_settings.budget_usd:
+            raise ValueError("This attempt would exceed the remaining US$5 API-test budget")
+        if bench.config["route"] != "airplay" or not bench.device.snapshot()["connected"] or bench.device.info.get("muted"):
+            raise ValueError("Select AirPlay and connect/unmute Voice PE before the cloud benchmark")
+        if data.get("comfortable_volume_confirmed") is not True:
+            raise ValueError("Confirm a comfortable amplifier volume before starting")
+        from .live_bench import run_cloud_benchmark
+        ident = uuid.uuid4().hex
+        bench.test = {"running": True, "id": ident, "phase": "preparing paid injected-input benchmark"}
+        bench.task = asyncio.create_task(run_cloud_benchmark(bench, transport, bench.cloud_fixture))
+        return web.json_response({"test_id": ident, "transport": transport, "api_budget_usd": 5}, status=202)
     async def config(request):
         if request.method == "PUT":
             if bench.test["running"]:
@@ -510,7 +587,8 @@ def create_ui(bench):
         status["transports"]["slimproto"]["clients"] = []
         body = {"version": __version__, "config": config, "status": status,
                 "results": bench.results, "firmware_observations": list(bench.firmware_observations),
-                "audio_retained": False, "cloud_calls": 0}
+                "audio_retained": False, "cloud_calls": bench.cloud_settings.attempt_count,
+                "cloud_call_count_scope": "session creation attempts; audio messages and close events are not counted"}
         def redact_identifiers(value):
             if isinstance(value, dict):
                 return {key: "[redacted]" if key in ("player_id", "advertised_host", "device_id") else redact_identifiers(item)
@@ -543,6 +621,9 @@ def create_ui(bench):
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/cloud", cloud_settings)
     app.router.add_put("/api/cloud", cloud_settings)
+    app.router.add_put("/api/cloud/fixture", cloud_fixture)
+    app.router.add_get("/api/audio/capabilities", audio_capabilities)
+    app.router.add_post("/api/cloud/tests", cloud_start)
     app.router.add_get("/api/config", config)
     app.router.add_put("/api/config", config)
     app.router.add_post("/api/tests", start)

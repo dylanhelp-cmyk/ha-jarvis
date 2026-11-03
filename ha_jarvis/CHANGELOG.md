@@ -1,3 +1,11 @@
+# 0.1.13
+
+- Cache receiver discovery for five minutes while creating fresh authenticated sessions. Preserve provisional acoustic observations from failed captures without marking them successful.
+- Add a continuous, bounded AirPlay source and explicitly started WebRTC/WebSocket GPT-Live synthetic-input benchmarks. Microphone audio stays local in this mode. This is not a conversational assistant or acoustic AEC acceptance.
+- Enforce durable US$0.05 reservations within the US$5 initial voice-test budget. Unconfirmed finalization blocks further paid attempts. Credentials and usage stay local; no cloud session starts on App startup.
+- Bundle verified native AEC3 processing for subsequent acoustic integration. Synthetic checks do not establish real-room echo suppression or drift handling.
+- App-only update; firmware stays 0.1.6. The agent operates comparisons directly under the current testing authorization.
+
 # 0.1.12
 
 - Add a bounded per-session AirPlay timing request (250–2000 ms; unchanged 1500 ms default), restored after playback. Preserve upstream authentication, encryption, volume and cancellation; actual delay still needs acoustic measurement.

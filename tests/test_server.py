@@ -65,6 +65,35 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Bench(self.folder.name).config['airplay_latency_ms'], 500)
         self.assertIsNone(self.bench.task)
 
+    async def test_interrupted_capture_keeps_provisional_latency_separate_from_success(self):
+        probe = make_probe(513)
+        capture_start = 100.0
+        emitted = capture_start + .5
+        pcm = np.concatenate((np.zeros(RATE, dtype='<i2'), probe, np.zeros(RATE, dtype='<i2')))
+        self.bench.device.clock_rtt_ms = 20
+        self.bench.stream = SimpleNamespace(markers=[(emitted, probe)], schedule_lag_ms=0)
+        with patch.object(self.bench.device, 'recording', return_value=(pcm, capture_start)):
+            evidence = await self.bench.partial_playback_evidence('stability')
+        self.assertEqual(evidence['summary']['valid_trials'], 1)
+        self.assertAlmostEqual(evidence['summary']['median_ms'], 500, delta=8)
+        self.assertIn('remains failed', evidence['scope'])
+        self.assertNotIn('stability', evidence)
+        self.bench.stream = None
+
+    async def test_synthetic_fixture_is_memory_only_and_missing_key_blocks_paid_start(self):
+        import base64
+        response = await self.ui.put('/api/cloud/fixture', json={'pcm_b64':base64.b64encode(bytes(RATE * 2)).decode()})
+        self.assertEqual(response.status, 200)
+        self.assertFalse((await response.json())['retained_on_disk'])
+        self.assertEqual(len(self.bench.cloud_fixture), RATE * 2)
+        self.assertFalse(Bench(self.folder.name).cloud_fixture)
+        response = await self.ui.post('/api/cloud/tests', json={'transport':'webrtc', 'comfortable_volume_confirmed':True})
+        self.assertEqual(response.status, 400)
+        self.assertIsNone(self.bench.task)
+        self.assertIsNone(self.bench.cloud_settings.pending)
+        response = await self.ui.put('/api/cloud/fixture', json={'pcm_b64':'invalid!'})
+        self.assertEqual(response.status, 400)
+
     @asynccontextmanager
     async def running_test(self, kind='latency'):
         """Exercise actual test task and WS handling with a fake speaker only."""

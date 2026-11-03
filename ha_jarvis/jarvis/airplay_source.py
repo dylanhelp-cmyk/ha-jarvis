@@ -218,7 +218,7 @@ def sender_telemetry():
             'cancelled': False, 'audible_onset_measured': False}
 
 
-def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=1500):
+def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=1500, source_factory=None):
     """Return the original RAOP session coroutine with a local source override.
 
     The supported public metadata arguments cannot prevent eager source metadata.
@@ -245,6 +245,14 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
     async def open_bench_source(file, sample_rate, channels, sample_size):
         if file != url or not isinstance(file, str):
             raise ValueError('Progressive AirPlay source URL does not match this session')
+        if source_factory is not None:
+            source = await source_factory(sample_rate, channels, sample_size)
+            if (not isinstance(source, AudioSource)
+                    or (source.sample_rate, source.channels, source.sample_size) != (sample_rate, channels, sample_size)):
+                if isinstance(source, AudioSource):
+                    await source.close()
+                raise ValueError('AirPlay source factory must match the negotiated PCM format')
+            return source
         return await ProgressiveAudioSource.open(
             file, sample_rate, channels, sample_size, telemetry, codec)
     namespace = dict(original.__globals__, open_source=open_bench_source)

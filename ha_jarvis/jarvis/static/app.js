@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', connection: 'Microphone connection'};
+const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', connection: 'Microphone connection', cloud_latency: 'Injected voice benchmark'};
 let status = null;
 let dirty = false;
 let configured = false;
@@ -128,6 +128,7 @@ function renderResults(data) {
     card.append(node('p', 'result-meta', result.kind === 'connection' ? `${date} · Voice PE → Jarvis · no speaker playback` : `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${result.wire_format === 'pcm_s16le' ? 'PCM' : String(result.codec || '—').toUpperCase()}`));
     const metrics = node('div', 'metrics');
     const stopMetric = result.kind === 'stop';
+    if (result.kind === 'cloud_latency') card.append(node('p', 'result-warning', 'Synthetic input → acoustic reply. This is not measured human end-of-speech latency or full-duplex acceptance.'));
     const values = result.kind === 'connection' ? [['Captured', `${result.capture?.duration_seconds ?? '—'} s`], ['Frames received', result.capture?.frames ?? '—'], ['Outcome', result.status || '—']] : [[stopMetric ? 'Median stop → silence' : 'Median onset latency', milliseconds(result.summary?.median_ms)], ['95th percentile', milliseconds(result.summary?.p95_ms)], ['Valid trials', `${result.summary?.valid_trials ?? 0} / ${result.trials?.length ?? 0}`]];
     values.forEach(([label, value]) => {
       const metric = node('div'); metric.append(node('span', 'metric-label', label), node('span', 'metric-value', value)); metrics.append(metric);
@@ -140,6 +141,8 @@ function renderResults(data) {
       if (health.signal === 'digital_silence') card.append(node('p', 'result-warning', 'Microphone frames contain only zeros. Increasing speaker volume cannot resolve digital silence.'));
     }
     if (result.error) card.append(node('p', 'result-warning', `Test error: ${result.error}`));
+    const partial = result.partial_playback_evidence;
+    if (partial) card.append(node('p', 'result-warning', `Incomplete capture: ${partial.summary.valid_trials} provisional onset match(es), median ${milliseconds(partial.summary.median_ms)}. The test remains failed; playback continuity and long-session reliability are unverified.`));
     if (result.interruption) {
       const interruption = result.interruption;
       card.append(node('p', 'result-meta', `Ended after ${interruption.elapsed_seconds ?? '—'}s · ${interruption.reason} · phase: ${interruption.phase || 'unknown'}.`));
@@ -278,10 +281,20 @@ $('cloud-form').addEventListener('submit', async (event) => {
   try {
     const settings = await api('api/cloud', {method: 'PUT', body: JSON.stringify({api_key: $('openai-key').value.trim()})});
     $('openai-key').value = '';
-    $('cloud-state').textContent = settings.api_key_configured ? 'Key saved locally. Cloud sessions remain disabled in this revision.' : 'No key configured.';
+    $('cloud-state').textContent = settings.api_key_configured ? 'Key saved locally. Paid benchmarks require an explicit Start.' : 'No key configured.';
   } catch (error) { $('cloud-state').textContent = error.message; }
 });
-api('api/cloud').then((settings) => { $('cloud-state').textContent = settings.api_key_configured ? 'API key configured locally; cloud tests remain disabled.' : 'API key needed before live conversation benchmarks.'; }).catch(() => { $('cloud-state').textContent = 'Credential status unavailable.'; });
+$('run-cloud-test').addEventListener('click', async () => {
+  if (!$('volume-confirmed').checked || !$('idle-confirmed').checked) {
+    announce('Confirm comfortable volume and an idle speaker before a paid benchmark.', true); return;
+  }
+  try {
+    await api('api/cloud/tests', {method: 'POST', body: JSON.stringify({transport: $('live-transport').value, comfortable_volume_confirmed: true})});
+    announce('Paid synthetic voice benchmark started. Use Stop test to cancel.');
+    await poll();
+  } catch (error) { announce(error.message, true); }
+});
+api('api/cloud').then((settings) => { $('cloud-state').textContent = settings.api_key_configured ? 'API key configured locally; initial API-test cap US$5.' : 'API key needed before live conversation benchmarks.'; }).catch(() => { $('cloud-state').textContent = 'Credential status unavailable.'; });
 document.addEventListener('visibilitychange', () => {if (!document.hidden) poll();});
 initialize();
 setInterval(poll, 2000);
