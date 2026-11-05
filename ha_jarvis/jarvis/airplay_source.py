@@ -218,7 +218,8 @@ def sender_telemetry():
             'cancelled': False, 'audible_onset_measured': False}
 
 
-def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=1500, source_factory=None):
+def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=1500,
+                            source_factory=None, verify_output=None):
     """Return the original RAOP session coroutine with a local source override.
 
     The supported public metadata arguments cannot prevent eager source metadata.
@@ -242,7 +243,10 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
     telemetry['requested_airplay_latency_ms'] = latency_ms
     telemetry['selected_airplay_latency_samples'] = None
     telemetry['selected_airplay_sample_rate_hz'] = None
+    guarded_client = None
+    previous_stream_data = None
     async def open_bench_source(file, sample_rate, channels, sample_size):
+        nonlocal guarded_client, previous_stream_data
         if file != url or not isinstance(file, str):
             raise ValueError('Progressive AirPlay source URL does not match this session')
         if source_factory is not None:
@@ -252,9 +256,22 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
                 if isinstance(source, AudioSource):
                     await source.close()
                 raise ValueError('AirPlay source factory must match the negotiated PCM format')
-            return source
-        return await ProgressiveAudioSource.open(
-            file, sample_rate, channels, sample_size, telemetry, codec)
+        else:
+            source = await ProgressiveAudioSource.open(
+                file, sample_rate, channels, sample_size, telemetry, codec)
+        if verify_output is not None:
+            client = stream.playback_manager.stream_client
+            stream_data = client._stream_data
+
+            async def checked_stream_data(*args):
+                # RECORD/FLUSH have run. Verify before starting the packet clock.
+                await verify_output()
+                return await stream_data(*args)
+
+            guarded_client = client
+            previous_stream_data = vars(client).get('_stream_data')
+            client._stream_data = checked_stream_data
+        return source
     namespace = dict(original.__globals__, open_source=open_bench_source)
     local = FunctionType(original.__code__, namespace, original.__name__,
                          original.__defaults__, original.__closure__)
@@ -267,12 +284,23 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
         had_instance_reset = 'reset' in vars(context)
         original_instance_reset = vars(context).get('reset')
         original_latency = context.latency
+        audio = stream.audio if verify_output is not None else None
+        original_set_volume = vars(audio).get('set_volume') if audio is not None else None
+        had_instance_set_volume = audio is not None and 'set_volume' in vars(audio)
+
+        async def keep_receiver_volume(_level):
+            # pyatv's fallback sends a default if RAOP provides no initialVolume.
+            # Leave source-specific receiver volume alone in either case.
+            telemetry['default_volume_write_skipped'] = True
+
         def reset():
             original_reset()
             context.latency = context.sample_rate * latency_ms // 1000
             telemetry['selected_airplay_latency_samples'] = context.latency
             telemetry['selected_airplay_sample_rate_hz'] = context.sample_rate
         context.reset = reset
+        if audio is not None:
+            audio.set_volume = keep_receiver_volume
         try:
             await local(stream, url, metadata=EMPTY_METADATA)
         finally:
@@ -281,4 +309,14 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
             else:
                 del context.reset
             context.latency = original_latency
+            if guarded_client is not None:
+                if previous_stream_data is None:
+                    del guarded_client._stream_data
+                else:
+                    guarded_client._stream_data = previous_stream_data
+            if audio is not None:
+                if had_instance_set_volume:
+                    audio.set_volume = original_set_volume
+                else:
+                    del audio.set_volume
     return stream_with_latency()

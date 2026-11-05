@@ -1,3 +1,9 @@
+# 0.1.14
+
+- Leave volume under receiver control. Check WiiM readback after AirPlay source selection and before sending PCM. Abort if the level rises, mute is active, or readback fails.
+- Add a silent AirPlay source-switch check, acoustic probe handoff timestamps, and an offline quiet-room AEC3 pilot test. The echo test requires stable playback and consistent acoustic delays.
+- App-only update. With AirPlay selected and the speaker idle, run Silent AirPlay volume check once and compare receiver levels before playback, before PCM, and after stop.
+
 # 0.1.13
 
 - Cache receiver discovery for five minutes while creating fresh authenticated sessions. Preserve provisional acoustic observations from failed captures without marking them successful.

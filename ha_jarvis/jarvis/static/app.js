@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', connection: 'Microphone connection', cloud_latency: 'Injected voice benchmark'};
+const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Injected voice benchmark'};
 let status = null;
 let dirty = false;
 let configured = false;
@@ -163,10 +163,26 @@ function renderResults(data) {
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the 100 ms probe lead-in.`));
     const sender = result.transport?.sender;
+    if (result.kind === 'volume') {
+      const events = result.transport?.events || [];
+      const before = events.find((event) => event.event === 'receiver_before_play');
+      const switched = events.find((event) => event.event === 'receiver_before_pcm');
+      const after = result.transport?.receiver_after;
+      const percent = (state) => state ? `${state.volume_percent}%` : 'unavailable';
+      card.append(node('p', 'result-meta', `WiiM volume before switch ${percent(before)} · before PCM ${percent(switched)} · after stop ${percent(after)}.`));
+    }
     if (sender) card.append(node('p', 'result-meta', `AirPlay sender software: source setup ${milliseconds(sender.source_open_ms)} · first PCM supplied ${milliseconds(sender.first_pcm_handed_to_raop_ms)} after sender start · longest PCM read wait ${milliseconds(sender.max_pcm_read_wait_ms)}. These are not audible-output measurements.`));
     const estimates = (result.trials || []).map((trial) => trial.clock_uncertainty_ms).filter((value) => typeof value === 'number' && Number.isFinite(value));
     if (estimates.length) card.append(node('p', 'result-meta', `Clock/detector estimate: ±${Math.max(...estimates).toFixed(1)} ms. Microphone pipeline delay is uncalibrated; this is not a total uncertainty bound.`));
-    if (result.kind === 'stability') {
+    if (result.kind === 'echo' && result.echo) {
+      const echo = result.echo;
+      const measurement = echo.status === 'measured'
+        ? `AEC3 pilot reduction: ${echo.pilot_band_reduction_db.toFixed(1)} dB. ${echo.reason}.`
+        : `Echo measurement unavailable: ${echo.reason}.`;
+      card.append(node('p', 'result-meta', measurement));
+      card.append(node('p', 'result-meta', 'Offline analysis of speaker echo in a quiet room. Simultaneous speech and drift require separate tests.'));
+    }
+    if (result.kind === 'stability' || result.kind === 'echo') {
       const continuity = result.stability;
       if (typeof continuity?.pilot_snr_db === 'number') card.append(node('p', 'result-meta', `Pilot quality: ${continuity.pilot_snr_db.toFixed(1)} dB above estimated baseline · reference coverage ${Math.round((continuity.reference_coverage || 0) * 100)}%.`));
       const missing = (result.trials || []).filter((trial) => trial.latency_ms == null).length;
@@ -235,7 +251,7 @@ $('run-test').addEventListener('click', async () => {
   if ($('run-test').disabled) return;
   busy = true; updateReadiness();
   try {
-    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: kind === 'stop' ? 1 : 3, comfortable_volume_confirmed: true})});
+    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: ['stop', 'volume'].includes(kind) ? 1 : 3, comfortable_volume_confirmed: true})});
     announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
   } catch (error) {announce(error.message, true);}

@@ -209,7 +209,7 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
             connection, stream, manager, release = self.connection()
             context = manager.context
             original_latency = context.latency
-            audio = SimpleNamespace(has_changed_volume=True, volume=47, set_volume=AsyncMock())
+            audio = SimpleNamespace(has_changed_volume=False, volume=33, set_volume=AsyncMock())
             stream.audio = audio
             rtsp = SimpleNamespace(session_id=123, connection=SimpleNamespace(remote_ip='127.0.0.1'),
                 record=AsyncMock(), flush=AsyncMock(), teardown=AsyncMock())
@@ -223,6 +223,7 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
             sync_transport = SimpleNamespace(sendto=Mock(), close=Mock())
             client.control_client.connection_made(sync_transport)
             client.timing_server = SimpleNamespace(close=Mock())
+            manager.stream_client = client
             collector = PacketCollector()
             collector.close = Mock()
             client.loop = SimpleNamespace(create_datagram_endpoint=AsyncMock(return_value=(collector, None)))
@@ -238,10 +239,16 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
                 return b''
             source = SimpleNamespace(duration=0, readframes=readframes, close=AsyncMock())
             telemetry = sender_telemetry()
+            async def verify_output():
+                rtsp.record.assert_awaited_once()
+                self.assertFalse(collector.packets)
             with patch('jarvis.airplay_source.ProgressiveAudioSource.open', AsyncMock(return_value=source)):
                 options = {} if latency_ms == 1500 else {'latency_ms': latency_ms}
                 await progressive_stream_file(connection, 'http://127.0.0.1/test.wav', telemetry,
-                                              **options)
+                                              verify_output=verify_output, **options)
+            self.assertTrue(telemetry['default_volume_write_skipped'])
+            self.assertNotIn('_stream_data', vars(client))
+            audio.set_volume.assert_not_awaited()
             sync_transport.sendto.assert_called()
             packet = SyncPacket.decode(sync_transport.sendto.call_args_list[0].args[0])
             expected_samples = 44100 * latency_ms // 1000

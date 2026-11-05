@@ -442,18 +442,20 @@ class AirPlayTransport(Transport):
                 await asyncio.wait_for(self._connect(), timeout=self.scan_timeout + 10)
             except asyncio.TimeoutError as exc:
                 raise TransportError("AirPlay discovery/control connection timed out before streaming") from exc
-            if output_state is not None:
-                # Set the sender's context before stream_file initializes RAOP.
-                # Otherwise pyatv can replace the user's level with its 33% default.
-                await self._connection.audio.set_volume(output_state["volume_percent"])
-                self._event("sender_volume_selected", volume_percent=output_state["volume_percent"],
-                            policy="use receiver level read immediately before playback")
+            async def verify_output():
+                current = await asyncio.wait_for(self._state_reader(), timeout=3)
+                self._event("receiver_before_pcm", **current)
+                if (current["muted"] or current["volume_percent"] == 0
+                        or current["volume_percent"] > output_state["volume_percent"]):
+                    raise TransportError("WiiM volume increased or became muted on source switch; no PCM sent")
             from .airplay_source import progressive_stream_file, sender_telemetry
             self._sender = sender_telemetry()
             self._event("stream_task_started", note="Progressive HTTP decoder; handoff timing is software only")
             sender = self._streamer or progressive_stream_file
             source_options = ({'source_factory': config['source_factory']}
                               if config.get('source_factory') is not None else {})
+            if output_state is not None and self._streamer is None:
+                source_options['verify_output'] = verify_output
             self._stream_task = asyncio.create_task(sender(
                 self._connection, stream_url, self._sender, _codec(config),
                 config.get('airplay_latency_ms', 1500), **source_options))

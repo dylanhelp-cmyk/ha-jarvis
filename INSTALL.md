@@ -1,4 +1,4 @@
-# Install and update — App 0.1.13 / firmware 0.1.6
+# Install and update — App 0.1.14 / firmware 0.1.6
 
 This is the **audio and synthetic-input voice bench**, not the conversational assistant yet. Local audio tests make no OpenAI calls; the separate paid voice benchmark requires explicit Start, a local key and a loaded synthetic fixture. It uploads only the fixture, keeping microphone audio local for acoustic comparison. On 3 November the user delegated project updates and tests to the agent. Keep the previous GPT-Live App stopped. Enter an API key under **OpenAI test preparation**, never in chat. Saving a key starts no paid session; the agreed initial API-test cap is US$5. Unconfirmed cloud finalization blocks further paid attempts.
 
@@ -16,7 +16,7 @@ In **Connection**, enter the WiiM's LAN IP and `http://YOUR_HA_LAN_IP:8099` as t
 
 Native control uses HTTPS with certificate verification enabled. If the receiver reports a self-signed certificate error, the advanced setting lets you explicitly disable verification for this configured LAN receiver. It is never disabled automatically.
 
-Set a comfortable amplifier volume yourself; test signals use a modest digital level. For AirPlay, the App reads the WiiM's current level and supplies that same level to the sender, avoiding its default volume change. It never guesses a level or unmutes the receiver. This bench interrupts the active speaker source and does **not** restore music automatically yet.
+Set a comfortable amplifier volume yourself. AirPlay leaves the receiver in control of volume and checks it after switching sources, before sending audio. To check the route silently, select AirPlay and run **Silent AirPlay volume check** with the speaker idle. The bench interrupts the active speaker source and does **not** restore music automatically yet.
 
 ## Prepare Voice PE in ESPHome Builder
 

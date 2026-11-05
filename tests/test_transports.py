@@ -288,18 +288,21 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
         self.connection.remote_control.stop.assert_awaited_once()
         self.assertFalse(self.adapter.active)
 
-    async def test_airplay_context_uses_receiver_volume_instead_of_default(self):
-        from pyatv.protocols.raop import RaopAudio
-        from pyatv.protocols.raop.protocols import StreamContext
-        context = StreamContext()
-        audio = RaopAudio(SimpleNamespace(context=context, stream_client=None), Mock())
-        self.connection.audio = audio
-        self.adapter._state_reader = AsyncMock(return_value={'volume_percent':47, 'muted':False})
-        self.assertEqual(audio.volume, 33)  # actual library default before preparation
-        await self.adapter.play('http://127.0.0.1/stream.wav', {})
-        self.assertAlmostEqual(audio.volume, 47)
-        self.assertTrue(audio.has_changed_volume)
-        self.adapter._state_reader.assert_awaited_once()
+    async def test_airplay_refuses_pcm_after_receiver_volume_increase(self):
+        from unittest.mock import patch
+        self.adapter._streamer = None
+        self.adapter._state_reader = AsyncMock(side_effect=[
+            {'volume_percent': 47, 'muted': False}, {'volume_percent': 57, 'muted': False}])
+        self.connection.audio = SimpleNamespace(set_volume=AsyncMock())
+
+        async def guarded_sender(*args, verify_output):
+            await verify_output()
+            self.fail('Increased volume reached the PCM sender')
+
+        with patch('jarvis.airplay_source.progressive_stream_file', guarded_sender):
+            with self.assertRaisesRegex(TransportError, 'volume increased'):
+                await self.adapter.play('http://127.0.0.1/stream.wav', {})
+        self.connection.audio.set_volume.assert_not_awaited()
 
     async def test_muted_receiver_is_not_unmuted_or_streamed(self):
         self.connection.audio = SimpleNamespace(set_volume=AsyncMock())
