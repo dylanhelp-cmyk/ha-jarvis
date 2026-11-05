@@ -1,3 +1,8 @@
+# 0.1.20
+
+- Process a local copy of capture through streaming AEC3 during the injected voice benchmark after fresh room calibration. Use bounded AirPlay history and adjust reference sampling for estimated capture-clock drift. Report processing and timing separately from acoustic suppression.
+- App-only update. Run the quiet-room echo test, then the injected voice benchmark and export the local streaming AEC metrics. Only the synthetic question is sent to OpenAI.
+
 # 0.1.19
 
 - Bound acoustic searches from each PCM handoff. Narrow the range after a recent quiet-room echo measurement at the same AirPlay timing and receiver level. Retain the agreement requirement.

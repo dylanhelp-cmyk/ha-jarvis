@@ -1,4 +1,4 @@
-# Install and update — App 0.1.19 / firmware 0.1.6
+# Install and update — App 0.1.20 / firmware 0.1.6
 
 This is the **audio and synthetic-input voice bench**, not the conversational assistant yet. Local audio tests make no OpenAI calls; the separate paid voice benchmark requires explicit Start, a local key and a loaded synthetic fixture. It uploads only the fixture, keeping microphone audio local for acoustic comparison. On 3 November the user delegated project updates and tests to the agent. Keep the previous GPT-Live App stopped. Enter an API key under **OpenAI test preparation**, never in chat. Saving a key starts no paid session; the agreed initial API-test cap is US$5. Unconfirmed cloud finalization blocks further paid attempts.
 

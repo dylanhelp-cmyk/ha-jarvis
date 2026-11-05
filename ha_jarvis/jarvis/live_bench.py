@@ -14,6 +14,7 @@ import numpy as np
 from .audio import RATE, detect_probe, summarize
 from .live_audio import LiveAudioSource
 from .live_session import LiveSession
+from .streaming_aec import StreamingEcho
 from .transports import AirPlayTransport
 
 
@@ -125,31 +126,57 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     fixture_started = False
     max_lag_ms = 0.0
     capture_ended = playback_stopped = False
+    alignment = None
+    alignment_error = None
 
     def on_render(pcm, handed_off_at):
+        nonlocal alignment_error
         if len(rendered) + len(pcm) > MAX_RENDER_BYTES:
             raise BufferError("AirPlay render reference exceeded the benchmark RAM limit")
         render_offsets.append(len(rendered) // 4)
         render_handoffs.append(handed_off_at)
         rendered.extend(pcm)
+        if alignment is not None and alignment_error is None:
+            try:
+                alignment.render(pcm, handed_off_at)
+            except (RuntimeError, ValueError) as exc:
+                alignment_error = str(exc)
+
+    def on_capture(frame, clock_offset_ms):
+        nonlocal alignment_error
+        if alignment_error is None:
+            try:
+                alignment.capture(frame, clock_offset_ms)
+            except (RuntimeError, ValueError) as exc:
+                alignment_error = str(exc)
 
     def handoff_at(reference_offset):
         render_frame = reference_offset * RENDER_RATE // RATE
         index = bisect_right(render_offsets, render_frame) - 1
         return render_handoffs[index]
 
-    def acoustic_delay_range():
+    def recent_calibration():
         timing = bench.config["airplay_latency_ms"]
-        volume = next((event["volume_percent"] for event in bench.transport.snapshot().get("events", ())
-                       if event["event"] == "receiver_before_pcm"), None)
         for prior in bench.results[1:]:
             echo = prior.get("echo", {})
+            receiver = prior.get("transport", {}).get("receiver_after") or {}
             if (prior.get("route") != "airplay" or prior.get("status") != "measured"
+                    or prior.get("calibration_stale")
                     or echo.get("status") != "measured" or prior.get("requested_airplay_latency_ms") != timing
-                    or volume is None or (prior.get("transport", {}).get("receiver_after") or {}).get("volume_percent") != volume
+                    or receiver.get("volume_percent") is None
                     or (datetime.now(timezone.utc) - datetime.fromisoformat(prior["started_at"])).total_seconds() > 900):
                 continue
-            delay = echo["delay_assumed_ms"] / 1000
+            return echo["delay_assumed_ms"], receiver["volume_percent"]
+        return None
+
+    def calibration_matches_receiver(calibration):
+        volume = next((event["volume_percent"] for event in bench.transport.snapshot().get("events", ())
+                       if event["event"] == "receiver_before_pcm"), None)
+        return calibration is not None and volume == calibration[1]
+
+    def acoustic_delay_range(calibration):
+        if calibration_matches_receiver(calibration):
+            delay = calibration[0] / 1000
             return max(0, delay - .3), delay + .3
         # Bench supports up to 2 s of requested RAOP timing plus downstream delay.
         return 0.0, 3.0
@@ -215,6 +242,13 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         question = fixture_samples[bounds[0]:bounds[1]].tobytes()
         result["fixture"] = {"input_samples": len(fixture_samples), "trimmed_samples": len(question) // 2,
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
+        calibration = recent_calibration()
+        if calibration is not None and calibration[0] <= 3000:
+            try:
+                alignment = StreamingEcho(calibration[0])
+                bench.device.pcm_consumer = on_capture
+            except (ImportError, RuntimeError, ValueError) as exc:
+                alignment_error = str(exc)
         bench.transport = AirPlayTransport.for_wiim(bench.config["wiim_host"], bench.config["verify_tls"],
                                                     discovery_cache=bench.airplay_discovery_cache)
         session = LiveSession(bench.cloud_settings, transport=transport, on_audio=output_audio, max_seconds=60)
@@ -287,12 +321,23 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
             if output_bounds is None:
                 detection = {"status": "unavailable", "latency_ms": None, "reason": "No voiced PCM reached the AirPlay sender"}
             else:
-                delay_range = acoustic_delay_range()
+                delay_range = acoustic_delay_range(calibration)
                 detection = await asyncio.to_thread(match_response, captured, capture_start,
                     reference, output_bounds[0], fixture_end_at, first_voiced_at,
                     handoff_at=handoff_at, acoustic_delay_range=delay_range)
                 detection["reference_source"] = "airplay_pcm_handoff"
                 detection["acoustic_search_delay_range_ms"] = [round(value * 1000) for value in delay_range]
+        if alignment is not None:
+            result["live_echo"] = {
+                "status": "processed" if alignment_error is None and calibration_matches_receiver(calibration) else "unavailable",
+                "reason": alignment_error or (None if calibration_matches_receiver(calibration) else "Receiver volume changed since calibration"),
+                "delay_assumed_ms": calibration[0],
+                "residual_delay_hint_ms": alignment.residual_delay_ms,
+                "processed_samples": alignment.processor.frames_processed * 160,
+                "capture_drift_ppm": round(alignment.capture_drift_ppm, 1),
+                "max_processing_ms": round(alignment.processor.max_processing_ms, 3),
+                "scope": "Real-time reference alignment only; microphone audio stays local",
+            }
         trial = {"trial": 1, **detection, "metric": "fixture_end_to_audible",
                  "first_voiced_pcm_ms": round((first_voiced_at - fixture_end_at) * 1000, 1) if first_voiced_at is not None else None,
                  "cold_ready_ms": result["cold_ready_ms"],
@@ -315,6 +360,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         result["error"] = str(exc) or type(exc).__name__
         result["exception_type"] = type(exc).__name__
     finally:
+        if alignment is not None:
+            bench.device.pcm_consumer = None
         bench.test["finishing"] = True
         result["ended_phase"] = bench.test.get("phase")
         for task in startup_tasks:

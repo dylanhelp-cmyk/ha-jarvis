@@ -92,6 +92,7 @@ class Device:
         self.stop_info = None
         self.last_frame_at = None
         self.capture_session = {}
+        self.pcm_consumer = None
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -161,6 +162,8 @@ class Device:
             raise ValueError("Capture exceeded the 120-second memory limit")
         self.frames.append(frame)
         self.last_frame_at = time.monotonic()
+        if self.pcm_consumer is not None:
+            self.pcm_consumer(frame, self.clock_offset_ms)
 
     def capture_diagnostics(self):
         """Partial recordings remain diagnostically useful, never valid measurements."""
