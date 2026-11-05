@@ -304,6 +304,23 @@ class AirPlayTests(unittest.IsolatedAsyncioTestCase):
                 await self.adapter.play('http://127.0.0.1/stream.wav', {})
         self.connection.audio.set_volume.assert_not_awaited()
 
+    async def test_airplay_checks_corrected_level_before_pcm(self):
+        from unittest.mock import patch
+        self.adapter._streamer = None
+        self.adapter._state_reader = AsyncMock(side_effect=[
+            {'volume_percent': 26, 'muted': False}, {'volume_percent': 63, 'muted': False}])
+        self.adapter._volume_limiter = AsyncMock(return_value={'volume_percent': 26, 'muted': False})
+
+        async def guarded_sender(*args, verify_output):
+            await verify_output()
+            self.entered.set()
+            await self.finished.wait()
+
+        with patch('jarvis.airplay_source.progressive_stream_file', guarded_sender):
+            await self.adapter.play('http://127.0.0.1/stream.wav', {})
+            await asyncio.wait_for(self.entered.wait(), 1)
+        self.adapter._volume_limiter.assert_awaited_once_with(26)
+
     async def test_muted_receiver_is_not_unmuted_or_streamed(self):
         self.connection.audio = SimpleNamespace(set_volume=AsyncMock())
         self.adapter._state_reader = AsyncMock(return_value={'volume_percent':47, 'muted':True})

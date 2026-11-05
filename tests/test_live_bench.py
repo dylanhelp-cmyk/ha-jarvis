@@ -62,6 +62,10 @@ class FakeSource:
 
 
 class FakeSpeaker:
+    @classmethod
+    def for_wiim(cls, *args, **kwargs):
+        return cls()
+
     instances = []
 
     def __init__(self, *args, **kwargs):

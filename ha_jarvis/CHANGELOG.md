@@ -1,3 +1,7 @@
+# 0.1.15
+
+- If AirPlay startup raises the receiver level, reduce it to the pre-switch ceiling using WiiM's native control and verify readback before allowing PCM. Apply the same guard to local and cloud tests. Repeat the silent switch check before audible testing.
+
 # 0.1.14
 
 - Leave volume under receiver control. Check WiiM readback after AirPlay source selection and before sending PCM. Abort if the level rises, mute is active, or readback fails.

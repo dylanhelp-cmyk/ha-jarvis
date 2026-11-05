@@ -12,7 +12,7 @@ import numpy as np
 from .audio import RATE, detect_probe, summarize
 from .live_audio import LiveAudioSource
 from .live_session import LiveSession
-from .transports import AirPlayTransport, NativeHTTPTransport
+from .transports import AirPlayTransport
 
 
 QUIET_SECONDS = 1.0
@@ -156,16 +156,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         await bench.device.begin(result["id"], 75000)
         result["device_session"] = dict(bench.device.capture_session)
 
-        async def read_output_state():
-            reader = NativeHTTPTransport("https://" + bench.config["wiim_host"],
-                                         verify_ssl=bench.config["verify_tls"])
-            try:
-                return await reader.output_state()
-            finally:
-                await reader.close()
-
-        bench.transport = AirPlayTransport(bench.config["wiim_host"], state_reader=read_output_state,
-                                           discovery_cache=bench.airplay_discovery_cache)
+        bench.transport = AirPlayTransport.for_wiim(bench.config["wiim_host"], bench.config["verify_tls"],
+                                                    discovery_cache=bench.airplay_discovery_cache)
         session = LiveSession(bench.cloud_settings, transport=transport, on_audio=output_audio, max_seconds=60)
         bench.test["phase"] = "connecting cloud and continuous AirPlay stream"
         async with asyncio.timeout(45):

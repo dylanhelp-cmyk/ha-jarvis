@@ -324,15 +324,9 @@ class Bench:
                 self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
                                                      verify_ssl=self.config["verify_tls"])
             elif self.config["route"] == "airplay":
-                async def read_wiim_state():
-                    reader = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
-                                                 verify_ssl=self.config["verify_tls"])
-                    try:
-                        return await reader.output_state()
-                    finally:
-                        await reader.close()
-                self.transport = AirPlayTransport(device_host=self.config["wiim_host"], state_reader=read_wiim_state,
-                                                  discovery_cache=self.airplay_discovery_cache)
+                self.transport = AirPlayTransport.for_wiim(
+                    self.config["wiim_host"], self.config["verify_tls"],
+                    discovery_cache=self.airplay_discovery_cache)
             else:
                 if not self.slim:
                     raise ValueError(self.slim_error or "SlimProto server is not ready")

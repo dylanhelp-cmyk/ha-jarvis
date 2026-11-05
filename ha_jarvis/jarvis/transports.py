@@ -139,6 +139,15 @@ class NativeHTTPTransport(Transport):
         except (ValueError, KeyError, TypeError) as exc:
             raise TransportError("WiiM did not provide a valid volume/mute state; AirPlay will not use a guessed volume") from exc
 
+    async def limit_volume(self, ceiling: int) -> dict[str, Any]:
+        if type(ceiling) is not int or not 1 <= ceiling <= 100:
+            raise ValueError("WiiM volume ceiling must be an integer from 1 to 100")
+        current = await self.output_state()
+        if not current["muted"] and current["volume_percent"] > ceiling:
+            await self._command(f"setPlayerCmd:vol:{ceiling}")
+            current = await self.output_state()
+        return current
+
     async def play(self, stream_url: str, config: Mapping[str, Any]) -> None:
         _url(stream_url)
         _codec(config)
@@ -353,6 +362,7 @@ class AirPlayTransport(Transport):
     def __init__(self, device_host: str, *,
                  connection: Any = None, scan_timeout: float = 5.0,
                  stop_timeout: float = 5.0, state_reader: Callable[..., Any] | None = None,
+                 volume_limiter: Callable[..., Any] | None = None,
                  streamer: Callable[..., Any] | None = None,
                  discovery_cache: dict[str, tuple[float, Any]] | None = None) -> None:
         super().__init__()
@@ -362,10 +372,25 @@ class AirPlayTransport(Transport):
         self._connection = connection
         self._stream_task: asyncio.Task | None = None
         self._state_reader = state_reader
+        self._volume_limiter = volume_limiter
         self._streamer = streamer
         self._sender: dict[str, Any] | None = None
         self._discovery_cache = _AIRPLAY_DISCOVERY_CACHE if discovery_cache is None else discovery_cache
         self._uses_discovery = False
+
+    @classmethod
+    def for_wiim(cls, host, verify_tls, *, discovery_cache):
+        async def read_or_limit(ceiling=None):
+            reader = NativeHTTPTransport(device_url="https://" + host, verify_ssl=verify_tls)
+            try:
+                if ceiling is None:
+                    return await reader.output_state()
+                return await reader.limit_volume(ceiling)
+            finally:
+                await reader.close()
+
+        return cls(host, state_reader=read_or_limit, volume_limiter=read_or_limit,
+                   discovery_cache=discovery_cache)
 
     def snapshot(self) -> dict[str, Any]:
         result = super().snapshot()
@@ -444,9 +469,12 @@ class AirPlayTransport(Transport):
                 raise TransportError("AirPlay discovery/control connection timed out before streaming") from exc
             async def verify_output():
                 current = await asyncio.wait_for(self._state_reader(), timeout=3)
+                ceiling = math.floor(output_state["volume_percent"])
+                self._event("receiver_after_source_switch", **current)
+                if not current["muted"] and current["volume_percent"] > ceiling and self._volume_limiter:
+                    current = await asyncio.wait_for(self._volume_limiter(ceiling), timeout=3)
                 self._event("receiver_before_pcm", **current)
-                if (current["muted"] or current["volume_percent"] == 0
-                        or current["volume_percent"] > output_state["volume_percent"]):
+                if current["muted"] or not 0 < current["volume_percent"] <= ceiling:
                     raise TransportError("WiiM volume increased or became muted on source switch; no PCM sent")
             from .airplay_source import progressive_stream_file, sender_telemetry
             self._sender = sender_telemetry()
