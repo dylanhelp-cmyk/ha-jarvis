@@ -177,6 +177,18 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         match.assert_not_called()
         self.assertFalse(self.bench.device.frames)
 
+    async def test_reply_timeout_preserves_provisional_acoustic_onset(self):
+        detected = {"status": "detected", "latency_ms": 1200.0}
+        with patch("jarvis.live_bench.QUIET_SECONDS", 10), \
+             patch("jarvis.live_bench.match_response", return_value=detected):
+            await run_cloud_benchmark(self.bench, "websocket", self.fixture)
+        result = self.bench.results[0]
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["reply_completion"], "observation_timeout")
+        self.assertTrue(result["trials"][0]["provisional"])
+        self.assertEqual(result["trials"][0]["latency_ms"], 1200.0)
+        self.assertTrue(result["cloud"]["finalization_confirmed"])
+
     async def test_disconnect_cancellation_keeps_failed_status_partial_health_and_cleans_audio(self):
         FakeLive.wait_forever = True
         task = asyncio.create_task(run_cloud_benchmark(self.bench, "webrtc", self.fixture))

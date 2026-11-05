@@ -1,3 +1,9 @@
+# 0.1.16
+
+- Use a frequency-band noise floor for quiet-room AEC3 pilot measurements.
+- Preserve provisional audible onset evidence if a reply outlasts the observation window. Keep the trial marked incomplete.
+- App-only update. Run one quiet-room echo test with AirPlay selected and check the measured pilot SNR and suppression or the reason the result is unavailable.
+
 # 0.1.15
 
 - If AirPlay startup raises the receiver level, reduce it to the pre-switch ceiling using WiiM's native control and verify readback before allowing PCM. Apply the same guard to local and cloud tests. Repeat the silent switch check before audible testing.

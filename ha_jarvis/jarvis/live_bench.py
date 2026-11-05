@@ -199,9 +199,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                 await session.send_audio(bytes(640))
                 sent_samples += 320
                 if last_voiced_at is not None and time.monotonic() - last_voiced_at >= QUIET_SECONDS and source.queued_frames == 0:
+                    result["reply_completion"] = "quiet_and_drained"
                     break
             else:
-                raise TimeoutError("No completed generated reply within the 15 second observation limit")
+                result["reply_completion"] = "observation_timeout"
+                result["warnings"].append("The reply did not finish within the observation window. Any confirmed onset is provisional.")
 
         bench.test["phase"] = "closing paid cloud session and collecting final usage"
         metrics = await session.close()
@@ -232,7 +234,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                  "clock_uncertainty_ms": round(bench.device.clock_rtt_ms / 2 + 4, 2),
                  "digital_energy_resolution_ms": 10, "input_chunk_ms": 20}
         result["trials"].append(trial)
-        result["status"] = "measured" if detection["status"] == "detected" else "unavailable"
+        if result["reply_completion"] == "observation_timeout":
+            trial["provisional"] = True
+            result["status"] = "incomplete"
+        else:
+            result["status"] = "measured" if detection["status"] == "detected" else "unavailable"
     except asyncio.CancelledError:
         interruption = bench.test.get("interruption", {"reason": "unexpected_task_cancellation"})
         result["interruption"] = interruption

@@ -56,7 +56,11 @@ def measure_echo_reduction(captured_int16, capture_start, rendered_int16, render
         aligned[dest:dest + count] = rendered_int16[source:source + count]
     raw = _bands(captured_int16[start:end])
     quiet_start = max(0, quiet_end - 2 * SAMPLE_RATE)
-    raw_floor = np.maximum(np.percentile(_bands(captured_int16[quiet_start:quiet_end]), 95, axis=0), 1 / 32768 ** 2)
+    # An entire PCM LSB squared overstates the floor of a three-bin band.
+    # Bound each band by its share of white 16-bit quantization noise.
+    band_quantization_floor = (2 * 3 / 512) / (12 * 32768 ** 2)
+    raw_floor = np.maximum(np.percentile(_bands(captured_int16[quiet_start:quiet_end]), 95, axis=0),
+                           band_quantization_floor)
     raw_level = np.median(raw, axis=0)
     result['raw_pilot_snr_db'] = round(10 * math.log10(sum(raw_level) / sum(raw_floor)), 2)
     db = lambda value: round(10 * math.log10(max(float(value), 1e-15)), 2)
