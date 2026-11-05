@@ -92,7 +92,10 @@ class Stream:
         probes = {}
         pcm = np.zeros(total, dtype="<i2")
         for i in range(0 if self.kind == "volume" else self.repetitions):
-            probe = make_probe(i + 513)
+            # Swap the first two known probe identities for the startup check.
+            # This distinguishes a weak reference from a startup-specific loss.
+            seed = 514 - i if self.kind == "startup" else 513 + i
+            probe = make_probe(seed)
             offset = int((.1 + i * 2) * RATE)
             pcm[offset:offset + len(probe)] = probe
             probes[offset] = probe
@@ -216,7 +219,7 @@ class Bench:
 
     async def partial_playback_evidence(self, kind):
         """Salvage scalar observations without passing an interrupted capture."""
-        if kind not in ("latency", "stability", "echo") or not self.stream or not self.stream.markers:
+        if kind not in ("latency", "startup", "stability", "echo") or not self.stream or not self.stream.markers:
             return None
         try:
             pcm, capture_start = self.device.recording()
@@ -625,8 +628,10 @@ def create_ui(bench):
         if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
         kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
+        if kind not in ("latency", "startup", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Invalid test type or repetition count")
+        if kind == "startup" and (bench.config["route"] != "airplay" or repetitions != 2):
+            raise ValueError("Startup check requires AirPlay and two probes")
         if kind == "volume" and (bench.config["route"] != "airplay" or repetitions != 1):
             raise ValueError("Silent volume check requires AirPlay and one repetition")
         if kind != "volume" and (not bench.device.snapshot()["connected"] or bench.device.info.get("muted")):

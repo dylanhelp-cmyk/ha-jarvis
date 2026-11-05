@@ -2,6 +2,7 @@ import asyncio
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -266,11 +267,15 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         samples = np.full(160, 1000, dtype="<i2")
 
         async def feed():
+            due = time.monotonic()
             while True:
+                await asyncio.sleep(max(.001, due - time.monotonic()))
+                if time.monotonic() < due:
+                    continue
                 consumer = getattr(self.bench.device, "pcm_consumer", None)
                 if consumer:
-                    consumer(PCMFrame(0, 0, 0, samples), 0)
-                await asyncio.sleep(.01)
+                    consumer(PCMFrame(0, 0, int(due * 1000), samples), 0)
+                due += .01
 
         def match(captured, capture_start, reference, offset, endpoint, earliest, **kwargs):
             return {"status": "detected", "audible_onset_at": earliest + .1, "latency_ms": 100}

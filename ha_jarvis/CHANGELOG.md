@@ -1,3 +1,9 @@
+# 0.1.22
+
+- Add a local AirPlay startup check with the two known probes reversed to isolate loss of the first probe.
+- Verify that a scripted acoustic question falls entirely inside the transmitted sample interval before reporting microphone-to-reply latency.
+- App-only update. Run AirPlay startup check twice with the same volume and compare first and second probe results.
+
 # 0.1.21
 
 - Warm AirPlay discovery metadata while idle. Open a fresh playback connection on demand.

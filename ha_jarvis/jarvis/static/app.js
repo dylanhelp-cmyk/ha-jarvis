@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Injected voice benchmark'};
+const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
 let status = null;
 let dirty = false;
 let configured = false;
@@ -251,7 +251,8 @@ $('run-test').addEventListener('click', async () => {
   if ($('run-test').disabled) return;
   busy = true; updateReadiness();
   try {
-    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions: ['stop', 'volume'].includes(kind) ? 1 : 3, comfortable_volume_confirmed: true})});
+    const repetitions = kind === 'startup' ? 2 : ['stop', 'volume'].includes(kind) ? 1 : 3;
+    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions, comfortable_volume_confirmed: true})});
     announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
   } catch (error) {announce(error.message, true);}

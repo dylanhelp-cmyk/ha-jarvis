@@ -143,6 +143,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
     reply_start_frame = 0
     max_microphone_queue_ms = 0.0
     uploaded_samples = 0
+    uploaded_capture_start = uploaded_capture_end = None
 
     def on_render(pcm, handed_off_at):
         nonlocal alignment_error
@@ -161,7 +162,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         nonlocal alignment_error, microphone_error
         if capture_forwarding and microphone_error is None:
             try:
-                microphone.put_nowait((time.monotonic(), frame.samples.tobytes()))
+                if clock_offset_ms is None:
+                    microphone_error = "Microphone clock unavailable during upload"
+                else:
+                    microphone.put_nowait((time.monotonic(), (frame.capture_ms + clock_offset_ms) / 1000,
+                                           frame.samples.tobytes()))
             except asyncio.QueueFull:
                 microphone_error = "Microphone upload queue overflowed"
         if alignment is not None and alignment_error is None:
@@ -257,6 +262,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
 
     async def play_acoustic_question(question, calibration):
         nonlocal fixture_requested_at, capture_forwarding, max_microphone_queue_ms, uploaded_samples
+        nonlocal uploaded_capture_start, uploaded_capture_end
         if not calibration_matches_receiver(calibration) or not 0 < calibration[0] <= 3000:
             raise RuntimeError("Acoustic microphone test requires recent calibration at this receiver level")
         fixture_requested_at = time.monotonic()
@@ -280,7 +286,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 healthy()
                 remaining = stop_at - time.monotonic()
                 try:
-                    queued_at, pcm = await asyncio.wait_for(microphone.get(), min(.15, remaining))
+                    queued_at, captured_at, pcm = await asyncio.wait_for(microphone.get(), min(.15, remaining))
                 except TimeoutError:
                     if remaining <= .15:
                         break
@@ -292,6 +298,9 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 if age > 150:
                     raise RuntimeError("Microphone upload fell behind; trial stopped without catching up")
                 await session.send_audio(pcm)
+                if uploaded_capture_start is None:
+                    uploaded_capture_start = captured_at
+                uploaded_capture_end = captured_at + len(pcm) / (2 * RATE)
                 uploaded_samples += len(pcm) // 2
             await playback
             if uploaded_samples < len(question) // 2:
@@ -407,6 +416,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             measurement_end = (input_match["audible_onset_at"] + len(question_reference) / RATE
                                if input_match["status"] == "detected" else None)
             result["estimated_acoustic_question_end_at"] = measurement_end
+            if measurement_end is not None and not (
+                uploaded_capture_start <= input_match["audible_onset_at"] <= measurement_end <= uploaded_capture_end
+            ):
+                result["warnings"].append("The acoustic question exceeded the transmitted microphone sample interval.")
+                measurement_end = None
         if microphone_input and (measurement_end is None or early_reply):
             detection = {"status": "unavailable", "latency_ms": None,
                          "reason": "Early model output overlapped microphone forwarding" if early_reply
@@ -464,6 +478,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             bench.device.pcm_consumer = None
         if microphone_input:
             result["uploaded_microphone_samples"] = uploaded_samples
+            result["uploaded_capture_start_at"] = uploaded_capture_start
+            result["uploaded_capture_end_at"] = uploaded_capture_end
             result["max_microphone_queue_ms"] = round(max_microphone_queue_ms, 2)
         bench.test["finishing"] = True
         result["ended_phase"] = bench.test.get("phase")

@@ -1,5 +1,5 @@
 name: HA Jarvis Audio Bench
-version: "0.1.21"
+version: "0.1.22"
 slug: ha_jarvis
 description: Local audio and explicitly started, budgeted cloud voice benchmarks for Jarvis.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis
