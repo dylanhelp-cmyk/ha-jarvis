@@ -1,3 +1,8 @@
+# 0.1.18
+
+- Match audible replies against the PCM handed to AirPlay, including silence inserted by the output queue. Keep the reference in bounded RAM for the trial.
+- App-only update. Repeat the same WebSocket fixture at the same WiiM level and check whether the acoustic windows agree.
+
 # 0.1.17
 
 - Start microphone capture, cloud connection and AirPlay setup concurrently. Gate fixture input on microphone and cloud readiness and the first AirPlay PCM pull after volume verification.

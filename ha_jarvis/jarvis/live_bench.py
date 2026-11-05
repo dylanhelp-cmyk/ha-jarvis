@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import time
 
+import av
 import numpy as np
 
 from .audio import RATE, detect_probe, summarize
@@ -18,7 +19,8 @@ from .transports import AirPlayTransport
 QUIET_SECONDS = 1.0
 POST_INPUT_SECONDS = 15.0
 PHYSICAL_TAIL_SECONDS = 2.0
-MAX_REFERENCE_SAMPLES = 20 * RATE
+RENDER_RATE = 44100
+MAX_RENDER_BYTES = 75 * RENDER_RATE * 4
 
 
 def voiced_bounds(samples):
@@ -32,6 +34,18 @@ def voiced_bounds(samples):
     if not len(active):
         return None
     return int(active[0] * 160), min(len(samples), int((active[-1] + 1) * 160))
+
+
+def render_reference(pcm):
+    """Reconstruct the mono reference from the stereo packets sent to RAOP."""
+    stereo = np.frombuffer(pcm, dtype=">i2").reshape(-1, 2)
+    # LiveAudioSource duplicates its mono input into both channels.
+    mono = stereo[:, 0].astype(np.int16).reshape(1, -1)
+    frame = av.AudioFrame.from_ndarray(mono, format="s16", layout="mono")
+    frame.sample_rate = RENDER_RATE
+    converter = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+    converted = converter.resample(frame) + converter.resample(None)
+    return np.concatenate([block.to_ndarray().reshape(-1) for block in converted])
 
 
 def match_response(captured, capture_start, reference, voiced_start_sample,
@@ -93,8 +107,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     session = source = None
     source_ready = asyncio.Event()
     startup_tasks = []
-    reference = bytearray()
-    reference_voiced_start = None
+    rendered = bytearray()
+    first_render_at = None
     first_voiced_at = last_voiced_at = None
     previous_callback_at = previous_chunk_seconds = None
     reference_gap = False
@@ -103,16 +117,24 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     max_lag_ms = 0.0
     capture_ended = playback_stopped = False
 
+    def on_render(pcm, handed_off_at):
+        nonlocal first_render_at
+        if len(rendered) + len(pcm) > MAX_RENDER_BYTES:
+            raise BufferError("AirPlay render reference exceeded the benchmark RAM limit")
+        if first_render_at is None:
+            first_render_at = handed_off_at
+        rendered.extend(pcm)
+
     async def source_factory(rate, channels, width):
         nonlocal source
         if source is not None:
             raise RuntimeError("Live speaker source was opened more than once")
-        source = LiveAudioSource(rate, channels, width)
+        source = LiveAudioSource(rate, channels, width, on_render=on_render)
         source_ready.set()
         return source
 
     async def output_audio(pcm, rate):
-        nonlocal reference_voiced_start, first_voiced_at, last_voiced_at
+        nonlocal first_voiced_at, last_voiced_at
         nonlocal previous_callback_at, previous_chunk_seconds, reference_gap
         now = time.monotonic()
         if rate != RATE or len(pcm) % 2:
@@ -124,14 +146,9 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         if bounds is not None:
             if first_voiced_at is None:
                 first_voiced_at = now
-                reference_voiced_start = bounds[0]
-            if previous_callback_at is not None and reference and now - previous_callback_at > previous_chunk_seconds + .1:
+            if previous_callback_at is not None and last_voiced_at is not None and now - previous_callback_at > previous_chunk_seconds + .1:
                 reference_gap = True
             last_voiced_at = now
-        if reference_voiced_start is not None:
-            if len(reference) + len(pcm) > MAX_REFERENCE_SAMPLES * 2:
-                raise BufferError("Reply reference exceeded the 20 second RAM limit")
-            reference.extend(pcm)
         previous_callback_at, previous_chunk_seconds = now, len(samples) / RATE
         await source.write(pcm)
 
@@ -233,13 +250,17 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         captured, capture_start = bench.device.recording()
         result["capture"] = bench.device.capture_diagnostics()
         bench.test["phase"] = "matching generated reply against local acoustic capture"
-        if first_voiced_at is None or reference_voiced_start is None:
+        if first_voiced_at is None or not rendered:
             detection = {"status": "unavailable", "latency_ms": None, "reason": "No generated voiced PCM detected"}
-        elif reference_gap:
-            detection = {"status": "unavailable", "latency_ms": None, "reason": "Returned audio timing gaps make concatenated reference alignment uncertain"}
         else:
-            detection = await asyncio.to_thread(match_response, captured, capture_start,
-                np.frombuffer(reference, dtype="<i2"), reference_voiced_start, fixture_end_at, first_voiced_at)
+            reference = await asyncio.to_thread(render_reference, rendered)
+            output_bounds = voiced_bounds(reference)
+            if output_bounds is None:
+                detection = {"status": "unavailable", "latency_ms": None, "reason": "No voiced PCM reached the AirPlay sender"}
+            else:
+                detection = await asyncio.to_thread(match_response, captured, capture_start,
+                    reference, output_bounds[0], fixture_end_at, first_voiced_at)
+                detection["reference_source"] = "airplay_pcm_handoff"
         trial = {"trial": 1, **detection, "metric": "fixture_end_to_audible",
                  "first_voiced_pcm_ms": round((first_voiced_at - fixture_end_at) * 1000, 1) if first_voiced_at is not None else None,
                  "cold_ready_ms": result["cold_ready_ms"],
@@ -298,15 +319,13 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         result["capture_at_end"] = bench.device.capture_diagnostics()
         result["device_session"] = dict(bench.device.capture_session)
         result["max_input_schedule_lag_ms"] = round(max_lag_ms, 2)
-        result["reference_samples"] = len(reference) // 2
-        result["reference_timing_gap"] = reference_gap
+        result["reference_render_frames"] = len(rendered) // 4
+        result["first_render_handoff_at"] = first_render_at
+        result["cloud_callback_timing_gap"] = reference_gap
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
         result["summary"] = summarize(result["trials"])
         if hasattr(bench, "observe_firmware"):
             bench.observe_firmware()
         bench.device.frames.clear()
-        # Rebind rather than resize: a completed worker may briefly retain its
-        # NumPy view, but no recording/reference is attached to the result.
-        reference = bytearray()
         bench.stream = None
         bench.test = {"running": False, "phase": "idle"}

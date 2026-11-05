@@ -29,12 +29,14 @@ class LiveAudioSource(AudioSource):
     INPUT_RATE = 16000
     MAX_PENDING_SECONDS = 2
 
-    def __init__(self, sample_rate=44100, channels=2, sample_size=2, *, clock=time.monotonic):
+    def __init__(self, sample_rate=44100, channels=2, sample_size=2, *, clock=time.monotonic,
+                 on_render=None):
         if (any(type(value) is not int for value in (sample_rate, channels, sample_size))
                 or (sample_rate, channels, sample_size) != (44100, 2, 2)):
             raise ValueError('Live AirPlay requires 44100 Hz stereo PCM16')
         self._sample_rate, self._channels, self._sample_size = sample_rate, channels, sample_size
         self._clock = clock
+        self._on_render = on_render
         self._capacity = sample_rate * self.MAX_PENDING_SECONDS
         self._queue = deque()
         self._timestamps = deque()
@@ -116,8 +118,11 @@ class LiveAudioSource(AudioSource):
                 self._head_offset = 0
         self.telemetry['silence_frames'] += nframes - written // frame_bytes
         self._update_pending()
+        pcm = bytes(result)
+        if self._on_render is not None:
+            self._on_render(pcm, now)
         self.first_read.set()
-        return bytes(result)
+        return pcm
 
     async def interrupt(self):
         self.generation += 1

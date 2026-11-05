@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 
 from jarvis.audio import RATE, make_probe
-from jarvis.live_bench import match_response, run_cloud_benchmark, voiced_bounds
+from jarvis.live_bench import match_response, render_reference, run_cloud_benchmark, voiced_bounds
 from jarvis.live_session import LiveMetrics
 
 
@@ -43,12 +43,22 @@ class ReplyMatchingTests(unittest.TestCase):
         samples = np.concatenate((np.zeros(320), np.full(640, 2000), np.zeros(480))).astype("<i2")
         self.assertEqual(voiced_bounds(samples), (320, 960))
 
+    def test_render_reference_preserves_silence_and_packet_sample_clock(self):
+        stereo = np.zeros((44100, 2), dtype=">i2")
+        stereo[11025:22050] = 3000
+        reference = render_reference(stereo.tobytes())
+        self.assertEqual(len(reference), RATE)
+        start, end = voiced_bounds(reference)
+        self.assertAlmostEqual(start, 4000, delta=160)
+        self.assertAlmostEqual(end, 8000, delta=160)
+
 
 class FakeSource:
     instances = []
 
-    def __init__(self, *args):
+    def __init__(self, *args, on_render):
         self.written = 0
+        self.on_render = on_render
         self.queued_frames = 0
         self.closed = False
         self.telemetry = {"queued_frames": 0, "overflow_count": 0}
@@ -56,6 +66,9 @@ class FakeSource:
 
     async def write(self, pcm):
         self.written += len(pcm)
+        samples = np.frombuffer(pcm, dtype="<i2")
+        stereo = np.repeat(samples, 6).astype(">i2")
+        self.on_render(stereo.tobytes(), asyncio.get_running_loop().time())
 
     async def close(self):
         self.closed = True

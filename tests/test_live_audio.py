@@ -13,6 +13,16 @@ from jarvis.live_audio import LiveAudioSource, StaleAudioGeneration
 
 
 class LiveAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_render_tap_receives_exact_packet_with_inserted_silence(self):
+        tap = Mock()
+        source = LiveAudioSource(clock=lambda: 10.0, on_render=tap)
+        silence = await source.readframes(352)
+        await source.write(np.full(160, 4000, dtype='<i2').tobytes())
+        mixed = await source.readframes(source.queued_frames + 25)
+        self.assertEqual(tap.call_args_list[0].args, (silence, 10.0))
+        self.assertEqual(tap.call_args_list[1].args, (mixed, 10.0))
+        self.assertEqual(mixed[-100:], bytes(100))
+
     async def test_real_resampler_retains_rate_and_samples_across_irregular_chunks(self):
         samples = (np.sin(np.arange(16000) * .071) * 9000).astype('<i2')
         source = LiveAudioSource()
