@@ -427,11 +427,28 @@ class AirPlayTransport(Transport):
                     # No stream has started: one fresh discovery/connect is safe.
                     self._event('raop_cached_connect_failed')
             self._discovery_cache.pop(self.device_host, None)
-        configs = await pyatv.scan(loop, hosts=[self.device_host], protocol=Protocol.RAOP,
-                                   timeout=self.scan_timeout)
+        config = await self._discover(pyatv, loop, Protocol.RAOP)
+        self._connection = await asyncio.wait_for(
+            pyatv.connect(config, loop, protocol=Protocol.RAOP), 5.0)
+        self._remember_discovery(config)
+        self._event("raop_connected", discovery_cached=False)
+
+    async def prepare_discovery(self):
+        """Warm only receiver metadata, without opening a playback session."""
+        import pyatv
+        from pyatv.const import Protocol
+
+        cached = self._discovery_cache.get(self.device_host)
+        if cached is not None and 0 <= time.monotonic() - cached[0] < _AIRPLAY_DISCOVERY_TTL - 90:
+            return
+        config = await self._discover(pyatv, asyncio.get_running_loop(), Protocol.RAOP)
+        self._remember_discovery(config)
+
+    async def _discover(self, pyatv, loop, protocol):
+        configs = await pyatv.scan(loop, hosts=[self.device_host], protocol=protocol, timeout=self.scan_timeout)
         if len(configs) != 1:
             raise TransportError("No unique RAOP receiver found at the configured address")
-        service = configs[0].get_service(Protocol.RAOP)
+        service = configs[0].get_service(protocol)
         if service is not None:
             from pyatv.const import PairingRequirement
             properties = {key: str(value)[:160] for key, value in service.properties.items()
@@ -439,17 +456,17 @@ class AirPlayTransport(Transport):
             self._event("raop_discovered", properties=properties, pairing=str(service.pairing))
             if service.pairing == PairingRequirement.Mandatory:
                 raise TransportError("RAOP receiver requires pairing; pairing is not implemented in this bench")
-        self._connection = await asyncio.wait_for(
-            pyatv.connect(configs[0], loop, protocol=Protocol.RAOP), 5.0)
+        return configs[0]
+
+    def _remember_discovery(self, config):
         now = time.monotonic()
         for host, entry in list(self._discovery_cache.items()):
             if not 0 <= now - entry[0] < _AIRPLAY_DISCOVERY_TTL:
                 self._discovery_cache.pop(host, None)
-        if len(self._discovery_cache) >= _AIRPLAY_DISCOVERY_LIMIT:
+        if self.device_host not in self._discovery_cache and len(self._discovery_cache) >= _AIRPLAY_DISCOVERY_LIMIT:
             oldest = min(self._discovery_cache, key=lambda host: self._discovery_cache[host][0])
             self._discovery_cache.pop(oldest, None)
-        self._discovery_cache[self.device_host] = (now, configs[0])
-        self._event("raop_connected", discovery_cached=False)
+        self._discovery_cache[self.device_host] = (now, config)
 
     async def play(self, stream_url: str, config: Mapping[str, Any]) -> None:
         _url(stream_url)

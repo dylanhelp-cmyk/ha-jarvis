@@ -99,7 +99,7 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
             "method": "multiple generated-reply spectral windows with reference-offset compensation"}
 
 
-async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
+async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, microphone_input=False) -> None:
     """Run one explicitly started fixture trial and retain scalar evidence only."""
     started = time.monotonic()
     result = {"id": bench.test["id"], "kind": "cloud_latency", "route": "airplay",
@@ -113,6 +113,13 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                            "The test interrupts the speaker source; automatic music restoration is unavailable."]}
     bench.results.insert(0, result)
     del bench.results[30:]
+    if microphone_input:
+        result["metric_scope"] = "acoustic fixture captured by Voice PE to audible reply"
+        result["warnings"][:2] = [
+            "This trial uploads a bounded room microphone window while the speaker plays the synthetic question.",
+            "The scripted first turn uses raw microphone input. It does not verify conversational follow-ups or echo cancellation.",
+        ]
+    result["input_mode"] = "acoustic_microphone" if microphone_input else "injected"
     session = source = None
     source_ready = asyncio.Event()
     startup_tasks = []
@@ -128,6 +135,14 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     capture_ended = playback_stopped = False
     alignment = None
     alignment_error = None
+    microphone = asyncio.Queue(maxsize=16)
+    capture_forwarding = False
+    early_reply = False
+    microphone_error = None
+    fixture_requested_at = None
+    reply_start_frame = 0
+    max_microphone_queue_ms = 0.0
+    uploaded_samples = 0
 
     def on_render(pcm, handed_off_at):
         nonlocal alignment_error
@@ -143,8 +158,13 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                 alignment_error = str(exc)
 
     def on_capture(frame, clock_offset_ms):
-        nonlocal alignment_error
-        if alignment_error is None:
+        nonlocal alignment_error, microphone_error
+        if capture_forwarding and microphone_error is None:
+            try:
+                microphone.put_nowait((time.monotonic(), frame.samples.tobytes()))
+            except asyncio.QueueFull:
+                microphone_error = "Microphone upload queue overflowed"
+        if alignment is not None and alignment_error is None:
             try:
                 alignment.capture(frame, clock_offset_ms)
             except (RuntimeError, ValueError) as exc:
@@ -160,9 +180,9 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         for prior in bench.results[1:]:
             echo = prior.get("echo", {})
             receiver = prior.get("transport", {}).get("receiver_after") or {}
-            if (prior.get("route") != "airplay" or prior.get("status") != "measured"
+            if (prior.get("route") != "airplay" or prior.get("status") not in ("measured", "unavailable")
                     or prior.get("calibration_stale")
-                    or echo.get("status") != "measured" or prior.get("requested_airplay_latency_ms") != timing
+                    or echo.get("delay_assumed_ms") is None or prior.get("requested_airplay_latency_ms") != timing
                     or receiver.get("volume_percent") is None
                     or (datetime.now(timezone.utc) - datetime.fromisoformat(prior["started_at"])).total_seconds() > 900):
                 continue
@@ -192,13 +212,16 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     async def output_audio(pcm, rate):
         nonlocal first_voiced_at, last_voiced_at
         nonlocal previous_callback_at, previous_chunk_seconds, reference_gap
+        nonlocal early_reply
         now = time.monotonic()
         if rate != RATE or len(pcm) % 2:
             raise ValueError("Cloud reply audio format changed")
-        if not fixture_started:
-            return
         samples = np.frombuffer(pcm, dtype="<i2")
         bounds = voiced_bounds(samples)
+        if not fixture_started:
+            if microphone_input and capture_forwarding and bounds is not None:
+                early_reply = True
+            return
         if bounds is not None:
             if first_voiced_at is None:
                 first_voiced_at = now
@@ -209,6 +232,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         await source.write(pcm)
 
     def healthy():
+        if microphone_error is not None:
+            raise RuntimeError(microphone_error)
         if bench.device.errors:
             raise RuntimeError("Microphone capture failed during cloud test")
         bench.transport.check_failure()
@@ -230,6 +255,53 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         await bench.transport.wait_for_stream(source.first_read, 8)
         result["speaker_pull_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
 
+    async def play_acoustic_question(question, calibration):
+        nonlocal fixture_requested_at, capture_forwarding, max_microphone_queue_ms, uploaded_samples
+        if not calibration_matches_receiver(calibration) or not 0 < calibration[0] <= 3000:
+            raise RuntimeError("Acoustic microphone test requires recent calibration at this receiver level")
+        fixture_requested_at = time.monotonic()
+        stop_at = fixture_requested_at + len(question) / (2 * RATE) + calibration[0] / 1000 + .25
+
+        async def play_fixture():
+            for offset in range(0, len(question), 640):
+                due = fixture_requested_at + max(0, offset / (2 * RATE) - .1)
+                await asyncio.sleep(max(0, due - time.monotonic()))
+                if time.monotonic() - due > .1:
+                    raise RuntimeError("Acoustic question pacing fell behind")
+                await source.write(question[offset:offset + 640])
+
+        capture_forwarding = True
+        playback = asyncio.create_task(play_fixture())
+        sample_limit = round((stop_at - fixture_requested_at) * RATE)
+        try:
+            while time.monotonic() < stop_at:
+                if playback.done():
+                    playback.result()
+                healthy()
+                remaining = stop_at - time.monotonic()
+                try:
+                    queued_at, pcm = await asyncio.wait_for(microphone.get(), min(.15, remaining))
+                except TimeoutError:
+                    if remaining <= .15:
+                        break
+                    raise RuntimeError("Voice PE microphone stopped delivering PCM") from None
+                if time.monotonic() >= stop_at or uploaded_samples + len(pcm) // 2 > sample_limit:
+                    break
+                age = (time.monotonic() - queued_at) * 1000
+                max_microphone_queue_ms = max(max_microphone_queue_ms, age)
+                if age > 150:
+                    raise RuntimeError("Microphone upload fell behind; trial stopped without catching up")
+                await session.send_audio(pcm)
+                uploaded_samples += len(pcm) // 2
+            await playback
+            if uploaded_samples < len(question) // 2:
+                raise RuntimeError("Microphone upload ended before the full question could be captured")
+        finally:
+            capture_forwarding = False
+            if not playback.done():
+                playback.cancel()
+                await asyncio.gather(playback, return_exceptions=True)
+
     try:
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
@@ -243,7 +315,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         result["fixture"] = {"input_samples": len(fixture_samples), "trimmed_samples": len(question) // 2,
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
         calibration = recent_calibration()
-        if calibration is not None and calibration[0] <= 3000:
+        if microphone_input:
+            if calibration is None or not 0 < calibration[0] <= 3000:
+                raise RuntimeError("Run a quiet-room AirPlay calibration before the acoustic microphone test")
+            bench.device.pcm_consumer = on_capture
+        elif calibration is not None and calibration[0] <= 3000:
             try:
                 alignment = StreamingEcho(calibration[0])
                 bench.device.pcm_consumer = on_capture
@@ -259,10 +335,16 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
             await asyncio.gather(*startup_tasks)
             healthy()
             result["cold_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
-            bench.test["phase"] = "sending paced canned question; microphone is not uploaded"
+            if microphone_input:
+                bench.test["phase"] = "playing synthetic question and streaming bounded room microphone"
+                await play_acoustic_question(question, calibration)
+                reply_start_frame = len(rendered) // 4
+                fixture_started = True
+            else:
+                bench.test["phase"] = "sending paced canned question; microphone is not uploaded"
             paced_at = time.monotonic()
             sent_samples = 0
-            for offset in range(0, len(question), 640):
+            for offset in range(0, 0 if microphone_input else len(question), 640):
                 due = paced_at + sent_samples / RATE
                 await asyncio.sleep(max(0, due - time.monotonic()))
                 lag_ms = max(0, (time.monotonic() - due) * 1000)
@@ -277,7 +359,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
             # Endpoint is the submit time of the chunk containing the final
             # voiced sample, not the fixture file length or cloud readiness.
             fixture_end_at = time.monotonic()
-            result["fixture_last_voiced_submitted_at"] = fixture_end_at
+            if not microphone_input:
+                result["fixture_last_voiced_submitted_at"] = fixture_end_at
             bench.test["phase"] = "waiting for generated reply while streaming silence"
             deadline = fixture_end_at + POST_INPUT_SECONDS
             while time.monotonic() < deadline:
@@ -313,17 +396,34 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         captured, capture_start = bench.device.recording()
         result["capture"] = bench.device.capture_diagnostics()
         bench.test["phase"] = "matching generated reply against local acoustic capture"
-        if first_voiced_at is None or not rendered:
+        measurement_end = fixture_end_at
+        if microphone_input:
+            question_reference = np.frombuffer(question, dtype="<i2")
+            input_match = await asyncio.to_thread(
+                match_response, captured, capture_start, question_reference, 0,
+                fixture_requested_at, fixture_requested_at, handoff_at=lambda offset: fixture_requested_at + offset / RATE,
+                acoustic_delay_range=acoustic_delay_range(calibration))
+            result["acoustic_input"] = input_match
+            measurement_end = (input_match["audible_onset_at"] + len(question_reference) / RATE
+                               if input_match["status"] == "detected" else None)
+            result["estimated_acoustic_question_end_at"] = measurement_end
+        if microphone_input and (measurement_end is None or early_reply):
+            detection = {"status": "unavailable", "latency_ms": None,
+                         "reason": "Early model output overlapped microphone forwarding" if early_reply
+                         else "Acoustic question endpoint was not independently verified"}
+        elif first_voiced_at is None or not rendered:
             detection = {"status": "unavailable", "latency_ms": None, "reason": "No generated voiced PCM detected"}
         else:
             reference = await asyncio.to_thread(render_reference, rendered)
+            if reply_start_frame:
+                reference[:reply_start_frame * RATE // RENDER_RATE] = 0
             output_bounds = voiced_bounds(reference)
             if output_bounds is None:
                 detection = {"status": "unavailable", "latency_ms": None, "reason": "No voiced PCM reached the AirPlay sender"}
             else:
                 delay_range = acoustic_delay_range(calibration)
                 detection = await asyncio.to_thread(match_response, captured, capture_start,
-                    reference, output_bounds[0], fixture_end_at, first_voiced_at,
+                    reference, output_bounds[0], measurement_end, first_voiced_at,
                     handoff_at=handoff_at, acoustic_delay_range=delay_range)
                 detection["reference_source"] = "airplay_pcm_handoff"
                 detection["acoustic_search_delay_range_ms"] = [round(value * 1000) for value in delay_range]
@@ -338,8 +438,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                 "max_processing_ms": round(alignment.processor.max_processing_ms, 3),
                 "scope": "Real-time reference alignment only; microphone audio stays local",
             }
-        trial = {"trial": 1, **detection, "metric": "fixture_end_to_audible",
-                 "first_voiced_pcm_ms": round((first_voiced_at - fixture_end_at) * 1000, 1) if first_voiced_at is not None else None,
+        trial = {"trial": 1, **detection, "metric": "microphone_end_to_audible" if microphone_input else "fixture_end_to_audible",
+                 "first_voiced_pcm_ms": round((first_voiced_at - measurement_end) * 1000, 1) if first_voiced_at is not None and measurement_end is not None else None,
                  "cold_ready_ms": result["cold_ready_ms"],
                  "clock_uncertainty_ms": round(bench.device.clock_rtt_ms / 2 + 4, 2),
                  "digital_energy_resolution_ms": 10, "input_chunk_ms": 20}
@@ -360,8 +460,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         result["error"] = str(exc) or type(exc).__name__
         result["exception_type"] = type(exc).__name__
     finally:
-        if alignment is not None:
+        if alignment is not None or microphone_input:
             bench.device.pcm_consumer = None
+        if microphone_input:
+            result["uploaded_microphone_samples"] = uploaded_samples
+            result["max_microphone_queue_ms"] = round(max_microphone_queue_ms, 2)
         bench.test["finishing"] = True
         result["ended_phase"] = bench.test.get("phase")
         for task in startup_tasks:

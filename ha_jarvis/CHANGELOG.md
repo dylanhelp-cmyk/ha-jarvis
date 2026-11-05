@@ -1,3 +1,9 @@
+# 0.1.21
+
+- Warm AirPlay discovery metadata while idle. Open a fresh playback connection on demand.
+- Add a separately confirmed acoustic microphone benchmark. Play a synthetic question, forward only the bounded Voice PE microphone window, and verify the question endpoint acoustically before reporting latency.
+- App-only update. Run quiet-room AirPlay calibration, then one paid Voice PE microphone trial with the room quiet and speakers idle.
+
 # 0.1.20
 
 - Process a local copy of capture through streaming AEC3 during the injected voice benchmark after fresh room calibration. Use bounded AirPlay history and adjust reference sampling for estimated capture-clock drift. Report processing and timing separately from acoustic suppression.

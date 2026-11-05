@@ -399,6 +399,19 @@ class AirPlayDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(get_service=Mock(return_value=SimpleNamespace(
             properties={'sr': '44100'}, pairing=PairingRequirement.NotNeeded)))
 
+    async def test_prepare_discovery_warms_only_metadata(self):
+        cache = {}
+        config = self.config()
+        adapter = AirPlayTransport('127.0.0.1', discovery_cache=cache)
+        with patch('pyatv.scan', AsyncMock(return_value=[config])) as scan, \
+             patch('pyatv.connect', AsyncMock()) as connect:
+            await adapter.prepare_discovery()
+            await adapter.prepare_discovery()
+            scan.assert_awaited_once()
+            connect.assert_not_awaited()
+            self.assertIs(cache['127.0.0.1'][1], config)
+            self.assertIsNone(adapter._connection)
+
     async def test_discovery_reused_for_same_host_with_a_fresh_facade(self):
         config = self.config()
         cache = {}

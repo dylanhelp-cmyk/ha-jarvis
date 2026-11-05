@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import ExitStack
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
-from jarvis.audio import RATE, make_probe
+from jarvis.audio import PCMFrame, RATE, make_probe
 from jarvis.live_bench import match_response, render_reference, run_cloud_benchmark, voiced_bounds
 from jarvis.live_session import LiveMetrics
 
@@ -111,7 +112,8 @@ class FakeSpeaker:
         pass
 
     def snapshot(self):
-        return {"transport": "airplay", "audible_onset_measured": False}
+        return {"transport": "airplay", "audible_onset_measured": False,
+                "events": [{"event": "receiver_before_pcm", "volume_percent": 40}]}
 
     async def stop(self):
         self.stopped = True
@@ -253,6 +255,43 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         result = self.bench.results[0]
         self.assertGreaterEqual(result["cold_ready_ms"], result["speaker_pull_ready_ms"])
         self.assertGreaterEqual(result["cold_ready_ms"], result["capture_ready_ms"])
+
+    async def test_acoustic_trial_uploads_only_bounded_microphone_window(self):
+        self.bench.results.append({
+            "route": "airplay", "status": "measured", "requested_airplay_latency_ms": 500,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "echo": {"delay_assumed_ms": 10},
+            "transport": {"receiver_after": {"volume_percent": 40}},
+        })
+        samples = np.full(160, 1000, dtype="<i2")
+
+        async def feed():
+            while True:
+                consumer = getattr(self.bench.device, "pcm_consumer", None)
+                if consumer:
+                    consumer(PCMFrame(0, 0, 0, samples), 0)
+                await asyncio.sleep(.01)
+
+        def match(captured, capture_start, reference, offset, endpoint, earliest, **kwargs):
+            return {"status": "detected", "audible_onset_at": earliest + .1, "latency_ms": 100}
+
+        producer = asyncio.create_task(feed())
+        try:
+            with patch("jarvis.live_bench.match_response", side_effect=match) as matcher:
+                await run_cloud_benchmark(self.bench, "websocket", self.fixture, microphone_input=True)
+        finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+        result = self.bench.results[0]
+        self.assertEqual(result["status"], "measured", result)
+        self.assertEqual(matcher.call_count, 2)
+        self.assertEqual(result["trials"][0]["metric"], "microphone_end_to_audible")
+        live = FakeLive.instances[0]
+        voiced = [block for block in live.sent if any(block)]
+        self.assertGreater(len(voiced), 1)
+        self.assertTrue(all(block == samples.tobytes() for block in voiced))
+        self.assertEqual(result["uploaded_microphone_samples"], len(voiced) * len(samples))
+        self.assertIsNone(self.bench.device.pcm_consumer)
 
     async def test_disconnect_cancellation_keeps_failed_status_partial_health_and_cleans_audio(self):
         FakeLive.wait_forever = True

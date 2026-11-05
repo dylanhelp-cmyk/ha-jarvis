@@ -305,7 +305,9 @@ $('run-cloud-test').addEventListener('click', async () => {
     announce('Confirm comfortable volume and an idle speaker before a paid benchmark.', true); return;
   }
   try {
-    await api('api/cloud/tests', {method: 'POST', body: JSON.stringify({transport: $('live-transport').value, comfortable_volume_confirmed: true})});
+    const microphoneInput = $('live-microphone').checked;
+    await api('api/cloud/tests', {method: 'POST', body: JSON.stringify({transport: $('live-transport').value, comfortable_volume_confirmed: true, microphone_input: microphoneInput, microphone_upload_confirmed: microphoneInput})});
+    $('live-microphone').checked = false;
     announce('Paid synthetic voice benchmark started. Use Stop test to cancel.');
     await poll();
   } catch (error) { announce(error.message, true); }

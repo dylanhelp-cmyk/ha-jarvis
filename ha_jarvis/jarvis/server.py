@@ -273,7 +273,7 @@ class Bench:
                     "airplay": {"available": True, "reason": "Baseline: requires an unpaired RAOP receiver; no automatic pairing"}},
                 "codecs": {"wav": True, "flac": shutil.which("ffmpeg") is not None},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
-                          "reason": "Explicit paid injected-input benchmark only; conversational assistant is not enabled"}}
+                          "reason": "Explicit paid voice benchmarks only; conversational assistant is not enabled"}}
 
     async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
@@ -556,7 +556,7 @@ def create_ui(bench):
             bench.cloud_settings.set_key(data["api_key"])
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
                                   "benchmark_available": True,
-                                  "reason": "Paid injected-input benchmark requires explicit Start; conversational assistant remains disabled"})
+                                  "reason": "Paid voice benchmarks require explicit Start; conversational assistant remains disabled"})
     async def cloud_fixture(request):
         if bench.test["running"]:
             raise web.HTTPConflict(text="Wait for the current test before replacing its fixture")
@@ -592,10 +592,16 @@ def create_ui(bench):
             raise ValueError("Select AirPlay and connect/unmute Voice PE before the cloud benchmark")
         if data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
+        microphone_input = data.get("microphone_input", False)
+        if type(microphone_input) is not bool:
+            raise ValueError("Microphone input selection must be true or false")
+        if microphone_input and data.get("microphone_upload_confirmed") is not True:
+            raise ValueError("Confirm the bounded room microphone upload before starting")
         from .live_bench import run_cloud_benchmark
         ident = uuid.uuid4().hex
-        bench.test = {"running": True, "id": ident, "phase": "preparing paid injected-input benchmark"}
-        bench.task = asyncio.create_task(run_cloud_benchmark(bench, transport, bench.cloud_fixture))
+        bench.test = {"running": True, "id": ident, "phase": "preparing paid voice benchmark"}
+        bench.task = asyncio.create_task(run_cloud_benchmark(
+            bench, transport, bench.cloud_fixture, microphone_input=microphone_input))
         return web.json_response({"test_id": ident, "transport": transport, "api_budget_usd": 5}, status=202)
     async def config(request):
         if request.method == "PUT":
@@ -803,9 +809,25 @@ async def serve():
     await web.TCPSite(ui_runner, os.environ.get("JARVIS_UI_HOST", "0.0.0.0"), 8098).start()
     await web.TCPSite(audio_runner, "0.0.0.0", 8099).start()
     await bench.init_slim()
+
+    async def warm_airplay():
+        from .transports import AirPlayTransport
+
+        while True:
+            host = bench.config["wiim_host"]
+            if host and bench.config["route"] == "airplay" and not bench.test["running"]:
+                transport = AirPlayTransport(host, discovery_cache=bench.airplay_discovery_cache)
+                with suppress(Exception):
+                    await asyncio.wait_for(transport.prepare_discovery(), timeout=8)
+            await asyncio.sleep(60)
+
+    discovery = asyncio.create_task(warm_airplay())
     try:
         await shutdown.wait()
     finally:
+        discovery.cancel()
+        with suppress(asyncio.CancelledError):
+            await discovery
         await bench.cancel("app_shutdown")
         if bench.slim: await bench.slim.close()
         if bench.device.ws is not None: await bench.device.ws.close()
