@@ -1,3 +1,8 @@
+# 0.1.19
+
+- Bound acoustic searches from each PCM handoff. Narrow the range after a recent quiet-room echo measurement at the same AirPlay timing and receiver level. Retain the agreement requirement.
+- App-only update. Run a quiet-room echo test, then repeat the injected WebSocket question and inspect the reported acoustic search range and outcome.
+
 # 0.1.18
 
 - Match audible replies against the PCM handed to AirPlay, including silence inserted by the output queue. Keep the reference in bounded RAM for the trial.

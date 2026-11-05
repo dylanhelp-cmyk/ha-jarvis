@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -49,7 +50,8 @@ def render_reference(pcm):
 
 
 def match_response(captured, capture_start, reference, voiced_start_sample,
-                   fixture_end_at, earliest_output_at):
+                   fixture_end_at, earliest_output_at, *, handoff_at=None,
+                   acoustic_delay_range=(0.0, 2.5)):
     """Require distinct reply windows to agree before reporting onset."""
     unavailable = {"status": "unavailable", "latency_ms": None,
                    "fixture_end_to_audible_ms": None, "windows": []}
@@ -62,10 +64,16 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
     starts = sorted(set(int(value) for value in np.linspace(voiced_start_sample, last, 4)))
     starts = [value for index, value in enumerate(starts)
               if index == 0 or value - starts[index - 1] >= int(.06 * RATE)]
-    search_start = max(0, int((earliest_output_at - capture_start - .1) * RATE))
-    search_end = min(len(captured), int((fixture_end_at - capture_start + POST_INPUT_SECONDS + 4) * RATE))
     candidates, windows = [], []
     for offset in starts:
+        start_at = earliest_output_at - .1
+        end_at = fixture_end_at + POST_INPUT_SECONDS + 4
+        if handoff_at is not None:
+            handoff = handoff_at(offset)
+            start_at = max(start_at, handoff + acoustic_delay_range[0])
+            end_at = min(end_at, handoff + acoustic_delay_range[1] + width / RATE)
+        search_start = max(0, int((start_at - capture_start) * RATE))
+        search_end = min(len(captured), int((end_at - capture_start) * RATE))
         detection = detect_probe(captured[search_start:search_end], reference[offset:offset + width])
         window = {"reference_offset_ms": round(offset * 1000 / RATE, 2), **detection}
         if detection["status"] == "detected":
@@ -108,7 +116,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     source_ready = asyncio.Event()
     startup_tasks = []
     rendered = bytearray()
-    first_render_at = None
+    render_offsets = []
+    render_handoffs = []
     first_voiced_at = last_voiced_at = None
     previous_callback_at = previous_chunk_seconds = None
     reference_gap = False
@@ -118,12 +127,32 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     capture_ended = playback_stopped = False
 
     def on_render(pcm, handed_off_at):
-        nonlocal first_render_at
         if len(rendered) + len(pcm) > MAX_RENDER_BYTES:
             raise BufferError("AirPlay render reference exceeded the benchmark RAM limit")
-        if first_render_at is None:
-            first_render_at = handed_off_at
+        render_offsets.append(len(rendered) // 4)
+        render_handoffs.append(handed_off_at)
         rendered.extend(pcm)
+
+    def handoff_at(reference_offset):
+        render_frame = reference_offset * RENDER_RATE // RATE
+        index = bisect_right(render_offsets, render_frame) - 1
+        return render_handoffs[index]
+
+    def acoustic_delay_range():
+        timing = bench.config["airplay_latency_ms"]
+        volume = next((event["volume_percent"] for event in bench.transport.snapshot().get("events", ())
+                       if event["event"] == "receiver_before_pcm"), None)
+        for prior in bench.results[1:]:
+            echo = prior.get("echo", {})
+            if (prior.get("route") != "airplay" or prior.get("status") != "measured"
+                    or echo.get("status") != "measured" or prior.get("requested_airplay_latency_ms") != timing
+                    or volume is None or (prior.get("transport", {}).get("receiver_after") or {}).get("volume_percent") != volume
+                    or (datetime.now(timezone.utc) - datetime.fromisoformat(prior["started_at"])).total_seconds() > 900):
+                continue
+            delay = echo["delay_assumed_ms"] / 1000
+            return max(0, delay - .3), delay + .3
+        # Bench supports up to 2 s of requested RAOP timing plus downstream delay.
+        return 0.0, 3.0
 
     async def source_factory(rate, channels, width):
         nonlocal source
@@ -258,9 +287,12 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
             if output_bounds is None:
                 detection = {"status": "unavailable", "latency_ms": None, "reason": "No voiced PCM reached the AirPlay sender"}
             else:
+                delay_range = acoustic_delay_range()
                 detection = await asyncio.to_thread(match_response, captured, capture_start,
-                    reference, output_bounds[0], fixture_end_at, first_voiced_at)
+                    reference, output_bounds[0], fixture_end_at, first_voiced_at,
+                    handoff_at=handoff_at, acoustic_delay_range=delay_range)
                 detection["reference_source"] = "airplay_pcm_handoff"
+                detection["acoustic_search_delay_range_ms"] = [round(value * 1000) for value in delay_range]
         trial = {"trial": 1, **detection, "metric": "fixture_end_to_audible",
                  "first_voiced_pcm_ms": round((first_voiced_at - fixture_end_at) * 1000, 1) if first_voiced_at is not None else None,
                  "cold_ready_ms": result["cold_ready_ms"],
@@ -320,7 +352,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         result["device_session"] = dict(bench.device.capture_session)
         result["max_input_schedule_lag_ms"] = round(max_lag_ms, 2)
         result["reference_render_frames"] = len(rendered) // 4
-        result["first_render_handoff_at"] = first_render_at
+        result["first_render_handoff_at"] = render_handoffs[0] if render_handoffs else None
         result["cloud_callback_timing_gap"] = reference_gap
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
         result["summary"] = summarize(result["trials"])

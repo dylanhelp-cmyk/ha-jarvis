@@ -30,6 +30,19 @@ class ReplyMatchingTests(unittest.TestCase):
             self.assertEqual(result["status"], "unavailable")
             self.assertIsNone(result["latency_ms"])
 
+    def test_handoff_bounds_exclude_a_later_copy_without_relaxing_agreement(self):
+        reply = np.concatenate((make_probe(513), make_probe(514)))
+        captured = np.zeros(8 * RATE, dtype="<i2")
+        first = int(2.1 * RATE)
+        later = 5 * RATE
+        captured[first:first + len(reply)] = (reply * .35).astype("<i2")
+        captured[later:later + len(reply)] = reply
+        result = match_response(captured, 100, reply, 0, 101, 101.2,
+                                handoff_at=lambda offset: 101.55 + offset / RATE,
+                                acoustic_delay_range=(.25, .85))
+        self.assertEqual(result["status"], "detected", result)
+        self.assertAlmostEqual(result["latency_ms"], 1100, delta=12)
+
     def test_contradictory_window_locations_are_rejected(self):
         reply = np.concatenate((make_probe(513), make_probe(514)))
         fake = [{"status": "detected", "offset_seconds": value, "confidence": .99}
