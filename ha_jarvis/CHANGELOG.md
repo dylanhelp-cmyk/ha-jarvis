@@ -1,3 +1,9 @@
+# 0.1.17
+
+- Start microphone capture, cloud connection and AirPlay setup concurrently. Gate fixture input on microphone and cloud readiness and the first AirPlay PCM pull after volume verification.
+- Report capture-ready and speaker-pull times separately. Drop pre-fixture cloud audio so unsolicited startup output cannot be counted as a reply.
+- App-only update. Run the same injected question twice on each transport and compare the startup breakdown separately from audible onset.
+
 # 0.1.16
 
 - Use a frequency-band noise floor for quiet-room AEC3 pilot measurements.

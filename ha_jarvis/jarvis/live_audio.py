@@ -1,6 +1,7 @@
 """Bounded continuous PCM source for an already connected RAOP session."""
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from collections import deque
@@ -42,6 +43,7 @@ class LiveAudioSource(AudioSource):
         self._input_frames = self._generated_frames = 0
         self._resampler = self._new_resampler()
         self.closed = False
+        self.first_read = asyncio.Event()
         self.generation = 0
         self.telemetry = {'queued_frames': 0, 'resampler_pending_frames': 0,
                           'max_queue_residence_ms': None, 'silence_frames': 0,
@@ -114,6 +116,7 @@ class LiveAudioSource(AudioSource):
                 self._head_offset = 0
         self.telemetry['silence_frames'] += nframes - written // frame_bytes
         self._update_pending()
+        self.first_read.set()
         return bytes(result)
 
     async def interrupt(self):

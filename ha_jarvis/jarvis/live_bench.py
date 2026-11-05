@@ -99,6 +99,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
     previous_callback_at = previous_chunk_seconds = None
     reference_gap = False
     fixture_end_at = None
+    fixture_started = False
     max_lag_ms = 0.0
     capture_ended = playback_stopped = False
 
@@ -116,6 +117,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         now = time.monotonic()
         if rate != RATE or len(pcm) % 2:
             raise ValueError("Cloud reply audio format changed")
+        if not fixture_started:
+            return
         samples = np.frombuffer(pcm, dtype="<i2")
         bounds = voiced_bounds(samples)
         if bounds is not None:
@@ -130,7 +133,6 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                 raise BufferError("Reply reference exceeded the 20 second RAM limit")
             reference.extend(pcm)
         previous_callback_at, previous_chunk_seconds = now, len(samples) / RATE
-        await asyncio.wait_for(source_ready.wait(), 15)
         await source.write(pcm)
 
     def healthy():
@@ -139,6 +141,21 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         bench.transport.check_failure()
         if session.metrics.error:
             raise RuntimeError(session.metrics.error)
+
+    async def start_capture():
+        await bench.device.begin(result["id"], 75000)
+        result["device_session"] = dict(bench.device.capture_session)
+        result["capture_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
+
+    async def start_speaker():
+        await bench.transport.play(
+            "http://127.0.0.1:8099/live-source-unused.wav",
+            {"codec": "wav", "airplay_latency_ms": bench.config["airplay_latency_ms"],
+             "source_factory": source_factory})
+        await bench.transport.wait_for_stream(source_ready, 15)
+        # The first pull follows RECORD/FLUSH and the receiver volume guard.
+        await bench.transport.wait_for_stream(source.first_read, 8)
+        result["speaker_pull_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
 
     try:
         if transport not in ("webrtc", "websocket"):
@@ -152,21 +169,15 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
         question = fixture_samples[bounds[0]:bounds[1]].tobytes()
         result["fixture"] = {"input_samples": len(fixture_samples), "trimmed_samples": len(question) // 2,
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
-        bench.test["phase"] = "capturing local microphone for cloud playback measurement"
-        await bench.device.begin(result["id"], 75000)
-        result["device_session"] = dict(bench.device.capture_session)
-
         bench.transport = AirPlayTransport.for_wiim(bench.config["wiim_host"], bench.config["verify_tls"],
                                                     discovery_cache=bench.airplay_discovery_cache)
         session = LiveSession(bench.cloud_settings, transport=transport, on_audio=output_audio, max_seconds=60)
-        bench.test["phase"] = "connecting cloud and continuous AirPlay stream"
+        bench.test["phase"] = "preparing capture, cloud and AirPlay in parallel"
         async with asyncio.timeout(45):
-            startup_tasks = [asyncio.create_task(session.start()), asyncio.create_task(bench.transport.play(
-                "http://127.0.0.1:8099/live-source-unused.wav",
-                {"codec": "wav", "airplay_latency_ms": bench.config["airplay_latency_ms"],
-                 "source_factory": source_factory}))]
+            startup_tasks = [asyncio.create_task(operation()) for operation in
+                             (start_capture, start_speaker, session.start)]
             await asyncio.gather(*startup_tasks)
-            await asyncio.wait_for(source_ready.wait(), 15)
+            healthy()
             result["cold_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
             bench.test["phase"] = "sending paced canned question; microphone is not uploaded"
             paced_at = time.monotonic()
@@ -180,6 +191,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes) -> None:
                     raise RuntimeError("Canned question pacing fell behind; trial stopped without acceleration")
                 healthy()
                 block = question[offset:offset + 640]
+                fixture_started = True
                 await session.send_audio(block)
                 sent_samples += len(block) // 2
             # Endpoint is the submit time of the chunk containing the final

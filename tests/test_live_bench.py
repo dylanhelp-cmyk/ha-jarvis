@@ -75,6 +75,11 @@ class FakeSpeaker:
     async def play(self, url, config):
         self.url = url
         self.source = await config["source_factory"](44100, 2, 2)
+        self.source.first_read = asyncio.Event()
+        self.source.first_read.set()
+
+    async def wait_for_stream(self, ready, timeout):
+        await asyncio.wait_for(ready.wait(), timeout)
 
     def check_failure(self):
         pass
@@ -188,6 +193,40 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["trials"][0]["provisional"])
         self.assertEqual(result["trials"][0]["latency_ms"], 1200.0)
         self.assertTrue(result["cloud"]["finalization_confirmed"])
+
+    async def test_startup_overlaps_and_fixture_waits_for_speaker_pull(self):
+        capture_entered = asyncio.Event()
+        release_capture = asyncio.Event()
+        speaker_opened = asyncio.Event()
+        original_play = FakeSpeaker.play
+
+        async def begin(*args):
+            capture_entered.set()
+            await release_capture.wait()
+
+        async def play(speaker, *args):
+            await original_play(speaker, *args)
+            speaker.source.first_read.clear()
+            speaker_opened.set()
+
+        self.bench.device.begin.side_effect = begin
+        with patch.object(FakeSpeaker, "play", play):
+            task = asyncio.create_task(run_cloud_benchmark(self.bench, "webrtc", self.fixture))
+            try:
+                await asyncio.wait_for(asyncio.gather(capture_entered.wait(), speaker_opened.wait()), 1)
+                self.assertTrue(FakeLive.instances)
+                release_capture.set()
+                await asyncio.sleep(0)
+                self.assertFalse(FakeLive.instances[0].sent)
+                FakeSpeaker.instances[0].source.first_read.set()
+                await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        result = self.bench.results[0]
+        self.assertGreaterEqual(result["cold_ready_ms"], result["speaker_pull_ready_ms"])
+        self.assertGreaterEqual(result["cold_ready_ms"], result["capture_ready_ms"])
 
     async def test_disconnect_cancellation_keeps_failed_status_partial_health_and_cleans_audio(self):
         FakeLive.wait_forever = True
