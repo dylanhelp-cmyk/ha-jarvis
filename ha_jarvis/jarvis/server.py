@@ -764,8 +764,8 @@ def create_ui(bench):
         if kind != "connection" and bench.config["codec"] == "flac" and not shutil.which("ffmpeg"):
             raise ValueError("FLAC requires ffmpeg; it is included in the HA App image")
         lead_ms = data.get("lead_ms", 100)
-        if type(lead_ms) is not int or lead_ms not in (100, 300, 500):
-            raise ValueError("Probe lead must be 100, 300 or 500 ms")
+        if type(lead_ms) is not int or lead_ms not in (100, 200, 300, 500):
+            raise ValueError("Probe lead must be 100, 200, 300 or 500 ms")
         if lead_ms != 100 and kind not in ("startup_pcm", "startup_ack"):
             raise ValueError("A custom probe lead requires prepared PCM startup")
         wait_for_wake = data.get("wait_for_wake", False)

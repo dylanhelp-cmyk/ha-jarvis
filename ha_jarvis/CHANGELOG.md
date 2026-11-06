@@ -1,3 +1,7 @@
+# 0.1.36
+
+- Add a 200 ms acknowledgment lead-in option for comparison with the verified 300 ms setting. Cold timing continues to include the selected silence.
+
 # 0.1.35
 
 - Give the synthetic talker's AirPlay stream a 300 ms silent lead-in before the microphone capture window. The lead precedes the question and its measured endpoint.
