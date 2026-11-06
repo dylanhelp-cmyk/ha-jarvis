@@ -14,6 +14,17 @@ from jarvis.server import Stream
 
 
 class LiveAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acknowledgment_source_keeps_separate_word_windows(self):
+        slots = np.zeros((2, 12000), dtype="<i2")
+        slots[0, 320:5120] = 1200
+        slots[1, 640:5440] = -1800
+        stream = Stream("startup_ack", 2, acknowledgment=slots.tobytes())
+        source = StartupPCMSource(stream)
+        await source.readframes(44100)
+        self.assertEqual(len(stream.markers), 2)
+        self.assertTrue(np.all(stream.markers[0][1] == 1200))
+        self.assertTrue(np.all(stream.markers[1][1] == -1800))
+
     async def test_startup_pcm_marks_probes_only_when_requested(self):
         stream = Stream("startup_pcm", 2)
         source = StartupPCMSource(stream)

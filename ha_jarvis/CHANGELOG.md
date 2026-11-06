@@ -1,3 +1,8 @@
+# 0.1.25
+
+- Add a local acknowledgment playback check. Load 1.5 seconds of mono 16 kHz PCM with one synthetic word in each 750 ms slot. A complete match requires consistent acoustic timing for both slots.
+- App-only update. Compare the same test clip at 100 and 500 ms lead-in. No OpenAI call.
+
 # 0.1.24
 
 - Compare 100, 300 and 500 ms of silence before prepared PCM probes. Cold audible timing includes the chosen lead-in.

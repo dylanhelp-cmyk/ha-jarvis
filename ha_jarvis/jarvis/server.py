@@ -68,10 +68,11 @@ def validate_config(value):
 
 
 class Stream:
-    def __init__(self, kind, repetitions, *, lead_ms=100):
+    def __init__(self, kind, repetitions, *, lead_ms=100, acknowledgment=None):
         self.id = secrets.token_urlsafe(24)
         self.kind, self.repetitions = kind, repetitions
         self.lead_ms = lead_ms
+        self.acknowledgment = acknowledgment
         self.connected = asyncio.Event()
         self.done = asyncio.Event()
         self.stop_requested = asyncio.Event()
@@ -86,13 +87,26 @@ class Stream:
         self.error = None
         self.expected_disconnect = False
         self.duration = 30 if self.kind == "stop" else 1 + self.repetitions * 2.0 + 5
-        if self.kind == "startup_pcm":
+        if self.kind in ("startup_pcm", "startup_ack"):
             self.duration = 4
 
     def prepare_pcm(self):
         total = int(self.duration * RATE)
         probes = {}
         pcm = np.zeros(total, dtype="<i2")
+        if self.acknowledgment is not None:
+            from .live_bench import voiced_bounds
+
+            clip = np.frombuffer(self.acknowledgment, dtype="<i2")
+            lead = self.lead_ms * RATE // 1000
+            pcm[lead:lead + len(clip)] = clip
+            for offset, word in zip((0, len(clip) // 2), np.split(clip, 2)):
+                bounds = voiced_bounds(word)
+                if bounds is None or bounds[1] - bounds[0] < RATE // 8:
+                    raise ValueError("Each acknowledgment slot needs at least 125 ms of speech")
+                probes[lead + offset + bounds[0]] = word[bounds[0]:bounds[1]]
+            self.reference_pcm = pcm
+            return pcm, probes
         for i in range(0 if self.kind == "volume" else self.repetitions):
             # Swap the first two known probe identities for the startup check.
             # This distinguishes a weak reference from a startup-specific loss.
@@ -341,14 +355,16 @@ class Bench:
                 if not self.slim:
                     raise ValueError(self.slim_error or "SlimProto server is not ready")
                 self.transport = self.slim
-            self.stream = Stream(kind, repetitions, lead_ms=lead_ms)
+            direct_pcm = kind in ("startup_pcm", "startup_ack")
+            self.stream = Stream(kind, repetitions, lead_ms=lead_ms,
+                                 acknowledgment=self.cloud_fixture if kind == "startup_ack" else None)
             extension = self.config["codec"]
             if self.config["route"] == "slimproto" and extension == "wav":
                 extension = "pcm"
             url = self.config["stream_base_url"].rstrip("/") + "/stream/" + self.stream.id + "." + extension
             self.test["phase"] = "waiting for speaker stream"
             source_options = {}
-            if kind == "startup_pcm":
+            if direct_pcm:
                 from .live_audio import StartupPCMSource
 
                 async def source_factory(*_format):
@@ -359,7 +375,7 @@ class Bench:
             await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1,
                                             "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"],
                                             **source_options})
-            result["wire_format"] = ("pcm_s16be_raop" if kind == "startup_pcm"
+            result["wire_format"] = ("pcm_s16be_raop" if direct_pcm
                                      else "pcm_s16le" if extension == "pcm" else extension)
             if self.config["route"] == "airplay":
                 result["requested_airplay_latency_ms"] = self.config["airplay_latency_ms"]
@@ -378,7 +394,7 @@ class Bench:
                 return
             self.test["phase"] = "playing acoustic probes — remain quiet"
             playback_delay_limit = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
-            if kind == "startup_pcm":
+            if direct_pcm:
                 playback_delay_limit = 4
             if kind == "stop":
                 await asyncio.sleep(5)
@@ -416,6 +432,8 @@ class Bench:
                 trial = {"trial": i + 1, **detection, "latency_ms": None,
                          "search_duration_seconds": round(max(0, search_end - search_start) / RATE, 3),
                          "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 4, 2)}
+                if kind == "startup_ack":
+                    trial["clip_slot"] = ("first_word", "second_word")[i]
                 if detection["status"] == "detected":
                     audible = capture_start + search_start / RATE + detection["offset_seconds"]
                     latency = (audible - emitted) * 1000
@@ -432,6 +450,10 @@ class Bench:
                         trial["detected_after_stop"] = kind == "stop" and audible > result.get("stop_command_at", float("inf"))
                 result["trials"].append(trial)
             result["summary"] = summarize(result["trials"])
+            if kind == "startup_ack":
+                delays = [trial["latency_ms"] for trial in result["trials"] if trial["latency_ms"] is not None]
+                result["acknowledgment_match"] = ("both_word_windows_agree" if len(delays) == 2
+                                                   and abs(delays[0] - delays[1]) <= 40 else "unavailable")
             if kind in ("stability", "echo") and result["summary"]["median_ms"] is not None:
                 result["stability"] = await asyncio.to_thread(detect_stability, pcm, capture_start,
                     self.stream.started_at, self.stream.duration, result["summary"]["median_ms"], self.stream.markers)
@@ -443,6 +465,8 @@ class Bench:
             if self.stream.error:
                 raise ValueError(self.stream.error)
             complete = bool(result["summary"]["valid_trials"])
+            if kind == "startup_ack":
+                complete = result["acknowledgment_match"] == "both_word_windows_agree"
             if kind in ("stability", "echo"):
                 complete = complete and result.get("stability", {}).get("status") == "measured"
             if kind == "echo":
@@ -462,7 +486,9 @@ class Bench:
                                       "reason": "Need a continuous pilot and two consistent delay estimates"}
                 complete = result["echo"]["status"] == "measured"
             result["status"] = "measured" if complete else "unavailable"
-            if result["status"] == "unavailable" and kind != "echo":
+            if result["status"] == "unavailable" and kind == "startup_ack":
+                result["warnings"].append("The two acknowledgment words did not both match at a consistent delay.")
+            elif result["status"] == "unavailable" and kind != "echo":
                 if kind == "stability" and result["summary"]["valid_trials"]:
                     result["warnings"].append("Playback onset was measured, but continuity could not be established. Do not interpret unavailable stability as zero dropouts.")
                 else:
@@ -648,10 +674,12 @@ def create_ui(bench):
         if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
         kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "startup", "startup_pcm", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
+        if kind not in ("latency", "startup", "startup_pcm", "startup_ack", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Invalid test type or repetition count")
-        if kind in ("startup", "startup_pcm") and (bench.config["route"] != "airplay" or repetitions != 2):
+        if kind in ("startup", "startup_pcm", "startup_ack") and (bench.config["route"] != "airplay" or repetitions != 2):
             raise ValueError("Startup check requires AirPlay and two probes")
+        if kind == "startup_ack" and len(bench.cloud_fixture) != 3 * RATE:
+            raise ValueError("Load a 1.5 second acknowledgment with one word per 750 ms slot")
         if kind == "volume" and (bench.config["route"] != "airplay" or repetitions != 1):
             raise ValueError("Silent volume check requires AirPlay and one repetition")
         if kind != "volume" and (not bench.device.snapshot()["connected"] or bench.device.info.get("muted")):
@@ -663,7 +691,7 @@ def create_ui(bench):
         lead_ms = data.get("lead_ms", 100)
         if type(lead_ms) is not int or lead_ms not in (100, 300, 500):
             raise ValueError("Probe lead must be 100, 300 or 500 ms")
-        if lead_ms != 100 and kind != "startup_pcm":
+        if lead_ms != 100 and kind not in ("startup_pcm", "startup_ack"):
             raise ValueError("A custom probe lead requires prepared PCM startup")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}

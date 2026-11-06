@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', startup_pcm: 'AirPlay startup with prepared PCM', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
+const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', startup_pcm: 'AirPlay startup with prepared PCM', startup_ack: 'Startup acknowledgment check', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
 let status = null;
 let dirty = false;
 let configured = false;
@@ -243,7 +243,7 @@ $('config-form').addEventListener('submit', async (event) => {
 });
 document.querySelectorAll('.test-option').forEach((button) => button.addEventListener('click', () => {
   kind = button.dataset.kind;
-  $('startup-lead-field').hidden = kind !== 'startup_pcm';
+  $('startup-lead-field').hidden = !['startup_pcm', 'startup_ack'].includes(kind);
   document.querySelectorAll('.test-option').forEach((option) => {option.classList.toggle('selected', option === button); option.setAttribute('aria-pressed', String(option === button));});
   updateReadiness();
 }));
@@ -252,8 +252,8 @@ $('run-test').addEventListener('click', async () => {
   if ($('run-test').disabled) return;
   busy = true; updateReadiness();
   try {
-    const repetitions = ['startup', 'startup_pcm'].includes(kind) ? 2 : ['stop', 'volume'].includes(kind) ? 1 : 3;
-    const lead_ms = kind === 'startup_pcm' ? Number($('startup-lead').value) : 100;
+    const repetitions = ['startup', 'startup_pcm', 'startup_ack'].includes(kind) ? 2 : ['stop', 'volume'].includes(kind) ? 1 : 3;
+    const lead_ms = ['startup_pcm', 'startup_ack'].includes(kind) ? Number($('startup-lead').value) : 100;
     await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions, lead_ms, comfortable_volume_confirmed: true})});
     announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
