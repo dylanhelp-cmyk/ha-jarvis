@@ -1,3 +1,8 @@
+# 0.1.26
+
+- Use the second word's measured arrival to restrict the first-word search. Withhold cold timing when the two matches disagree.
+- App-only update. Repeat the local acknowledgment test and compare both word delays.
+
 # 0.1.25
 
 - Add a local acknowledgment playback check. Load 1.5 seconds of mono 16 kHz PCM with one synthetic word in each 750 ms slot. A complete match requires consistent acoustic timing for both slots.

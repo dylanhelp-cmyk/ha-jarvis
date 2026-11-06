@@ -423,11 +423,22 @@ class Bench:
                 result["metric"] = "stop_to_acoustic_silence"
             else:
                 result["metric"] = "stream_marker_to_acoustic_onset"
-            for i, (emitted, probe) in enumerate(self.stream.markers):
+            markers = list(enumerate(self.stream.markers))
+            if kind == "startup_ack":
+                markers.reverse()
+            for i, (emitted, probe) in markers:
                 # Each marker gets its own bounded search window, avoiding pairing
                 # unrelated microphone bursts with a different output trial.
                 search_start = max(0, int((emitted - capture_start - .1) * RATE))
                 search_end = min(len(pcm), int((emitted - capture_start + playback_delay_limit + len(probe) / RATE) * RATE))
+                if kind == "startup_ack" and i == 0 and result["trials"]:
+                    later_delay = result["trials"][0]["latency_ms"]
+                    if later_delay is not None:
+                        # Locate the first word independently in a physically
+                        # plausible interval anchored to the second word.
+                        predicted = (emitted - capture_start + later_delay / 1000) * RATE
+                        search_start = max(search_start, int(predicted - .12 * RATE))
+                        search_end = min(search_end, int(predicted + .12 * RATE) + len(probe))
                 detection = await asyncio.to_thread(detect_probe, pcm[search_start:search_end], probe)
                 trial = {"trial": i + 1, **detection, "latency_ms": None,
                          "search_duration_seconds": round(max(0, search_end - search_start) / RATE, 3),
@@ -451,9 +462,12 @@ class Bench:
                 result["trials"].append(trial)
             result["summary"] = summarize(result["trials"])
             if kind == "startup_ack":
+                result["trials"].sort(key=lambda trial: trial["trial"])
                 delays = [trial["latency_ms"] for trial in result["trials"] if trial["latency_ms"] is not None]
                 result["acknowledgment_match"] = ("both_word_windows_agree" if len(delays) == 2
                                                    and abs(delays[0] - delays[1]) <= 40 else "unavailable")
+                if result["acknowledgment_match"] == "unavailable" and result["trials"]:
+                    result["trials"][0].pop("cold_startup_ms", None)
             if kind in ("stability", "echo") and result["summary"]["median_ms"] is not None:
                 result["stability"] = await asyncio.to_thread(detect_stability, pcm, capture_start,
                     self.stream.started_at, self.stream.duration, result["summary"]["median_ms"], self.stream.markers)
