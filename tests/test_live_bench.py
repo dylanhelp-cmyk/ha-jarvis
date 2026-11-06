@@ -296,6 +296,12 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result["cold_ready_ms"], result["capture_ready_ms"])
 
     async def test_acoustic_trial_uploads_only_bounded_microphone_window(self):
+        await self.exercise_acoustic_window(local_preflight=False)
+
+    async def test_local_acoustic_preflight_never_creates_a_cloud_session(self):
+        await self.exercise_acoustic_window(local_preflight=True)
+
+    async def exercise_acoustic_window(self, *, local_preflight):
         self.bench.results.append({
             "route": "airplay", "status": "measured", "requested_airplay_latency_ms": 500,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -321,11 +327,20 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         producer = asyncio.create_task(feed())
         try:
             with patch("jarvis.live_bench.match_response", side_effect=match) as matcher:
-                await run_cloud_benchmark(self.bench, "websocket", self.fixture, microphone_input=True)
+                await run_cloud_benchmark(self.bench, "websocket", self.fixture,
+                                          microphone_input=True, local_preflight=local_preflight)
         finally:
             producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
         result = self.bench.results[0]
+        if local_preflight:
+            self.assertEqual(result["status"], "passed", result)
+            self.assertEqual(matcher.call_count, 1)
+            self.assertFalse(FakeLive.instances)
+            self.assertNotIn("cloud", result)
+            self.assertGreater(result["local_microphone_window_samples"], 0)
+            self.assertIsNone(self.bench.device.pcm_consumer)
+            return
         self.assertEqual(result["status"], "measured", result)
         self.assertEqual(matcher.call_count, 2)
         self.assertEqual(result["trials"][0]["metric"], "microphone_end_to_audible")

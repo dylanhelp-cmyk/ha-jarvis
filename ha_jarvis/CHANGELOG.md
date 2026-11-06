@@ -1,3 +1,8 @@
+# 0.1.33
+
+- Add a local microphone preflight. Play the synthetic question and check that its verified acoustic endpoints fit in the bounded Voice PE sample window without opening a cloud session.
+- App-only update. Verify a local acknowledgment at the chosen WiiM settings, load the synthetic question and run Local microphone preflight.
+
 # 0.1.32
 
 - Use a recent verified acknowledgment at the same receiver level and timing to bound reply matching when a room echo calibration is unavailable.

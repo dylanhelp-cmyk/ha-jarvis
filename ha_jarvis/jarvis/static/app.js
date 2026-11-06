@@ -1,7 +1,7 @@
 /* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', startup_pcm: 'AirPlay startup with prepared PCM', startup_ack: 'Startup acknowledgment check', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
+const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', startup_pcm: 'AirPlay startup with prepared PCM', startup_ack: 'Startup acknowledgment check', mic_preflight: 'Local microphone preflight', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
 let status = null;
 let dirty = false;
 let configured = false;

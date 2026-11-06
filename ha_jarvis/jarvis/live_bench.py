@@ -99,7 +99,8 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
             "method": "multiple generated-reply spectral windows with reference-offset compensation"}
 
 
-async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, microphone_input=False, followup=None) -> None:
+async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, microphone_input=False,
+                              followup=None, local_preflight=False) -> None:
     """Run one explicitly started fixture trial and retain scalar evidence only."""
     started = time.monotonic()
     result = {"id": bench.test["id"], "kind": "cloud_latency", "route": "airplay",
@@ -121,6 +122,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         ]
     result["input_mode"] = "acoustic_microphone" if microphone_input else "injected"
     result["followup_requested"] = followup is not None
+    if local_preflight:
+        microphone_input = True
+        result.update(kind="mic_preflight", cloud_transport=None, input_mode="local_acoustic",
+                      metric_scope="acoustic question inside bounded local capture window")
+        result["warnings"] = ["Room audio stays local. This check makes no OpenAI calls."]
     session = source = None
     source_ready = asyncio.Event()
     startup_tasks = []
@@ -253,7 +259,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         if bench.device.errors:
             raise RuntimeError("Microphone capture failed during cloud test")
         bench.transport.check_failure()
-        if session.metrics.error:
+        if session is not None and session.metrics.error:
             raise RuntimeError(session.metrics.error)
 
     async def start_capture():
@@ -308,7 +314,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 max_microphone_queue_ms = max(max_microphone_queue_ms, age)
                 if age > 150:
                     raise RuntimeError("Microphone upload fell behind; trial stopped without catching up")
-                await session.send_audio(pcm)
+                if not local_preflight:
+                    await session.send_audio(pcm)
                 if uploaded_capture_start is None:
                     uploaded_capture_start = captured_at
                 uploaded_capture_end = captured_at + len(pcm) / (2 * RATE)
@@ -366,7 +373,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         return endpoint, completion
 
     try:
-        if transport not in ("webrtc", "websocket"):
+        if not local_preflight and transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not isinstance(fixture, bytes) or not fixture or len(fixture) % 2 or len(fixture) > 10 * RATE * 2:
             raise ValueError("Question fixture must be 1–10 seconds of mono PCM16LE at 16 kHz")
@@ -388,6 +395,8 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
         calibration = recent_calibration()
         match_calibration = calibration or recent_calibration(allow_ack=True)
+        if local_preflight:
+            calibration = match_calibration
         if microphone_input:
             if calibration is None or not 0 < calibration[0] <= 3000:
                 raise RuntimeError("Run a quiet-room AirPlay calibration before the acoustic microphone test")
@@ -400,22 +409,28 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 alignment_error = str(exc)
         bench.transport = AirPlayTransport.for_wiim(bench.config["wiim_host"], bench.config["verify_tls"],
                                                     discovery_cache=bench.airplay_discovery_cache)
-        session = LiveSession(bench.cloud_settings, transport=transport, on_audio=output_audio, max_seconds=60)
-        bench.test["phase"] = "preparing capture, cloud and AirPlay in parallel"
+        if not local_preflight:
+            session = LiveSession(bench.cloud_settings, transport=transport, on_audio=output_audio, max_seconds=60)
+        bench.test["phase"] = "preparing capture and AirPlay" if local_preflight else "preparing capture, cloud and AirPlay in parallel"
         async with asyncio.timeout(45):
-            startup_tasks = [asyncio.create_task(operation()) for operation in
-                             (start_capture, start_speaker, session.start)]
+            startup_tasks = [asyncio.create_task(start_capture()), asyncio.create_task(start_speaker())]
+            if session is not None:
+                startup_tasks.append(asyncio.create_task(session.start()))
             await asyncio.gather(*startup_tasks)
             healthy()
             result["cold_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
             if microphone_input:
-                bench.test["phase"] = "playing synthetic question and streaming bounded room microphone"
+                bench.test["phase"] = ("playing synthetic question and checking local capture" if local_preflight
+                                       else "playing synthetic question and streaming bounded room microphone")
                 await play_acoustic_question(question, calibration)
                 reply_start_frame = len(rendered) // 4
                 fixture_started = True
             else:
                 bench.test["phase"] = "sending paced canned question; microphone is not uploaded"
-            fixture_end_at, completion = await exchange(b"" if microphone_input else question)
+            if not local_preflight:
+                fixture_end_at, completion = await exchange(b"" if microphone_input else question)
+            else:
+                completion = "local_capture_complete"
             if next_question is not None and completion == "quiet_and_drained":
                 reply_start_frame = len(rendered) // 4
                 first_turn = (fixture_end_at, first_voiced_at, reply_start_frame)
@@ -430,13 +445,14 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             if completion == "observation_timeout":
                 result["warnings"].append("The reply did not finish within the observation window. Any confirmed onset is provisional.")
 
-        bench.test["phase"] = "closing paid cloud session and collecting final usage"
-        metrics = await session.close()
-        result["cloud"] = asdict(metrics)
-        if not metrics.finalization_confirmed:
-            raise RuntimeError("Cloud finalization unconfirmed; paid retries remain blocked")
-        if metrics.error:
-            raise RuntimeError(metrics.error)
+        if session is not None:
+            bench.test["phase"] = "closing paid cloud session and collecting final usage"
+            metrics = await session.close()
+            result["cloud"] = asdict(metrics)
+            if not metrics.finalization_confirmed:
+                raise RuntimeError("Cloud finalization unconfirmed; paid retries remain blocked")
+            if metrics.error:
+                raise RuntimeError(metrics.error)
         bench.test["phase"] = "recording physical speaker playback tail"
         await asyncio.sleep(PHYSICAL_TAIL_SECONDS)
         await asyncio.wait_for(bench.transport.stop(), 8)
@@ -473,8 +489,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             if measurement_end is not None and not (
                 uploaded_capture_start <= input_match["audible_onset_at"] <= measurement_end <= uploaded_capture_end
             ):
-                result["warnings"].append("The acoustic question exceeded the transmitted microphone sample interval.")
+                result["warnings"].append("The acoustic question exceeded the bounded microphone sample interval.")
                 measurement_end = None
+        if local_preflight:
+            result["status"] = "passed" if measurement_end is not None else "unavailable"
+            return
         if microphone_input and (measurement_end is None or early_reply):
             detection = {"status": "unavailable", "latency_ms": None,
                          "reason": "Early model output overlapped microphone forwarding" if early_reply
@@ -533,9 +552,9 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         if alignment is not None or microphone_input:
             bench.device.pcm_consumer = None
         if microphone_input:
-            result["uploaded_microphone_samples"] = uploaded_samples
-            result["uploaded_capture_start_at"] = uploaded_capture_start
-            result["uploaded_capture_end_at"] = uploaded_capture_end
+            result["local_microphone_window_samples" if local_preflight else "uploaded_microphone_samples"] = uploaded_samples
+            result["microphone_window_start_at"] = uploaded_capture_start
+            result["microphone_window_end_at"] = uploaded_capture_end
             result["max_microphone_queue_ms"] = round(max_microphone_queue_ms, 2)
         bench.test["finishing"] = True
         result["ended_phase"] = bench.test.get("phase")

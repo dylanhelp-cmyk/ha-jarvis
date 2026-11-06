@@ -747,12 +747,14 @@ def create_ui(bench):
         if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
         kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "startup", "startup_pcm", "startup_ack", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
+        if kind not in ("latency", "startup", "startup_pcm", "startup_ack", "mic_preflight", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Invalid test type or repetition count")
         if kind in ("startup", "startup_pcm", "startup_ack") and (bench.config["route"] != "airplay" or repetitions != 2):
             raise ValueError("Startup check requires AirPlay and two probes")
         if kind == "startup_ack" and len(bench.cloud_fixture) != 3 * RATE:
             raise ValueError("Load a 1.5 second acknowledgment with one word per 750 ms slot")
+        if kind == "mic_preflight" and (bench.config["route"] != "airplay" or not bench.cloud_fixture):
+            raise ValueError("Select AirPlay and load a synthetic question for the local microphone check")
         if kind == "volume" and (bench.config["route"] != "airplay" or repetitions != 1):
             raise ValueError("Silent volume check requires AirPlay and one repetition")
         if kind != "volume" and (not bench.device.snapshot()["connected"] or bench.device.info.get("muted")):
@@ -781,8 +783,14 @@ def create_ui(bench):
                 raise ValueError("The local wake stimulus must be 1.5 seconds at 16 kHz mono")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms,
-                                                 wait_for_wake=wait_for_wake, wake_stimulus=wake_stimulus))
+        if kind == "mic_preflight":
+            from .live_bench import run_cloud_benchmark
+
+            bench.task = asyncio.create_task(run_cloud_benchmark(
+                bench, "", bench.cloud_fixture, local_preflight=True))
+        else:
+            bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms,
+                                                     wait_for_wake=wait_for_wake, wake_stimulus=wake_stimulus))
         return web.json_response({"test_id": ident}, status=202)
     async def cancel(request):
         asyncio.create_task(bench.cancel())
