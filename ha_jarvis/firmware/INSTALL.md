@@ -1,6 +1,6 @@
 # Voice PE 3.5 mm audio bench firmware
 
-For repository-managed updates, keep `voice-pe-repository.yaml` in ESPHome Builder. It downloads the package and custom component from [ha-jarvis](https://github.com/dylanhelp-cmyk/ha-jarvis) on `main`, refreshing on validation or compilation when its five-minute cache expires. Validate and compile with **ESPHome 2026.10.0 / ESP-IDF 5.5.6**. The jack playback milestone uses firmware **0.2.0**.
+For repository-managed updates, keep `voice-pe-repository.yaml` in ESPHome Builder. It downloads the package and custom component from [ha-jarvis](https://github.com/dylanhelp-cmyk/ha-jarvis) on `main`, refreshing on validation or compilation when its five-minute cache expires. Validate and compile with **ESPHome 2026.10.0 / ESP-IDF 5.5.6**. The jack playback milestone uses firmware **0.2.1**.
 
 Add the keys in `secrets.example.yaml` to Builder's `secrets.yaml`: Wi-Fi, fresh API encryption key, unique OTA password, App LAN URL (`ws://HA_LAN_IP:8099/device`) and App-generated pairing token. Replace the intentionally invalid all-zero API example. This milestone authenticates over **plain LAN WebSocket**; keep port 8099 private.
 

@@ -3,13 +3,16 @@ import json
 import io
 from pathlib import Path
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
 from jarvis.server import Bench, bench_signal, create_ui, create_audio, validate_config
 from jarvis.device import Device
 from jarvis.audio import FRAME, RATE, make_probe
+from jarvis.playback import HEADER
 import numpy as np
 
 
@@ -93,6 +96,62 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertIsNone(self.bench.task)
         await ws.close()
+
+    async def test_wired_bench_uses_paired_socket_for_pcm_and_drain(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello','protocol':1,'token':self.bench.config['device_token'],
+                            'sample_rate':RATE,'channels':1,'raw_ready':True,'muted':False,
+                            'playback_protocol':1,'jack_plugged':True})
+        await ws.receive_json()
+        generation = None
+        sent = 0
+
+        async def peer():
+            nonlocal generation, sent
+            async for frame in ws:
+                if isinstance(frame.data, bytes):
+                    magic, _, _, count, packet_generation, _, first = HEADER.unpack_from(frame.data)
+                    self.assertEqual((magic, packet_generation, first), (b'JPLY', generation, sent))
+                    sent += count
+                    await ws.send_json({'type':'play_render','playback_id':playback_id,
+                        'generation':generation,'first_sample':first,'samples':count,
+                        'device_time_ms':int(time.monotonic() * 1000)})
+                    continue
+                command = json.loads(frame.data)
+                kind = command['type']
+                if kind == 'clock_sync':
+                    await ws.send_json({'type':kind,'id':command['id'],
+                        'device_time_ms':int(time.monotonic() * 1000)})
+                elif kind == 'start_capture':
+                    capture_id = command['capture_id']
+                    await ws.send_json({'type':'capture_started','capture_id':capture_id})
+                    await ws.send_bytes(FRAME.pack(b'JPCM',1,1,320,0,0,int(time.monotonic()*1000)) + bytes(640))
+                elif kind == 'play_start':
+                    playback_id, generation = command['playback_id'], command['generation']
+                    await ws.send_json({**command,'type':'play_started'})
+                elif kind == 'play_drain':
+                    await ws.send_json({**command,'type':'play_drained','rendered_samples':sent,
+                                        'last_rendered_ms':int(time.monotonic()*1000)})
+                elif kind == 'stop_capture':
+                    await ws.send_json({'type':'capture_stopped','capture_id':capture_id,
+                        'reason':'requested','dropped_frames':0})
+                    return
+
+        simulator = asyncio.create_task(peer())
+        try:
+            with patch('jarvis.server.bench_signal', return_value=(np.zeros(320, dtype='<i2'), {})):
+                response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
+                self.assertEqual(response.status, 202)
+                await asyncio.wait_for(self.bench.task, 4)
+                await asyncio.wait_for(simulator, 2)
+            result = self.bench.results[0]
+            self.assertEqual(result['playback']['frames_rendered'], 960)
+            self.assertEqual(result['status'], 'unavailable')
+            self.assertIsNone(self.bench.device.playback)
+        finally:
+            simulator.cancel()
+            await asyncio.gather(simulator, return_exceptions=True)
+            await ws.close()
 
     async def test_cross_origin_and_non_json_control_are_rejected(self):
         response = await self.ui.put('/api/config', json={}, headers={'Origin':'https://untrusted.example'})

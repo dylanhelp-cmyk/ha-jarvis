@@ -267,6 +267,9 @@ class Bench:
                         result["echo"] = await asyncio.to_thread(
                             measure_echo_reduction, captured, capture_start, reference,
                             accepted_start, summary["median_ms"])
+                if kind == "echo" and "echo" not in result:
+                    result["echo"] = {"status": "unavailable",
+                                      "reason": "Echo analysis needs a measured pilot and confirmed output of every reference frame"}
                 outcome = result.get("echo" if kind == "echo" else "stability", {})
                 result["status"] = "measured" if outcome.get("status") == "measured" else "unavailable"
             else:

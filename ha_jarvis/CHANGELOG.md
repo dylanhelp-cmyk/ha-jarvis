@@ -1,3 +1,8 @@
+# 0.2.1
+
+- Report missing echo prerequisites explicitly and add a paired playback regression test.
+- Pair with firmware 0.2.1 for the first sustained wired playback trial.
+
 # 0.2.0
 
 - Replace the wireless playback bench with authenticated 48 kHz stereo playback through the Voice PE 3.5 mm jack. Requires playback-capable Voice PE firmware.

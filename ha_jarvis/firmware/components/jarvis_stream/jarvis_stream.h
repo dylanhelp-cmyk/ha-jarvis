@@ -2,6 +2,7 @@
 #include <atomic>
 #include <string>
 #include "esphome/core/component.h"
+#include "esphome/core/helpers.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/speaker/speaker.h"
@@ -78,6 +79,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   std::atomic<bool> network_ready_{false}, worker_reset_{false}, shutting_down_{false};
   std::atomic<bool> intentional_stop_{false};
   std::atomic<bool> playback_overflow_{false};
+  HighFrequencyLoopRequester playback_loop_request_;
   std::string playback_id_;
   uint32_t playback_generation_{0}, playback_sequence_{0}, playback_activity_{0};
   uint32_t last_play_clock_report_{0};

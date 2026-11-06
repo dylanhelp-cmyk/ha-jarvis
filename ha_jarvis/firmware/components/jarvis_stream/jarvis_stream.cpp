@@ -410,6 +410,7 @@ void JarvisStream::playback_command_(const std::string &type, JsonObject root) {
   playback_clock_lock_.enter();
   rendered_samples_ = rendered_end_ms_ = 0;
   playback_clock_lock_.exit();
+  playback_loop_request_.start();
   speaker_->start();
   if (!send_json_(json::build_json([&](JsonObject out) {
     out["type"] = "play_started"; out["playback_id"] = id; out["generation"] = generation;
@@ -420,6 +421,7 @@ void JarvisStream::stop_playback_(const char *reason, bool drained) {
   if (playback_id_.empty()) return;
   if (!drained) speaker_->stop();
   xQueueReset(playback_queue_);
+  playback_loop_request_.stop();
   playback_pending_ = playback_drain_ = playback_finishing_ = false;
   if (authenticated_ && connected_ && !shutting_down_) {
     playback_clock_lock_.enter();
@@ -464,8 +466,18 @@ void JarvisStream::playback_loop_(uint32_t now) {
     if (speaker_->is_stopped()) stop_playback_("drained", true);
     return;
   }
-  if (!playback_pending_) {
-    while (xQueueReceive(playback_queue_, &playback_packet_, 0) == pdTRUE) {
+  // A normal ESPHome loop tick can exceed one 10 ms wire packet. Drain a
+  // bounded batch when the nonblocking speaker buffer has room.
+  for (int packet = 0; packet < 4; ++packet) {
+    if (!connected_ || !authenticated_) { stop_playback_("disconnected"); return; }
+    if (!playback_pending_) {
+      if (xQueueReceive(playback_queue_, &playback_packet_, 0) != pdTRUE) {
+        if (playback_drain_) {
+          speaker_->finish();
+          playback_finishing_ = true;
+        }
+        return;
+      }
       if (playback_packet_.epoch != epoch_ || playback_packet_.header.generation != playback_generation_) continue;
       if (playback_packet_.header.sequence != playback_sequence_ ||
           playback_packet_.header.first_sample != playback_samples_) {
@@ -482,30 +494,22 @@ void JarvisStream::playback_loop_(uint32_t now) {
         playback_i2s_[4 * i + 2] = playback_packet_.pcm[2 * i];
         playback_i2s_[4 * i + 3] = playback_packet_.pcm[2 * i + 1];
       }
-      break;
     }
+    const auto &header = playback_packet_.header;
+    const size_t length = header.samples * 8;
+    playback_offset_ += speaker_->play(playback_i2s_ + playback_offset_, length - playback_offset_, 0);
+    if (playback_offset_ != length) return;
+    playback_activity_ = now_ms_();
+    playback_pending_ = false;
+    ++playback_sequence_;
+    playback_samples_ += header.samples;
+    if (!send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "play_render"; out["playback_id"] = playback_id_;
+      out["generation"] = playback_generation_; out["first_sample"] = header.first_sample;
+      out["samples"] = header.samples; out["device_time_ms"] = playback_activity_;
+      out["timing"] = "speaker_buffer_acceptance";
+    }))) { stop_playback_("transport_error"); return; }
   }
-  if (!playback_pending_) {
-    if (playback_drain_) {
-      speaker_->finish();
-      playback_finishing_ = true;
-    }
-    return;
-  }
-  const auto &header = playback_packet_.header;
-  const size_t length = header.samples * 8;
-  playback_offset_ += speaker_->play(playback_i2s_ + playback_offset_, length - playback_offset_, 0);
-  if (playback_offset_ != length) return;
-  playback_activity_ = now;
-  playback_pending_ = false;
-  ++playback_sequence_;
-  playback_samples_ += header.samples;
-  if (!send_json_(json::build_json([&](JsonObject out) {
-    out["type"] = "play_render"; out["playback_id"] = playback_id_;
-    out["generation"] = playback_generation_; out["first_sample"] = header.first_sample;
-    out["samples"] = header.samples; out["device_time_ms"] = now;
-    out["timing"] = "speaker_buffer_acceptance";
-  }))) stop_playback_("transport_error");
 }
 
 void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {

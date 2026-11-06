@@ -1,3 +1,8 @@
+# 0.2.1 - service 10 ms playback packets without waiting for ordinary loop ticks
+
+- Service up to four playback packets per loop, yielding immediately on a partial or full speaker buffer. Request the faster ESPHome loop only during active playback and drain.
+- Keep sender and receiver queue limits and speaker buffer unchanged. Re-run simultaneous capture and playback before drawing conclusions about acoustics.
+
 # 0.2.0 - local jack playback
 
 - Restore the upstream I²S/DAC output and jack detection. Keep the internal amplifier disabled.
