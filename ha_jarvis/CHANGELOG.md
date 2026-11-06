@@ -1,3 +1,8 @@
+# 0.1.27
+
+- Add an optional one-shot, 30-second wake arm to the local acknowledgment test. Synchronize clocks while arming, start capture on a new wake and report wake receipt to acoustic onset.
+- App-only update. Load the acknowledgment clip, select 500 ms and arm the test. It returns to idle after one wake, timeout or cancellation.
+
 # 0.1.26
 
 - Use the second word's measured arrival to restrict the first-word search. Withhold cold timing when the two matches disagree.

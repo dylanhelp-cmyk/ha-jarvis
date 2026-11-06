@@ -40,6 +40,38 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_armed_acknowledgment_waits_for_new_paired_wake(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
+                            'sample_rate':RATE, 'channels':1, 'muted':False})
+        await ws.receive_json()
+        self.bench.config.update(route='airplay', wiim_host='192.168.1.20',
+                                 stream_base_url='http://192.168.1.10:8099')
+        self.bench.cloud_fixture = bytes(3 * RATE)
+        wake = {'type':'wake_word', 'wake_word':'Hey Jarvis'}
+        self.bench.device.receive_json(wake)
+        speaker = Mock(play=AsyncMock(side_effect=RuntimeError('speaker test boundary')),
+                       stop=AsyncMock(), close=AsyncMock(), snapshot=Mock(return_value={}),
+                       receiver_output_state=AsyncMock())
+        with patch.object(self.bench.device, 'sync', AsyncMock()), \
+             patch.object(self.bench.device, 'begin', AsyncMock()) as begin, \
+             patch('jarvis.transports.AirPlayTransport.for_wiim', return_value=speaker):
+            response = await self.ui.post('/api/tests', json={
+                'kind':'startup_ack', 'repetitions':2, 'lead_ms':500,
+                'wait_for_wake':True, 'comfortable_volume_confirmed':True})
+            self.assertEqual(response.status, 202)
+            self.assertIn('armed for', self.bench.test['phase'])
+            begin.assert_not_called()
+            speaker.play.assert_not_called()
+            await ws.send_json(wake)
+            await asyncio.wait_for(self.bench.task, 2)
+            begin.assert_awaited_once()
+            self.assertTrue(begin.await_args.kwargs['clock_synced'])
+            speaker.play.assert_awaited_once()
+            self.assertGreaterEqual(self.bench.results[0]['wake_to_play_request_ms'], 0)
+            self.assertFalse(self.bench.test['running'])
+        await ws.close()
+
     async def test_cloud_key_stays_local_and_never_enters_read_or_diagnostic_responses(self):
         key = 'sk-test-local-only-' + 'x' * 32
         response = await self.ui.put('/api/cloud', json={'api_key':key})

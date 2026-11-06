@@ -96,6 +96,8 @@ class Device:
         self.pcm_consumer = None
         self.wake_count = 0
         self.last_wake_at = None
+        self.wake_event = asyncio.Event()
+        self.wake_event_at = None
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -146,6 +148,9 @@ class Device:
             if isinstance(word, str) and word.strip().casefold().replace("_", " ") == "hey jarvis":
                 self.wake_count += 1
                 self.last_wake_at = time.monotonic()
+                if not self.wake_event.is_set():
+                    self.wake_event_at = self.last_wake_at
+                    self.wake_event.set()
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:
             self.stop_info = {key: message[key] for key in ("reason", "samples_seen", "dropped_frames") if key in message}
             self.stopped.set()
@@ -194,7 +199,7 @@ class Device:
                           span_difference_ms=round(span_ms - sample_span_ms, 1))
         return health
 
-    async def begin(self, capture_id, duration_ms):
+    async def begin(self, capture_id, duration_ms, *, clock_synced=False):
         if not self.snapshot()["connected"] or self.info.get("muted"):
             raise ValueError("Voice PE must be connected and physically unmuted")
         if self.info.get("raw_ready") is not True:
@@ -209,7 +214,8 @@ class Device:
         self.capture_session = {key: diagnostics[key] for key in ("boot_id", "connection_generation") if key in diagnostics}
         self.started.clear()
         self.stopped.clear()
-        await self.sync()
+        if not clock_synced:
+            await self.sync()
         await self.ws.send_json({"type": "start_capture", "capture_id": capture_id, "duration_ms": duration_ms})
         await asyncio.wait_for(self.started.wait(), timeout=5)
 

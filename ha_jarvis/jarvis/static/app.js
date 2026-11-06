@@ -162,6 +162,7 @@ function renderResults(data) {
     else if (followup) card.append(node('p', 'result-meta', 'Reconnection diagnostics received; no firmware fault was conclusively matched to this capture.'));
     const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
     if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the ${firstColdStart.probe_lead_ms ?? 100} ms probe lead-in.`));
+    if (firstColdStart?.wake_to_audible_ms != null) card.append(node('p', 'result-meta', `Voice PE wake event received → audible acknowledgment: ${milliseconds(firstColdStart.wake_to_audible_ms)}.`));
     const sender = result.transport?.sender;
     if (result.kind === 'volume') {
       const events = result.transport?.events || [];
@@ -244,6 +245,7 @@ $('config-form').addEventListener('submit', async (event) => {
 document.querySelectorAll('.test-option').forEach((button) => button.addEventListener('click', () => {
   kind = button.dataset.kind;
   $('startup-lead-field').hidden = !['startup_pcm', 'startup_ack'].includes(kind);
+  $('wake-arm-field').hidden = kind !== 'startup_ack';
   document.querySelectorAll('.test-option').forEach((option) => {option.classList.toggle('selected', option === button); option.setAttribute('aria-pressed', String(option === button));});
   updateReadiness();
 }));
@@ -254,7 +256,8 @@ $('run-test').addEventListener('click', async () => {
   try {
     const repetitions = ['startup', 'startup_pcm', 'startup_ack'].includes(kind) ? 2 : ['stop', 'volume'].includes(kind) ? 1 : 3;
     const lead_ms = ['startup_pcm', 'startup_ack'].includes(kind) ? Number($('startup-lead').value) : 100;
-    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions, lead_ms, comfortable_volume_confirmed: true})});
+    const wait_for_wake = kind === 'startup_ack' && $('wake-arm').checked;
+    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions, lead_ms, wait_for_wake, comfortable_volume_confirmed: true})});
     announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
     await poll();
   } catch (error) {announce(error.message, true);}

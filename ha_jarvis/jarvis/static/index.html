@@ -73,6 +73,7 @@
           <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>I have set the WiiM to a comfortable listening volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The speaker is idle. I understand a test can interrupt music and previous playback is not restored automatically.</span></label></div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
           <label id="startup-lead-field" hidden>Prepared PCM silent lead-in <select id="startup-lead"><option value="100">100 ms</option><option value="300">300 ms</option><option value="500">500 ms</option></select></label>
+          <label id="wake-arm-field" hidden><input type="checkbox" id="wake-arm"> Wait up to 30 seconds for “Hey Jarvis” before playing the acknowledgment.</label>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
           <p class="local-note"><span aria-hidden="true">◇</span> Local signals, local measurements. No AI or paid cloud calls.</p>
         </section>

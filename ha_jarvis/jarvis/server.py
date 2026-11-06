@@ -309,7 +309,7 @@ class Bench:
             with suppress(asyncio.CancelledError):
                 await self.task
 
-    async def run(self, kind, repetitions, *, lead_ms=100):
+    async def run(self, kind, repetitions, *, lead_ms=100, wait_for_wake=False):
         from .transports import NativeHTTPTransport, AirPlayTransport
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": self.config["route"],
@@ -328,10 +328,25 @@ class Bench:
             result["warnings"].append("AirPlay sender timings are software milestones; only microphone detections measure audible output. Microphone pipeline delay remains uncalibrated.")
         try:
             self.test["phase"] = "synchronizing microphone"
+            wake_at = None
+            if wait_for_wake:
+                await self.device.sync()
+                self.device.wake_event.clear()
+                self.test["phase"] = "armed for Hey Jarvis for 30 seconds"
+                try:
+                    await asyncio.wait_for(self.device.wake_event.wait(), 30)
+                except TimeoutError:
+                    result.update(status="unavailable", error="No Hey Jarvis event received during the arm window")
+                    return
+                wake_at = self.device.wake_event_at
+                self.test["phase"] = "opening local microphone after wake"
             capture_margin = 65 if self.config["route"] == "airplay" else 45
             duration_ms = int((CONNECTION_TEST_SECONDS + 5) * 1000) if kind == "connection" else min(120000, (repetitions * 2 + capture_margin) * 1000)
             if kind != "volume":
-                await self.device.begin(result["id"], duration_ms)
+                if wait_for_wake:
+                    await self.device.begin(result["id"], duration_ms, clock_synced=True)
+                else:
+                    await self.device.begin(result["id"], duration_ms)
                 result["device_session"] = dict(self.device.capture_session)
             if kind == "connection":
                 self.test["phase"] = "checking microphone connection — no speaker playback"
@@ -343,7 +358,8 @@ class Bench:
                     raise ValueError("; ".join(dict.fromkeys(self.device.errors)))
                 result.update(status="passed", metric="microphone_connection")
                 return
-            await asyncio.sleep(.4)
+            if not wait_for_wake:
+                await asyncio.sleep(.4)
             if self.config["route"] == "http":
                 self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
                                                      verify_ssl=self.config["verify_tls"])
@@ -372,6 +388,8 @@ class Bench:
 
                 source_options["source_factory"] = source_factory
             play_requested = time.monotonic()
+            if wake_at is not None:
+                result["wake_to_play_request_ms"] = round((play_requested - wake_at) * 1000, 1)
             await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1,
                                             "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"],
                                             **source_options})
@@ -457,6 +475,8 @@ class Bench:
                         trial["latency_ms"] = round(latency, 1)
                         if i == 0:
                             trial["cold_startup_ms"] = round((audible - play_requested) * 1000, 1)
+                            if wake_at is not None:
+                                trial["wake_to_audible_ms"] = round((audible - wake_at) * 1000, 1)
                             trial["probe_lead_ms"] = lead_ms
                         trial["detected_after_stop"] = kind == "stop" and audible > result.get("stop_command_at", float("inf"))
                 result["trials"].append(trial)
@@ -468,6 +488,7 @@ class Bench:
                                                    and abs(delays[0] - delays[1]) <= 40 else "unavailable")
                 if result["acknowledgment_match"] == "unavailable" and result["trials"]:
                     result["trials"][0].pop("cold_startup_ms", None)
+                    result["trials"][0].pop("wake_to_audible_ms", None)
             if kind in ("stability", "echo") and result["summary"]["median_ms"] is not None:
                 result["stability"] = await asyncio.to_thread(detect_stability, pcm, capture_start,
                     self.stream.started_at, self.stream.duration, result["summary"]["median_ms"], self.stream.markers)
@@ -707,9 +728,12 @@ def create_ui(bench):
             raise ValueError("Probe lead must be 100, 300 or 500 ms")
         if lead_ms != 100 and kind not in ("startup_pcm", "startup_ack"):
             raise ValueError("A custom probe lead requires prepared PCM startup")
+        wait_for_wake = data.get("wait_for_wake", False)
+        if type(wait_for_wake) is not bool or (wait_for_wake and kind != "startup_ack"):
+            raise ValueError("Wake arming is only available for the acknowledgment check")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms, wait_for_wake=wait_for_wake))
         return web.json_response({"test_id": ident}, status=202)
     async def cancel(request):
         asyncio.create_task(bench.cancel())
