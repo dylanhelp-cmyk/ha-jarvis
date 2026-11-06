@@ -1,3 +1,8 @@
+# 0.1.24
+
+- Compare 100, 300 and 500 ms of silence before prepared PCM probes. Cold audible timing includes the chosen lead-in.
+- App-only update. Select prepared PCM startup and compare lead-ins at the same AirPlay timing and volume.
+
 # 0.1.23
 
 - Add a local startup comparison that hands prepared PCM to AirPlay without HTTP decoding. Match the same probe signals using their sender handoff times.

@@ -1,4 +1,4 @@
-# Install and update — App 0.1.23 / firmware 0.1.6
+# Install and update — App 0.1.24 / firmware 0.1.6
 
 This is the **audio and scripted voice bench**. Local audio tests make no OpenAI calls. The paid voice benchmark requires explicit Start, a local key and a loaded synthetic fixture. Its default input is the fixture. The separate Voice PE microphone option requires fresh AirPlay calibration and explicit confirmation to send a brief room microphone window while the question plays. Keep the previous GPT-Live App stopped. Enter an API key under **OpenAI test preparation**. The initial API-test cap is US$5. Unconfirmed cloud finalization blocks further paid attempts.
 

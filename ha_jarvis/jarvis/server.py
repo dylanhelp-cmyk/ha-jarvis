@@ -68,9 +68,10 @@ def validate_config(value):
 
 
 class Stream:
-    def __init__(self, kind, repetitions):
+    def __init__(self, kind, repetitions, *, lead_ms=100):
         self.id = secrets.token_urlsafe(24)
         self.kind, self.repetitions = kind, repetitions
+        self.lead_ms = lead_ms
         self.connected = asyncio.Event()
         self.done = asyncio.Event()
         self.stop_requested = asyncio.Event()
@@ -97,7 +98,7 @@ class Stream:
             # This distinguishes a weak reference from a startup-specific loss.
             seed = 514 - i if self.kind in ("startup", "startup_pcm") else 513 + i
             probe = make_probe(seed)
-            offset = int((.1 + i * 2) * RATE)
+            offset = self.lead_ms * RATE // 1000 + i * 2 * RATE
             pcm[offset:offset + len(probe)] = probe
             probes[offset] = probe
         if self.kind in ("stability", "echo"):
@@ -294,7 +295,7 @@ class Bench:
             with suppress(asyncio.CancelledError):
                 await self.task
 
-    async def run(self, kind, repetitions):
+    async def run(self, kind, repetitions, *, lead_ms=100):
         from .transports import NativeHTTPTransport, AirPlayTransport
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": self.config["route"],
@@ -340,7 +341,7 @@ class Bench:
                 if not self.slim:
                     raise ValueError(self.slim_error or "SlimProto server is not ready")
                 self.transport = self.slim
-            self.stream = Stream(kind, repetitions)
+            self.stream = Stream(kind, repetitions, lead_ms=lead_ms)
             extension = self.config["codec"]
             if self.config["route"] == "slimproto" and extension == "wav":
                 extension = "pcm"
@@ -427,6 +428,7 @@ class Bench:
                         trial["latency_ms"] = round(latency, 1)
                         if i == 0:
                             trial["cold_startup_ms"] = round((audible - play_requested) * 1000, 1)
+                            trial["probe_lead_ms"] = lead_ms
                         trial["detected_after_stop"] = kind == "stop" and audible > result.get("stop_command_at", float("inf"))
                 result["trials"].append(trial)
             result["summary"] = summarize(result["trials"])
@@ -658,9 +660,14 @@ def create_ui(bench):
             raise ValueError("Save the WiiM and speaker-reachable stream addresses first")
         if kind != "connection" and bench.config["codec"] == "flac" and not shutil.which("ffmpeg"):
             raise ValueError("FLAC requires ffmpeg; it is included in the HA App image")
+        lead_ms = data.get("lead_ms", 100)
+        if type(lead_ms) is not int or lead_ms not in (100, 300, 500):
+            raise ValueError("Probe lead must be 100, 300 or 500 ms")
+        if lead_ms != 100 and kind != "startup_pcm":
+            raise ValueError("A custom probe lead requires prepared PCM startup")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms))
         return web.json_response({"test_id": ident}, status=202)
     async def cancel(request):
         asyncio.create_task(bench.cancel())
