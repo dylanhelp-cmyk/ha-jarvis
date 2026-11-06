@@ -235,8 +235,8 @@ def progressive_stream_file(connection, url, telemetry, codec='wav', latency_ms=
     stream = connection.stream.get(Protocol.RAOP)
     if type(stream) is not RaopStream:
         raise RuntimeError('Progressive AirPlay adapter requires a pyatv RAOP stream instance')
-    if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or not 250 <= latency_ms <= 2000:
-        raise ValueError('AirPlay sender latency must be an integer from 250 to 2000 ms')
+    if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or not 150 <= latency_ms <= 2000:
+        raise ValueError('AirPlay sender latency must be an integer from 150 to 2000 ms')
     context = stream.playback_manager.context
     if type(context) is not StreamContext:
         raise RuntimeError('Progressive AirPlay adapter requires a pyatv RAOP stream context')

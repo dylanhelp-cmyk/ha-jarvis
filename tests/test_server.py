@@ -89,7 +89,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bench.cloud_settings.api_key, key)
 
     async def test_airplay_timing_is_bounded_and_persists_without_starting_audio(self):
-        for value in (True, 249, 2001, 500.5):
+        for value in (True, 149, 2001, 500.5):
             response = await self.ui.put('/api/config', json={'airplay_latency_ms':value})
             self.assertEqual(response.status, 400)
         response = await self.ui.put('/api/config', json={'airplay_latency_ms':500})

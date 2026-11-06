@@ -59,8 +59,8 @@ def validate_config(value):
         raise ValueError("verify_tls must be a boolean")
     if type(config["slimproto_port"]) is not int or not 1024 <= config["slimproto_port"] <= 65535:
         raise ValueError("SlimProto port must be between 1024 and 65535")
-    if type(config["airplay_latency_ms"]) is not int or not 250 <= config["airplay_latency_ms"] <= 2000:
-        raise ValueError("Requested AirPlay latency must be between 250 and 2000 ms")
+    if type(config["airplay_latency_ms"]) is not int or not 150 <= config["airplay_latency_ms"] <= 2000:
+        raise ValueError("Requested AirPlay latency must be between 150 and 2000 ms")
     token = config.get("device_token", "")
     if len(token) < 32 or len(token) > 128 or not all(c.isalnum() or c in "-_" for c in token):
         raise ValueError("Device token must contain 32–128 URL-safe characters")

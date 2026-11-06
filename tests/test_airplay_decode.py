@@ -297,8 +297,8 @@ class AirPlaySessionAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_latency_fails_before_session_acquire(self):
         connection, stream, manager, release = self.connection()
-        for latency_ms in (249, 2001, True, 500.5, '500'):
-            with self.assertRaisesRegex(ValueError, '250 to 2000'):
+        for latency_ms in (149, 2001, True, 500.5, '500'):
+            with self.assertRaisesRegex(ValueError, '150 to 2000'):
                 progressive_stream_file(connection, 'http://127.0.0.1/test.wav',
                                         sender_telemetry(), latency_ms=latency_ms)
         manager.acquire.assert_not_called()

@@ -1,3 +1,7 @@
+# 0.1.31
+
+- Allow a 150 ms AirPlay timing request for a controlled comparison. Compare wake acknowledgment and stability with 250 ms before selecting a setting.
+
 # 0.1.30
 
 - Use one second without voiced cloud or AirPlay PCM to pace the scripted follow-up. Allow up to 100 ms queued audio so a continuing stream of silence does not prevent a turn boundary. Record the two voice ages and queue size.
