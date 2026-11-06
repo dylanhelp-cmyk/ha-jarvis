@@ -3,7 +3,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import json
 from urllib.parse import urlsplit
-from esphome.components import esp32, i2c, microphone, wifi
+from esphome.components import esp32, i2c, microphone, speaker, wifi
 from esphome.const import CONF_ID, CONF_MICROPHONE
 
 DEPENDENCIES = ["esp32", "wifi", "i2c"]
@@ -36,6 +36,7 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema({
         cv.GenerateID(): cv.declare_id(JarvisStream),
         cv.Required(CONF_MICROPHONE): raw_microphone,
+        cv.Required("speaker"): cv.use_id(speaker.Speaker),
         cv.Required("server_url"): server_url,
         cv.Required("device_id"): cv.All(cv.string_strict, cv.Length(min=1, max=64)),
         cv.Required("token"): cv.All(cv.string_strict, cv.Length(min=32, max=256)),
@@ -58,6 +59,7 @@ async def to_code(config):
     # Passive: microWakeWord owns the microphone lifecycle. Idle PCM stays local.
     source = await microphone.microphone_source_to_code(config[CONF_MICROPHONE], passive=True)
     cg.add(var.set_microphone(source))
+    cg.add(var.set_speaker(await cg.get_variable(config["speaker"])))
     for key in ("server_url", "device_id", "token"):
         cg.add(getattr(var, "set_" + key)(config[key]))
     # RX and heartbeat work can wait up to network_timeout_ms. Keep it from

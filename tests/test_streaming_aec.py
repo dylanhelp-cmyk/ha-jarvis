@@ -19,15 +19,20 @@ class StreamingEchoTests(unittest.TestCase):
     def test_render_delay_and_partial_capture_frames_preserve_samples(self):
         recorder = ReferenceRecorder()
         echo = StreamingEcho(500, processor=recorder)
-        pcm = np.full((44100, 2), 2345, dtype=">i2")
-        for start in range(0, len(pcm), 352):
-            echo.render(pcm[start:start + 352].tobytes(), 10 + start / 44100)
+        pcm = np.full((48000, 2), 2345, dtype="<i2")
+        for start in range(0, len(pcm), 480):
+            echo.render(pcm[start:start + 480].tobytes(), 10 + start / 48000, first_frame=start)
         captured = np.arange(512, dtype="<i2")
         first = echo.capture(PCMFrame(0, 0, 10600, captured[:256]), 0)
         second = echo.capture(PCMFrame(1, 256, 10616, captured[256:]), 0)
         self.assertEqual(first + second, captured[:480].tobytes())
         self.assertEqual(len(recorder.references), 3)
         np.testing.assert_array_equal(recorder.references[0], np.full(160, 2345))
+
+    def test_missing_render_frames_invalidate_the_reference(self):
+        echo = StreamingEcho(100, processor=ReferenceRecorder())
+        with self.assertRaisesRegex(RuntimeError, "Speaker discontinuity"):
+            echo.render(bytes(480 * 4), 10, first_frame=480)
 
     def test_before_render_and_discontinuous_capture(self):
         recorder = ReferenceRecorder()

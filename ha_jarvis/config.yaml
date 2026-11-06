@@ -1,7 +1,7 @@
 name: HA Jarvis Audio Bench
-version: "0.1.36"
+version: "0.2.0"
 slug: ha_jarvis
-description: Local audio and explicitly started, budgeted cloud voice benchmarks for Jarvis.
+description: Local acoustic tests through the Voice PE speaker jack.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis
 arch:
   - amd64

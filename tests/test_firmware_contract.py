@@ -41,7 +41,7 @@ class FirmwareContractTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("jarvis_firmware_lock_schema", FIRMWARE / "components/jarvis_stream/__init__.py")
         component = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(component)
-        config = {"id": "pcm_stream", "microphone": {}, "server_url": "ws://example.invalid:8099/device",
+        config = {"id": "pcm_stream", "microphone": {}, "speaker": "jack_speaker", "server_url": "ws://example.invalid:8099/device",
                   "device_id": "testbench", "token": "test-only-token"}
         # Exercise the real ESPHome SDK option API; isolate unrelated generated
         # component expressions and registration from this transport requirement.
@@ -49,6 +49,7 @@ class FirmwareContractTests(unittest.TestCase):
              patch.object(component.cg, "new_Pvariable", return_value=MagicMock()), \
              patch.object(component.cg, "add"), \
              patch.object(component.cg, "register_component", new=AsyncMock()), \
+             patch.object(component.cg, "get_variable", new=AsyncMock()), \
              patch.object(component.i2c, "register_i2c_device", new=AsyncMock()), \
              patch.object(component.microphone, "microphone_source_to_code", new=AsyncMock()), \
              patch.object(component.esp32, "add_idf_component"):
@@ -94,6 +95,10 @@ int main() {
         self.assertIn("!secret jarvis_pairing_token", main)
         self.assertIn("pin: GPIO3", package)
         self.assertIn("microphone.mute: i2s_mics", package)
+        self.assertIn("pin: GPIO17", package)
+        self.assertIn("speaker: jack_speaker", package)
+        self.assertIn("restore_mode: ALWAYS_OFF", hardware)
+        self.assertIn("i2s_dout_pin: GPIO10", hardware)
 
     def test_repository_entry_keeps_credentials_local(self):
         entry = (FIRMWARE / "voice-pe-repository.yaml").read_text()

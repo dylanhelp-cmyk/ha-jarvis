@@ -94,6 +94,7 @@ class Device:
         self.last_frame_at = None
         self.capture_session = {}
         self.pcm_consumer = None
+        self.playback = None
         self.wake_count = 0
         self.last_wake_at = None
         self.wake_event = asyncio.Event()
@@ -124,7 +125,10 @@ class Device:
             if diagnostics is not None:
                 self.info["diagnostics"] = diagnostics
         kind = message.get("type")
-        if kind == "clock_sync":
+        if kind in ("play_started", "play_render", "play_clock", "play_stopped", "play_drained"):
+            if self.playback is not None:
+                self.playback.receive(message)
+        elif kind == "clock_sync":
             sent = self.sync_pending.pop(str(message.get("id")), None)
             if sent is not None:
                 received = time.monotonic() * 1000
@@ -139,7 +143,7 @@ class Device:
                     self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
-            for key in ("muted", "capturing", "raw_ready", "xmos_version"):
+            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol"):
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")

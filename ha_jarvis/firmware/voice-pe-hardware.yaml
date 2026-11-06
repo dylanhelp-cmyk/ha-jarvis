@@ -1,7 +1,7 @@
 # Hardware-only derivative of esphome/home-assistant-voice-pe
 # home-assistant-voice.yaml @ d4e6fa43d6a1a7d342b7d4d403567e06516719de.
 # Copyright (c) 2019 ESPHome, MIT; see UPSTREAM-LICENSE.txt.
-# Changes: omit stock pipeline/player; raw PCM channel 0 and NS wake channel 1.
+# Changes: omit stock pipeline/player; use raw PCM channel 0 and NS wake channel 1.
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
@@ -29,6 +29,9 @@ i2c:
     frequency: 400kHz
 
 i2s_audio:
+  - id: i2s_output
+    i2s_lrclk_pin: GPIO7
+    i2s_bclk_pin: GPIO8
   - id: i2s_input
     i2s_lrclk_pin: GPIO14
     i2s_bclk_pin: GPIO13
@@ -45,6 +48,25 @@ microphone:
     i2s_audio_id: i2s_input
     channel: stereo
     correct_dc_offset: false
+
+audio_dac:
+  - platform: aic3204
+    id: aic3204_dac
+    i2c_id: internal_i2c
+
+speaker:
+  - platform: i2s_audio
+    id: jack_speaker
+    sample_rate: 48000
+    i2s_mode: secondary
+    i2s_dout_pin: GPIO10
+    bits_per_sample: 32bit
+    i2s_audio_id: i2s_output
+    dac_type: external
+    channel: stereo
+    timeout: never
+    buffer_duration: 40ms
+    audio_dac: aic3204_dac
 
 voice_kit:
   id: voice_kit_component

@@ -17,7 +17,7 @@
     </header>
     <main id="main">
       <section class="hero" aria-labelledby="page-title">
-        <div><p class="eyebrow">MILESTONE 01 / LOCAL AUDIO</p><h1 id="page-title">First, prove the path.</h1><p class="intro">A quiet workbench for your wireless speaker. Measure the journey from a local audio stream to sound in the room before bringing conversation online.</p></div>
+        <div><p class="eyebrow">MILESTONE 01 / LOCAL AUDIO</p><h1 id="page-title">First, prove the path.</h1><p class="intro">Measure the Voice PE speaker jack in the room before bringing conversation online.</p></div>
         <div class="signal-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="signal-core"><span>J</span></div><span class="orbit-label">AUDIO BENCH</span></div>
       </section>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
@@ -28,26 +28,13 @@
       </section>
       <div class="workspace">
         <section class="panel setup" aria-labelledby="setup-title">
-          <div class="section-heading"><span class="step">01</span><div><h2 id="setup-title">Connect the room</h2><p>Point the bench at your WiiM and microphone.</p></div></div>
+          <div class="section-heading"><span class="step">01</span><div><h2 id="setup-title">Connect the room</h2><p>Pair your Voice PE and connect its speakers.</p></div></div>
           <form id="config-form">
-            <label for="wiim-host">WiiM address</label>
-            <input id="wiim-host" name="wiim_host" placeholder="192.168.1.50" autocomplete="off" spellcheck="false" required>
-            <p class="field-help">The speaker’s local IPv4 address.</p>
-            <label for="stream-base-url">Stream base URL</label>
-            <input id="stream-base-url" name="stream_base_url" type="url" placeholder="http://192.168.1.10:8099" autocomplete="off" spellcheck="false" required>
-            <p class="field-help">A direct bench URL the WiiM can reach on your LAN. Home Assistant ingress is for this control panel.</p>
-            <div class="form-row"><div><label for="route">Transport</label><select id="route" name="route"><option value="http">Native HTTP</option><option value="slimproto">SlimProto</option><option value="airplay" disabled>AirPlay (unavailable)</option></select></div><div><label for="codec">Stream format</label><select id="codec" name="codec"><option value="wav">WAV</option><option value="flac">FLAC</option></select></div></div>
-            <p id="transport-help" class="field-help">HTTP streams a local test signal to the WiiM.</p>
-            <details class="device-setup"><summary>Advanced transport settings</summary><div class="details-content">
-              <label for="airplay-latency">Requested AirPlay timing (ms)</label><input id="airplay-latency" name="airplay_latency_ms" type="number" min="150" max="2000" step="1" value="1500" required>
-              <p class="field-help">Sender timing request, not measured speaker delay. Use acoustic tests to check latency and stability after changing it.</p>
-              <label class="check"><input id="verify-tls" name="verify_tls" type="checkbox" checked><span>Verify WiiM HTTPS certificate</span></label>
-              <p id="tls-warning" class="field-help result-warning" hidden>Certificate verification is disabled only for the configured LAN receiver. Use this only if you trust that receiver and its local address.</p>
-              <div class="form-row"><div><label for="slimproto-port">SlimProto port</label><input id="slimproto-port" name="slimproto_port" type="number" min="1024" max="65535" value="3483" required></div><div><label for="slimproto-player">SlimProto player</label><select id="slimproto-player" name="slimproto_player_id"><option value="">Automatic player</option></select></div></div>
-              <p class="field-help">Enable the WiiM’s Squeezelite / LMS input and set its server to <strong id="lms-host">the HA address in your stream URL</strong>. Use the port above. If Music Assistant already uses port 3483, choose a free port and save.</p>
-              <p id="slimproto-status" class="field-help">Save a stream URL to start the local SlimProto service.</p>
-              <p id="airplay-status" class="field-help">AirPlay baseline is unavailable until its receiver capability and credentials are validated.</p>
-            </div></details>
+            <label for="ha-lan-url">Home Assistant LAN address</label>
+            <input id="ha-lan-url" name="ha_lan_url" type="url" placeholder="http://192.168.1.10:8099" autocomplete="off" spellcheck="false">
+            <p class="field-help">Voice PE uses this address for the paired connection. Open this panel through Home Assistant ingress.</p>
+            <label for="repetitions">Probe repetitions</label>
+            <input id="repetitions" name="repetitions" type="number" min="1" max="20" value="3" required>
             <details class="device-setup"><summary>Microphone pairing & firmware</summary><div class="details-content">
               <label for="device-token">Device token</label><div class="token-row"><input id="device-token" name="device_token" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="token-help"><button class="button subtle" id="reveal-token" type="button" aria-label="Show device token" aria-pressed="false">Show</button><button class="button subtle" id="copy-token" type="button">Copy</button></div>
               <p id="token-help" class="field-help">Use this secret only in your microphone firmware. Keep this panel behind authenticated Home Assistant ingress or on a trusted local network.</p>
@@ -58,31 +45,23 @@
           </form>
         </section>
         <section class="panel tests" aria-labelledby="tests-title">
-          <div class="section-heading"><span class="step">02</span><div><h2 id="tests-title">Listen. Measure. Repeat.</h2><p>3 onset trials; 1 stop trial. Real measurements only.</p></div></div>
+          <div class="section-heading"><span class="step">02</span><div><h2 id="tests-title">Listen. Measure. Repeat.</h2><p>Compare acoustic onset, stability and stopping.</p></div></div>
           <div class="test-options" role="group" aria-label="Choose audio test">
             <button class="test-option selected" data-kind="latency" type="button" aria-pressed="true"><span class="test-icon" aria-hidden="true">↗</span><span><strong>Playback latency</strong><small>Playback path: emitted marker → microphone-detected sound.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stop" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Stop response</strong><small>How quickly the speaker falls silent.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stability" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Stream stability</strong><small>Check continuity across repeated playback.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="echo" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Quiet-room echo test</strong><small>Measure pilot suppression with offline AEC3.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="startup" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>AirPlay startup check</strong><small>Measure first sound from a fresh AirPlay session.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="startup_pcm" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>AirPlay startup with prepared PCM</strong><small>Measure first sound without the HTTP decoder.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="startup_ack" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Startup acknowledgment check</strong><small>Check both words in a locally loaded “Yes sir” test clip.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="mic_preflight" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Local microphone preflight</strong><small>Check the bounded capture window using a synthetic question. No cloud call.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="volume" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Silent AirPlay volume check</strong><small>Check the receiver level during a silent source switch.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="connection" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">·</span><span><strong>Microphone connection</strong><small>60-second silent capture. No speaker playback or cloud calls.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
           </div>
-          <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>I have set the WiiM to a comfortable listening volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The speaker is idle. I understand a test can interrupt music and previous playback is not restored automatically.</span></label></div>
+          <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>I have set the speakers connected to the 3.5 mm jack to a comfortable volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The speaker is idle. I understand a test can interrupt music and previous playback is not restored automatically.</span></label></div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
-          <label id="startup-lead-field" hidden>Prepared PCM silent lead-in <select id="startup-lead"><option value="100">100 ms</option><option value="200">200 ms</option><option value="300">300 ms</option><option value="500">500 ms</option></select></label>
-          <label id="wake-arm-field" hidden><input type="checkbox" id="wake-arm"> Wait up to 30 seconds for “Hey Jarvis” before playing the acknowledgment.</label>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
           <p class="local-note"><span aria-hidden="true">◇</span> Local signals, local measurements. No AI or paid cloud calls.</p>
         </section>
       </div>
       <section class="panel results" aria-labelledby="results-title"><div class="results-heading"><div class="section-heading"><span class="step">03</span><div><h2 id="results-title">Evidence, at a glance</h2><p>Missing detections stay missing. They never become zero latency.</p></div></div><a class="button subtle" href="api/diagnostics" download>Export diagnostics <span aria-hidden="true">↓</span></a></div><div id="results-list"><div class="empty-state"><span aria-hidden="true">∿</span><h3>Your first measurement goes here.</h3><p>Save the connection, pair the microphone, then run a local audio test.</p></div></div></section>
-      <section class="future" aria-labelledby="future-title"><span class="future-symbol" aria-hidden="true">◇</span><div><p class="eyebrow">NEXT / AFTER THE HARDWARE GATE</p><h2 id="future-title">Conversation can wait for a sound foundation.</h2><p>Wake word, voice, and model settings are unavailable in this milestone. First verify wireless latency, reliable stopping, and continuous playback.</p></div><span class="tag">Not enabled</span></section>
+      <section class="future" aria-labelledby="future-title"><span class="future-symbol" aria-hidden="true">◇</span><div><p class="eyebrow">NEXT / AFTER THE HARDWARE GATE</p><h2 id="future-title">Conversation can wait for a sound foundation.</h2><p>Wake word, voice, and model settings are unavailable in this milestone. First verify jack playback, reliable stopping, and simultaneous capture.</p></div><span class="tag">Not enabled</span></section>
       <section class="panel" aria-labelledby="cloud-title"><h2 id="cloud-title">OpenAI test preparation</h2><p>Initial API test cap: US$5. Saving a key does not start a paid session. Enter it here, never in chat.</p><form id="cloud-form"><label for="openai-key">OpenAI API key</label><input id="openai-key" type="password" autocomplete="off" maxlength="512"><button class="button subtle" type="submit">Save key locally</button><p id="cloud-state" class="field-help" aria-live="polite">Checking credential status.</p></form></section>
-      <section class="panel" aria-labelledby="live-bench-title"><h2 id="live-bench-title">Voice benchmark — paid</h2><p>Uses a synthetic spoken question, GPT-Live and the ceiling speakers. By default, microphone audio stays local.</p><label for="live-transport">Cloud connection</label><select id="live-transport"><option value="webrtc">WebRTC</option><option value="websocket">WebSocket comparison</option></select><label><input type="checkbox" id="live-microphone"> Play the question in the room and allow a brief Voice PE microphone upload during playback. Requires recent quiet-room AirPlay calibration.</label><button class="button subtle" id="run-cloud-test" type="button">Run paid voice benchmark</button><p class="field-help">Requires a local API key and an agent-loaded synthetic fixture. Maximum reservation US$0.05 per attempt. Use Stop test above to cancel.</p></section>
     </main>
     <footer><span>JARVIS <span class="footer-divider">/</span> Audio bench</span><span id="version">Local-first development milestone</span></footer>
   </div>

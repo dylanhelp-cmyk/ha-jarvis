@@ -1,19 +1,15 @@
 import asyncio
-from contextlib import asynccontextmanager, suppress
 import json
 import io
 from pathlib import Path
 import tempfile
-import struct
-from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
-from jarvis.server import Bench, Stream, create_ui, create_audio, validate_config
+from jarvis.server import Bench, bench_signal, create_ui, create_audio, validate_config
 from jarvis.device import Device
-from jarvis.audio import FRAME, RATE, make_probe, wav_header, detect_probe
+from jarvis.audio import FRAME, RATE, make_probe
 import numpy as np
 
 
@@ -40,38 +36,6 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
-    async def test_armed_acknowledgment_waits_for_new_paired_wake(self):
-        ws = await self.audio.ws_connect('/device')
-        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
-                            'sample_rate':RATE, 'channels':1, 'muted':False})
-        await ws.receive_json()
-        self.bench.config.update(route='airplay', wiim_host='192.168.1.20',
-                                 stream_base_url='http://192.168.1.10:8099')
-        self.bench.cloud_fixture = bytes(3 * RATE)
-        wake = {'type':'wake_word', 'wake_word':'Hey Jarvis'}
-        self.bench.device.receive_json(wake)
-        speaker = Mock(play=AsyncMock(side_effect=RuntimeError('speaker test boundary')),
-                       stop=AsyncMock(), close=AsyncMock(), snapshot=Mock(return_value={}),
-                       receiver_output_state=AsyncMock())
-        with patch.object(self.bench.device, 'sync', AsyncMock()), \
-             patch.object(self.bench.device, 'begin', AsyncMock()) as begin, \
-             patch('jarvis.transports.AirPlayTransport.for_wiim', return_value=speaker):
-            response = await self.ui.post('/api/tests', json={
-                'kind':'startup_ack', 'repetitions':2, 'lead_ms':500,
-                'wait_for_wake':True, 'comfortable_volume_confirmed':True})
-            self.assertEqual(response.status, 202)
-            self.assertIn('armed for', self.bench.test['phase'])
-            begin.assert_not_called()
-            speaker.play.assert_not_called()
-            await ws.send_json(wake)
-            await asyncio.wait_for(self.bench.task, 2)
-            begin.assert_awaited_once()
-            self.assertTrue(begin.await_args.kwargs['clock_synced'])
-            speaker.play.assert_awaited_once()
-            self.assertGreaterEqual(self.bench.results[0]['wake_to_play_request_ms'], 0)
-            self.assertFalse(self.bench.test['running'])
-        await ws.close()
-
     async def test_cloud_key_stays_local_and_never_enters_read_or_diagnostic_responses(self):
         key = 'sk-test-local-only-' + 'x' * 32
         response = await self.ui.put('/api/cloud', json={'api_key':key})
@@ -88,31 +52,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(self.bench.cloud_settings.api_key, key)
 
-    async def test_airplay_timing_is_bounded_and_persists_without_starting_audio(self):
-        for value in (True, 149, 2001, 500.5):
-            response = await self.ui.put('/api/config', json={'airplay_latency_ms':value})
-            self.assertEqual(response.status, 400)
-        response = await self.ui.put('/api/config', json={'airplay_latency_ms':500})
-        self.assertEqual(response.status, 200)
-        self.assertEqual(Bench(self.folder.name).config['airplay_latency_ms'], 500)
-        self.assertIsNone(self.bench.task)
-
-    async def test_interrupted_capture_keeps_provisional_latency_separate_from_success(self):
-        probe = make_probe(513)
-        capture_start = 100.0
-        emitted = capture_start + .5
-        pcm = np.concatenate((np.zeros(RATE, dtype='<i2'), probe, np.zeros(RATE, dtype='<i2')))
-        self.bench.device.clock_rtt_ms = 20
-        self.bench.stream = SimpleNamespace(markers=[(emitted, probe)], schedule_lag_ms=0)
-        with patch.object(self.bench.device, 'recording', return_value=(pcm, capture_start)):
-            evidence = await self.bench.partial_playback_evidence('stability')
-        self.assertEqual(evidence['summary']['valid_trials'], 1)
-        self.assertAlmostEqual(evidence['summary']['median_ms'], 500, delta=8)
-        self.assertIn('remains failed', evidence['scope'])
-        self.assertNotIn('stability', evidence)
-        self.bench.stream = None
-
-    async def test_synthetic_fixture_is_memory_only_and_missing_key_blocks_paid_start(self):
+    async def test_synthetic_fixture_is_memory_only_and_paid_start_is_gated(self):
         import base64
         response = await self.ui.put('/api/cloud/fixture', json={'pcm_b64':base64.b64encode(bytes(RATE * 2)).decode()})
         self.assertEqual(response.status, 200)
@@ -120,120 +60,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bench.cloud_fixture), RATE * 2)
         self.assertFalse(Bench(self.folder.name).cloud_fixture)
         response = await self.ui.post('/api/cloud/tests', json={'transport':'webrtc', 'comfortable_volume_confirmed':True})
-        self.assertEqual(response.status, 400)
+        self.assertEqual(response.status, 503)
         self.assertIsNone(self.bench.task)
         self.assertIsNone(self.bench.cloud_settings.pending)
         response = await self.ui.put('/api/cloud/fixture', json={'pcm_b64':'invalid!'})
         self.assertEqual(response.status, 400)
-
-    @asynccontextmanager
-    async def running_test(self, kind='latency'):
-        """Exercise actual test task and WS handling with a fake speaker only."""
-        ws = await self.audio.ws_connect('/device')
-        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
-                            'sample_rate':16000, 'channels':1})
-        await ws.receive_json()
-        self.bench.config.update(wiim_host='192.168.1.20', stream_base_url='http://192.168.1.10:8099')
-        entered = asyncio.Event()
-        async def begin(capture_id, duration_ms):
-            self.bench.device.capture_id = capture_id
-            self.bench.device.started.set()
-            self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\x01\x00'*2)
-        async def play(*args):
-            entered.set()
-        transport = Mock(play=AsyncMock(side_effect=play), stop=AsyncMock(), close=AsyncMock(), snapshot=Mock(return_value={}))
-        with patch('jarvis.transports.NativeHTTPTransport', return_value=transport), patch.object(self.bench.device, 'begin', begin):
-            response = await self.ui.post('/api/tests', json={'kind':kind, 'comfortable_volume_confirmed':True})
-            self.assertEqual(response.status, 202)
-            await asyncio.wait_for(entered.wait(), 2)
-            try:
-                yield ws
-            finally:
-                await self.bench.cancel()
-                await ws.close()
-
-    async def test_connection_loss_is_failed_and_preserves_partial_capture(self):
-        async with self.running_test() as ws:
-            await ws.close()
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self.bench.task, 2)
-            result = self.bench.results[0]
-            self.assertEqual(result['status'], 'failed')
-            self.assertEqual(result['interruption']['reason'], 'device_disconnected')
-            self.assertIn('close_code', result['interruption'])
-            self.assertEqual(result['capture']['samples'], 2)
-            self.assertEqual(result['trials'], [])
-            self.assertFalse(self.bench.test['running'])
-
-    async def test_explicit_stop_is_cancelled_and_preserves_reason(self):
-        async with self.running_test():
-            response = await self.ui.delete('/api/tests/current', json={})
-            self.assertEqual(response.status, 202)
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self.bench.task, 4)
-            self.assertEqual(self.bench.results[0]['status'], 'cancelled')
-            self.assertEqual(self.bench.results[0]['interruption']['reason'], 'user_stop')
-
-    async def test_mute_is_failed_and_preserves_reason(self):
-        async with self.running_test() as ws:
-            await ws.send_json({'type':'status', 'muted':True})
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self.bench.task, 4)
-            result = self.bench.results[0]
-            self.assertEqual(result['status'], 'failed')
-            self.assertEqual(result['interruption']['reason'], 'device_muted')
-
-    async def test_invalid_pcm_records_protocol_failure(self):
-        async with self.running_test() as ws:
-            await ws.send_bytes(b'bad')
-            await ws.receive()
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self.bench.task, 2)
-            result = self.bench.results[0]
-            self.assertEqual(result['status'], 'failed')
-            self.assertIn('header', result['interruption']['protocol_error'])
-            self.assertEqual(result['interruption']['server_close_code'], 1008)
-
-    async def test_late_disconnect_cannot_interrupt_failure_cleanup(self):
-        async with self.running_test():
-            stopping, release = asyncio.Event(), asyncio.Event()
-            async def stop():
-                stopping.set()
-                await release.wait()
-            self.bench.transport.stop.side_effect = stop
-            with patch('jarvis.server.MAX_PLAYBACK_DELAY_SECONDS', 0), patch.object(self.bench.device, 'end', AsyncMock()):
-                self.bench.stream.connected.set()
-                self.bench.stream.done.set()
-                await asyncio.wait_for(stopping.wait(), 2)
-                # recording() failed clock validation; cleanup is now in progress.
-                late_disconnect = asyncio.create_task(self.bench.cancel('device_disconnected'))
-                await asyncio.sleep(0)
-                self.assertFalse(self.bench.task.cancelling())
-                release.set()
-                await asyncio.wait_for(late_disconnect, 2)
-            self.assertFalse(self.bench.test['running'])
-            self.assertEqual(self.bench.device.frames, [])
-            self.assertEqual(self.bench.results[0]['status'], 'failed')
-
-    async def test_onset_alone_cannot_report_stability_as_measured(self):
-        async with self.running_test(kind='stability'):
-            start = 100.0
-            probe = make_probe(513)
-            pcm = np.zeros(RATE * 12, dtype='<i2')
-            pcm[int(.12 * RATE):int(.12 * RATE) + len(probe)] = probe
-            self.bench.stream.started_at = start
-            self.bench.stream.markers = [(start + .1, probe)]
-            self.bench.device.clock_rtt_ms = 20
-            with patch('jarvis.server.MAX_PLAYBACK_DELAY_SECONDS', .05), \
-                 patch.object(self.bench.device, 'end', AsyncMock()), \
-                 patch.object(self.bench.device, 'recording', return_value=(pcm, start)):
-                self.bench.stream.connected.set()
-                self.bench.stream.done.set()
-                await asyncio.wait_for(self.bench.task, 2)
-            result = self.bench.results[0]
-            self.assertEqual(result['summary']['valid_trials'], 1, result)
-            self.assertEqual(result['stability']['status'], 'unavailable')
-            self.assertEqual(result['status'], 'unavailable')
 
     async def test_test_requires_user_confirmation_and_paired_mic(self):
         response = await self.ui.post('/api/tests', json={'kind':'latency'})
@@ -241,6 +72,27 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
         self.assertEqual(response.status, 400)
         self.assertIsNone(self.bench.task)
+
+    async def test_legacy_settings_migrate_without_resetting_pairing(self):
+        original = self.bench.config['device_token']
+        self.bench.path.write_text(json.dumps({
+            'device_token': original, 'stream_base_url': 'http://192.168.1.10:8099',
+            'route': 'airplay', 'wiim_host': '192.168.1.20', 'repetitions': 5}))
+        restarted = Bench(self.folder.name)
+        self.assertEqual(restarted.config, {
+            'device_token': original, 'ha_lan_url': 'http://192.168.1.10:8099', 'repetitions': 5})
+        self.assertEqual(restarted.firmware_secrets, self.bench.firmware_secrets)
+
+    async def test_playback_requires_a_connected_jack_and_compatible_firmware(self):
+        ws = await self.audio.ws_connect('/device')
+        await ws.send_json({'type':'hello','protocol':1,'token':self.bench.config['device_token'],
+                            'sample_rate':RATE,'channels':1,'raw_ready':True,
+                            'playback_protocol':1,'jack_plugged':False})
+        await ws.receive_json()
+        response = await self.ui.post('/api/tests', json={'kind':'latency', 'comfortable_volume_confirmed':True})
+        self.assertEqual(response.status, 400)
+        self.assertIsNone(self.bench.task)
+        await ws.close()
 
     async def test_cross_origin_and_non_json_control_are_rejected(self):
         response = await self.ui.put('/api/config', json={}, headers={'Origin':'https://untrusted.example'})
@@ -257,7 +109,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('192.168.1.77', content)
 
     async def test_firmware_setup_uses_repository_and_persistent_credentials(self):
-        self.bench.config['stream_base_url'] = 'http://192.168.1.10:8099'
+        self.bench.config['ha_lan_url'] = 'http://192.168.1.10:8099'
         first = await self.ui.get('/api/firmware')
         second = await self.ui.get('/api/firmware')
         self.assertEqual(first.status, 200)
@@ -293,37 +145,6 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await second.close()
         await ws.close()
 
-    async def test_silent_connection_test_never_constructs_a_speaker_transport(self):
-        from test_device_diagnostics import diagnostics, pcm_summary
-        ws = await self.audio.ws_connect('/device')
-        await ws.send_json({'type':'hello', 'protocol':1, 'token':self.bench.config['device_token'],
-                            'sample_rate':16000, 'channels':1})
-        await ws.receive_json()
-        async def begin(capture_id, duration_ms):
-            self.bench.device.capture_id = capture_id
-            self.bench.device.capture_session = {'boot_id':'a'*16, 'connection_generation':1, 'capture_generation':3}
-            self.bench.device.receive_pcm(FRAME.pack(b'JPCM', 1, 1, 2, 0, 0, 10) + b'\0'*4)
-        async def end():
-            self.bench.device.receive_json({'type':'capture_stopped', 'capture_id':self.bench.device.capture_id,
-                'reason':'requested', 'dropped_frames':0,
-                'diagnostics':{**diagnostics(), 'pcm_send':pcm_summary()}})
-            self.bench.device.capture_id = None
-            self.bench.device.stopped.set()
-        with patch.object(self.bench.device, 'begin', begin), patch.object(self.bench.device, 'end', end), \
-             patch('jarvis.server.CONNECTION_TEST_SECONDS', .01), \
-             patch('jarvis.transports.NativeHTTPTransport') as native, patch('jarvis.transports.AirPlayTransport') as airplay:
-            response = await self.ui.post('/api/tests', json={'kind':'connection'})
-            self.assertEqual(response.status, 202)
-            await asyncio.wait_for(self.bench.task, 2)
-            native.assert_not_called()
-            airplay.assert_not_called()
-        self.assertEqual(self.bench.results[0]['status'], 'passed')
-        self.assertEqual(self.bench.results[0]['metric'], 'microphone_connection')
-        self.assertEqual(self.bench.results[0]['firmware_pcm'], pcm_summary())
-        self.assertNotIn('stream', self.bench.results[0])
-        self.assertIsNone(self.bench.stream)
-        await ws.close()
-
     async def test_authenticated_reconnect_telemetry_is_exported(self):
         from test_device_diagnostics import diagnostics, pcm_summary
         ws = await self.audio.ws_connect('/device')
@@ -337,58 +158,6 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body['firmware_observations'][0]['diagnostics']['pcm_send'], pcm_summary())
         self.assertNotIn(self.bench.config['device_token'], json.dumps(body))
         await ws.close()
-
-    async def test_stale_stream_url_cannot_be_replayed(self):
-        response = await self.audio.get('/stream/made-up.wav')
-        self.assertEqual(response.status, 404)
-
-    async def test_slim_pcm_http_body_and_both_decoder_commands_agree(self):
-        from aioslimproto.client import SlimClient
-        self.bench.config.update(route='slimproto', codec='wav')
-        stream = self.bench.stream = Stream('latency', 1)
-        samples = struct.pack('<hhhh', -2000, -1, 0, 2000)
-        async def blocks():
-            yield samples
-        reader = asyncio.StreamReader()
-        writer = SimpleNamespace(is_closing=lambda:False, can_write_eof=lambda:False,
-                                 close=lambda:None, wait_closed=AsyncMock())
-        player = SlimClient(reader, writer, lambda *args:None)
-        player._connected = player._powered = True
-        player._capabilities = {'SupportedCodecs':['pcm', 'flc']}
-        player.send_frame = AsyncMock()
-        try:
-            # Use the actual transport, pinned library, endpoint and response
-            # parser: an assertion on the initial MIME alone missed this bug.
-            from jarvis.transports import SlimProtoTransport
-            transport = SlimProtoTransport('127.0.0.1')
-            transport._server = SimpleNamespace(players=[player])
-            with patch.object(stream, 'blocks', blocks):
-                url = str(self.audio.make_url('/stream/' + stream.id + '.pcm'))
-                await transport.play(url, {'codec':'wav', 'sample_rate':16000, 'sample_size':16, 'channels':1})
-                command, packet = player.send_frame.await_args.args
-                self.assertEqual(command, b'strm')
-                self.assertEqual(struct.unpack('!cc5sBcBcBBBLHL', packet[:24])[2], b'p1711')
-                response = await self.audio.get('/stream/' + stream.id + '.pcm')
-                self.assertEqual(await response.read(), samples)  # no RIFF header or byte swaps
-                content_type = response.headers['Content-Type']
-                self.assertEqual(content_type, 'audio/pcm;rate=16000;bitrate=16;channels=1')
-                player._awaiting_stmc = False  # simulated connection acknowledgment
-                await player._process_resp(('HTTP/1.0 200 OK\r\nContent-Type: ' + content_type + '\r\n\r\n').encode())
-                decoder_commands = [call.args[1] for call in player.send_frame.await_args_list if call.args[0] == b'codc']
-                self.assertEqual(decoder_commands, [b'p1711'])
-        finally:
-            player.disconnect()
-            await player._async_cleanup()
-
-    async def test_http_wav_keeps_its_container_header(self):
-        self.bench.config.update(route='http', codec='wav')
-        stream = self.bench.stream = Stream('latency', 1)
-        async def blocks():
-            yield b'\x01\x00' * 20
-        with patch.object(stream, 'blocks', blocks):
-            response = await self.audio.get('/stream/' + stream.id + '.wav')
-            self.assertEqual(response.headers['Content-Type'], 'audio/wav')
-            self.assertEqual(await response.read(), wav_header() + b'\x01\x00' * 20)
 
     async def test_pairing_rotation_closes_old_connection(self):
         ws = await self.audio.ws_connect('/device')
@@ -423,21 +192,17 @@ class DeviceTests(unittest.TestCase):
 
     def test_bad_addresses_and_short_pairing_token_are_rejected(self):
         for config in [{'device_token':'short'}, {'device_token':'a'*40,'wiim_host':'8.8.8.8'},
-                       {'device_token':'a'*40,'stream_base_url':'http://127.0.0.1:8099'},
-                       {'device_token':'a'*40,'stream_base_url':'http://192.168.1.4:8099/private'}]:
+                       {'device_token':'a'*40,'ha_lan_url':'http://127.0.0.1:8099'},
+                       {'device_token':'a'*40,'ha_lan_url':'http://192.168.1.4:8099/private'}]:
             with self.assertRaises(ValueError): validate_config(config)
 
 
-class StreamSignalTests(unittest.IsolatedAsyncioTestCase):
-    async def test_stability_preserves_every_probe_before_continuous_pilot(self):
-        stream = Stream('stability', 3)
-        ticks = iter([0.0])
-        with patch('jarvis.server.time', SimpleNamespace(monotonic=lambda:next(ticks, 100.0))):
-            pcm = np.frombuffer(b''.join([chunk async for chunk in stream.blocks()]), dtype='<i2')
-        for _, probe in stream.markers:
-            detection = detect_probe(pcm, probe)
-            self.assertEqual(detection['status'], 'detected', detection)
-            self.assertGreater(detection['confidence'], .99)
-
-
-if __name__ == '__main__': unittest.main()
+class StreamSignalTests(unittest.TestCase):
+    def test_stability_preserves_every_probe_before_continuous_pilot(self):
+        pcm, probes = bench_signal("stability", 3)
+        self.assertEqual(len(probes), 3)
+        for i, (offset, probe) in enumerate(probes.items()):
+            self.assertEqual(offset, 2 * i * RATE)
+            np.testing.assert_array_equal(pcm[offset:offset + len(probe)], make_probe(513 + i))
+        self.assertTrue(np.any(pcm[-2 * RATE:-RATE]))
+        self.assertFalse(np.any(pcm[-RATE:]))

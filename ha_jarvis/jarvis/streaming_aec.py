@@ -1,4 +1,4 @@
-"""Align microphone samples to a bounded, live AirPlay render history."""
+"""Align microphone samples to a bounded Voice PE render history."""
 from __future__ import annotations
 
 import math
@@ -24,19 +24,25 @@ class StreamingEcho:
         self._history = np.zeros(4 * SAMPLE_RATE, dtype="<i2")
         self._render_start = None
         self._render_end = 0
+        self._next_render_frame = 0
         self._capture_start = self._capture_stamp = None
         self._next_capture = self._processed = 0
         self._pending = np.empty(0, dtype="<i2")
         self.capture_drift_ppm = 0.0
 
-    def render(self, pcm, handed_off_at):
-        """Accept exact stereo PCM16BE handed to the 44.1 kHz AirPlay sender."""
-        stereo = np.frombuffer(pcm, dtype=">i2").reshape(-1, 2)
+    def render(self, pcm, rendered_at, *, first_frame):
+        """Accept device-confirmed 48 kHz stereo PCM16LE in order."""
+        if not pcm or len(pcm) % 4 or not math.isfinite(rendered_at):
+            raise ValueError("Invalid wired render frame")
+        if first_frame != self._next_render_frame:
+            raise RuntimeError("Speaker discontinuity invalidated live echo alignment")
+        stereo = np.frombuffer(pcm, dtype="<i2").reshape(-1, 2)
+        self._next_render_frame += len(stereo)
         if self._render_start is None:
-            self._render_start = handed_off_at
-        mono = stereo[:, 0].astype(np.int16).reshape(1, -1)
+            self._render_start = rendered_at
+        mono = (stereo.astype(np.int32).sum(axis=1) // 2).astype(np.int16).reshape(1, -1)
         frame = av.AudioFrame.from_ndarray(mono, format="s16", layout="mono")
-        frame.sample_rate = 44100
+        frame.sample_rate = 48000
         for output in self._converter.resample(frame):
             samples = output.to_ndarray().reshape(-1)
             indices = np.arange(self._render_end, self._render_end + len(samples))

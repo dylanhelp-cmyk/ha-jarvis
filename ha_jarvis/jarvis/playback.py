@@ -1,0 +1,149 @@
+"""Bounded PCM sender for the Voice PE jack."""
+from __future__ import annotations
+
+import asyncio
+import secrets
+import struct
+import time
+
+import numpy as np
+
+
+RATE = 48000
+CHANNELS = 2
+PACKET_FRAMES = 480
+HEADER = struct.Struct("<4sBBHIIQ")
+MAX_IN_FLIGHT = 6 * PACKET_FRAMES
+
+
+def stereo_pcm(samples):
+    """Upsample a 16 kHz bench signal to 48 kHz stereo PCM16LE."""
+    import av
+
+    mono = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
+    mono.sample_rate = RATE // 3
+    converter = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+    blocks = converter.resample(mono) + converter.resample(None)
+    return b"".join(np.repeat(block.to_ndarray().ravel(), 2).astype("<i2").tobytes() for block in blocks)
+
+
+class JackPlayback:
+    """One generation on the current paired socket. Never replays on reconnect."""
+
+    def __init__(self, device, playback_id):
+        self.device = device
+        self.ws = device.ws
+        self.id = playback_id
+        self.generation = secrets.randbelow(0xFFFFFFFF) + 1
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.progress = asyncio.Event()
+        self.frames_sent = 0
+        self.frames_accepted = 0
+        self.frames_rendered = None
+        self.last_rendered_ms = None
+        self.first_render_report = None
+        self.accepted = []
+        self.reason = None
+        self.terminal_confirmed = False
+        self.max_in_flight = 0
+        self.max_send_lag_ms = 0.0
+
+    def receive(self, message):
+        if message.get("generation") != self.generation:
+            return
+        kind = message["type"]
+        if kind == "play_render" and message.get("playback_id") == self.id:
+            first, count, stamp = (message.get(k) for k in ("first_sample", "samples", "device_time_ms"))
+            if (any(type(v) is not int for v in (first, count, stamp))
+                    or first != self.frames_accepted or not 0 < count <= PACKET_FRAMES
+                    or first + count > self.frames_sent or not 0 <= stamp <= 0xFFFFFFFF):
+                self.reason = "invalid_render_acknowledgment"
+                self.finished.set()
+            else:
+                self.frames_accepted += count
+                self.accepted.append((first, count, stamp))
+            self.progress.set()
+        elif message.get("playback_id") == self.id:
+            rendered = message.get("rendered_samples")
+            stamp = message.get("last_rendered_ms")
+            if (type(rendered) is int and (self.frames_rendered or 0) <= rendered <= self.frames_sent
+                    and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF):
+                self.frames_rendered = rendered
+                self.last_rendered_ms = stamp
+                if rendered and self.first_render_report is None:
+                    self.first_render_report = rendered, stamp
+            if kind == "play_started":
+                self.started.set()
+            elif kind in ("play_stopped", "play_drained"):
+                self.reason = "drained" if kind == "play_drained" else str(message.get("reason", "stopped"))[:64]
+                self.terminal_confirmed = True
+                self.finished.set()
+                self.progress.set()
+                self.started.set()
+
+    async def command(self, kind):
+        if self.ws is not self.device.ws or self.ws is None or self.ws.closed:
+            raise RuntimeError("Voice PE disconnected")
+        await asyncio.wait_for(self.ws.send_json({"type": kind, "playback_id": self.id,
+                                                "generation": self.generation}), 2)
+
+    def ensure_playing(self):
+        if self.finished.is_set():
+            raise RuntimeError(f"Voice PE playback ended early ({self.reason})")
+
+    async def send(self, pcm):
+        await self.command("play_start")
+        await asyncio.wait_for(self.started.wait(), 2)
+        self.ensure_playing()
+        anchor = time.monotonic()
+        frame_bytes = CHANNELS * 2
+        for sequence, offset in enumerate(range(0, len(pcm), PACKET_FRAMES * frame_bytes)):
+            while self.frames_sent - self.frames_accepted >= MAX_IN_FLIGHT:
+                self.progress.clear()
+                self.ensure_playing()
+                await asyncio.wait_for(self.progress.wait(), .15)
+            due = anchor + self.frames_sent / RATE
+            await asyncio.sleep(max(0.0, due - time.monotonic()))
+            self.ensure_playing()
+            lag = max(0.0, (time.monotonic() - due) * 1000)
+            self.max_send_lag_ms = max(self.max_send_lag_ms, lag)
+            if lag > 100:
+                raise RuntimeError("Voice PE sender fell behind; playback stopped without acceleration")
+            payload = pcm[offset:offset + PACKET_FRAMES * frame_bytes]
+            count = len(payload) // frame_bytes
+            header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, self.frames_sent)
+            self.frames_sent += count
+            self.max_in_flight = max(self.max_in_flight, self.frames_sent - self.frames_accepted)
+            await asyncio.wait_for(self.ws.send_bytes(header + payload), .15)
+        await self.command("play_drain")
+        await asyncio.wait_for(self.finished.wait(), 3)
+        if self.reason != "drained" or self.frames_accepted != self.frames_sent:
+            raise RuntimeError(f"Voice PE playback did not drain cleanly ({self.reason})")
+
+    async def stop(self):
+        if self.terminal_confirmed or self.ws is not self.device.ws or not self.ws or self.ws.closed:
+            return
+        self.finished.clear()
+        await self.command("play_stop")
+        await asyncio.wait_for(self.finished.wait(), 2)
+
+    def accepted_at(self, frame, clock_offset_ms):
+        for first, count, stamp in self.accepted:
+            if first <= frame < first + count:
+                return (stamp + clock_offset_ms) / 1000 + (frame - first) / RATE
+        return None
+
+    def snapshot(self):
+        result = {"frames_sent": self.frames_sent, "frames_accepted": self.frames_accepted,
+                "frames_rendered": self.frames_rendered, "last_rendered_device_ms": self.last_rendered_ms,
+                "max_in_flight_ms": round(self.max_in_flight / RATE * 1000, 1),
+                "max_send_lag_ms": round(self.max_send_lag_ms, 1), "reason": self.reason,
+                "clock_scope": "speaker acceptance and firmware output counters, not acoustic output"}
+        if self.first_render_report is not None:
+            first, stamp = self.first_render_report
+            if self.frames_rendered > first:
+                elapsed = (self.last_rendered_ms - stamp) & 0xFFFFFFFF
+                expected = (self.frames_rendered - first) * 1000 / RATE
+                result["output_clock_span_difference_ms"] = round(elapsed - expected, 1)
+        return result

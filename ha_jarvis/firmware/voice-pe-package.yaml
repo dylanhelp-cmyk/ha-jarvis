@@ -9,7 +9,7 @@ esphome:
   min_version: 2026.10.0
   project:
     name: jarvis.voice_pe_testbench
-    version: "0.1.6"
+    version: "0.2.0"
   on_boot:
     priority: -100
     then:
@@ -39,6 +39,7 @@ jarvis_stream:
   id: pcm_stream
   i2c_id: internal_i2c
   device_id: ${name}
+  speaker: jack_speaker
   microphone:
     microphone: i2s_mics
     channels: [0]
@@ -70,6 +71,15 @@ micro_wake_word:
           - delay: 300ms
 
 binary_sensor:
+  - platform: gpio
+    id: jack_plugged
+    pin: GPIO17
+    internal: true
+    trigger_on_initial_state: true
+    filters:
+      - delayed_on: 200ms
+    on_state:
+      - lambda: id(pcm_stream).set_jack_plugged(x);
   - platform: gpio
     id: hardware_mute
     name: Hardware microphone mute

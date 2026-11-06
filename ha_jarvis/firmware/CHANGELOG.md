@@ -1,3 +1,9 @@
+# 0.2.0 - local jack playback
+
+- Restore the upstream I²S/DAC output and jack detection. Keep the internal amplifier disabled.
+- Add bounded 48 kHz stereo playback on the paired connection, with sample and sequence validation, drain, immediate stop and invalidation on mute, unplug or transport loss.
+- Report speaker-buffer acceptance per packet and periodic I²S DMA completion. Acoustic timing still requires microphone measurement.
+
 # 0.1.6 - measure PCM sends with a modestly longer wait
 
 - Increase the PCM send API timeout from 30 to 100 ms to test the observed send-failure hypothesis. Keep control sends at 100 ms. Underlying lock/poll/socket phases mean this is not a hard per-call deadline or a proven fix.

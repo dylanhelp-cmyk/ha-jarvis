@@ -12,9 +12,8 @@ import json
 import os
 from pathlib import Path
 import secrets
-import shutil
+import re
 import signal
-import struct
 import time
 from urllib.parse import urlparse
 import uuid
@@ -24,135 +23,66 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
-from .audio import RATE, MAX_PLAYBACK_DELAY_SECONDS, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize, wav_header
+from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device
 from .cloud_settings import CloudSettings
+from .playback import JackPlayback, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
-DEFAULTS = {"wiim_host": "", "stream_base_url": "", "route": "http", "codec": "wav",
-            "repetitions": 3, "verify_tls": True, "slimproto_player_id": "",
-            "slimproto_port": 3483, "airplay_latency_ms": 1500}
+DEFAULTS = {"ha_lan_url": "", "repetitions": 3}
+LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
+                 "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
 
 
 def validate_config(value):
-    allowed = set(DEFAULTS) | {"device_token"}
-    if set(value) - allowed:
+    if set(value) - set(DEFAULTS) - {"device_token"}:
         raise ValueError("Unknown configuration field")
     config = {**DEFAULTS, **value}
-    if config["wiim_host"]:
-        address = ipaddress.ip_address(config["wiim_host"])
-        if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast:
-            raise ValueError("WiiM address must be a private LAN IP address")
-    if config["stream_base_url"]:
-        parsed = urlparse(config["stream_base_url"])
+    if config["ha_lan_url"]:
+        parsed = urlparse(config["ha_lan_url"])
         address = ipaddress.ip_address(parsed.hostname or "")
-        if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
-            raise ValueError("Stream address must be http://HA-LAN-IP:8099, without a path")
-        if address.version != 4 or not address.is_private or address.is_loopback or address.is_unspecified or address.is_multicast or parsed.port != 8099:
-            raise ValueError("Stream address must use the HA LAN IP and port 8099")
-    if config["route"] not in ("http", "slimproto", "airplay") or config["codec"] not in ("wav", "flac"):
-        raise ValueError("Unsupported route or codec")
+        if (parsed.scheme != "http" or parsed.username or parsed.password or parsed.query
+                or parsed.fragment or parsed.path not in ("", "/") or parsed.port != 8099
+                or address.version != 4 or not address.is_private or address.is_loopback
+                or address.is_unspecified or address.is_multicast):
+            raise ValueError("Enter http://HA-LAN-IP:8099 without a path")
     if type(config["repetitions"]) is not int or not 1 <= config["repetitions"] <= 20:
         raise ValueError("Choose 1 to 20 repetitions")
-    if type(config["verify_tls"]) is not bool:
-        raise ValueError("verify_tls must be a boolean")
-    if type(config["slimproto_port"]) is not int or not 1024 <= config["slimproto_port"] <= 65535:
-        raise ValueError("SlimProto port must be between 1024 and 65535")
-    if type(config["airplay_latency_ms"]) is not int or not 150 <= config["airplay_latency_ms"] <= 2000:
-        raise ValueError("Requested AirPlay latency must be between 150 and 2000 ms")
     token = config.get("device_token", "")
-    if len(token) < 32 or len(token) > 128 or not all(c.isalnum() or c in "-_" for c in token):
-        raise ValueError("Device token must contain 32–128 URL-safe characters")
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+        raise ValueError("Device token must contain 32 to 128 URL-safe characters")
     return config
 
 
-class Stream:
-    def __init__(self, kind, repetitions, *, lead_ms=100, acknowledgment=None):
-        self.id = secrets.token_urlsafe(24)
-        self.kind, self.repetitions = kind, repetitions
-        self.lead_ms = lead_ms
-        self.acknowledgment = acknowledgment
-        self.connected = asyncio.Event()
-        self.done = asyncio.Event()
-        self.stop_requested = asyncio.Event()
-        self.markers = []
-        self.marker_timing = None
-        self.marker_schedule_lag_ms = []
-        self.reference_pcm = None
-        self.started_at = None
-        self.bytes_sent = 0
-        self.consumed = False
-        self.schedule_lag_ms = 0
-        self.error = None
-        self.expected_disconnect = False
-        self.duration = 30 if self.kind == "stop" else 1 + self.repetitions * 2.0 + 5
-        if self.kind in ("startup_pcm", "startup_ack"):
-            self.duration = 4
+def migrate_config(value):
+    value = dict(value)
+    value.setdefault("ha_lan_url", value.get("stream_base_url", ""))
+    return validate_config({key: entry for key, entry in value.items() if key not in LEGACY_FIELDS})
 
-    def prepare_pcm(self):
-        total = int(self.duration * RATE)
-        probes = {}
-        pcm = np.zeros(total, dtype="<i2")
-        if self.acknowledgment is not None:
-            from .live_bench import voiced_bounds
 
-            clip = np.frombuffer(self.acknowledgment, dtype="<i2")
-            lead = self.lead_ms * RATE // 1000
-            pcm[lead:lead + len(clip)] = clip
-            for offset, word in zip((0, len(clip) // 2), np.split(clip, 2)):
-                bounds = voiced_bounds(word)
-                if bounds is None or bounds[1] - bounds[0] < RATE // 8:
-                    raise ValueError("Each acknowledgment slot needs at least 125 ms of speech")
-                probes[lead + offset + bounds[0]] = word[bounds[0]:bounds[1]]
-            self.reference_pcm = pcm
-            return pcm, probes
-        for i in range(0 if self.kind == "volume" else self.repetitions):
-            # Swap the first two known probe identities for the startup check.
-            # This distinguishes a weak reference from a startup-specific loss.
-            seed = 514 - i if self.kind in ("startup", "startup_pcm") else 513 + i
-            probe = make_probe(seed)
-            offset = self.lead_ms * RATE // 1000 + i * 2 * RATE
-            pcm[offset:offset + len(probe)] = probe
-            probes[offset] = probe
-        if self.kind in ("stability", "echo"):
-            t = np.arange(total) / RATE
-            pilot = ((np.sin(2*np.pi*937*t) + np.sin(2*np.pi*1579*t)) * .025 * 32767).astype("<i2")
-            last_offset = max(probes)
-            last_probe = probes[last_offset]
-            pilot_start = last_offset / RATE + len(last_probe) / RATE + STABILITY_PILOT_GAP_SECONDS
-            pilot[:int(pilot_start * RATE)] = 0
-            pilot[-RATE:] = 0
-            pcm += pilot
-        if self.kind == "stop":
-            t = np.arange(total - 2 * RATE) / RATE
-            pcm[2 * RATE:] = ((np.sin(2 * np.pi * 937 * t) + np.sin(2 * np.pi * 1579 * t)) * .05 * 32767).astype("<i2")
-            probes.clear()
-        self.reference_pcm = pcm
-        return pcm, probes
+def bench_signal(kind, repetitions):
+    if kind == "stop":
+        t = np.arange(10 * RATE) / RATE
+        return pilot(t), {}
+    duration = (2 * repetitions + 5) if kind in ("stability", "echo") else 2 * repetitions + 1
+    pcm = np.zeros(duration * RATE, dtype="<i2")
+    probes = {}
+    for i in range(repetitions):
+        offset = (2 * i) * RATE
+        probe = make_probe(513 + i)
+        probes[offset] = probe
+        pcm[offset:offset + len(probe)] = probe
+    if kind in ("stability", "echo"):
+        last = max(probes)
+        start = last + len(probes[last]) + int(STABILITY_PILOT_GAP_SECONDS * RATE)
+        end = len(pcm) - RATE
+        pcm[start:end] = pilot(np.arange(start, end) / RATE)
+    return pcm, probes
 
-    async def blocks(self):
-        # Finish source generation before anchoring the paced stream clock.
-        pcm, probes = self.prepare_pcm()
-        self.started_at = time.monotonic()
-        self.connected.set()
-        for start in range(0, len(pcm), 320):
-            if self.stop_requested.is_set():
-                break
-            deadline = self.started_at + start / RATE
-            await asyncio.sleep(max(0, deadline - time.monotonic()))
-            chunk = pcm[start:start + 320].tobytes()
-            self.bytes_sent += len(chunk)
-            handed_off = time.monotonic()
-            lag_ms = max(0, (handed_off - deadline) * 1000)
-            self.schedule_lag_ms = max(self.schedule_lag_ms, lag_ms)
-            if start in probes:
-                # Probe offsets align with block boundaries. This clock marks
-                # producer handoff, not socket completion or audible playback.
-                self.markers.append((handed_off, probes[start]))
-                self.marker_schedule_lag_ms.append(lag_ms)
-                self.marker_timing = "block_handoff_monotonic"
-            yield chunk
+
+def pilot(t):
+    return ((np.sin(2 * np.pi * 937 * t) + np.sin(2 * np.pi * 1579 * t)) * .025 * 32767).astype("<i2")
 
 
 class Bench:
@@ -165,7 +95,7 @@ class Bench:
         self.firmware_secrets_path = self.data_dir / "firmware-secrets.json"
         self.config = {**DEFAULTS, "device_token": secrets.token_urlsafe(32)}
         if self.path.exists():
-            self.config = validate_config(json.loads(self.path.read_text()))
+            self.config = migrate_config(json.loads(self.path.read_text()))
         self.save()
         if self.firmware_secrets_path.exists():
             self.firmware_secrets = json.loads(self.firmware_secrets_path.read_text())
@@ -179,12 +109,7 @@ class Bench:
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
-        self.stream = None
-        self.transport = None
-        self.slim = None
-        self.slim_error = None
         self.firmware_observations = deque(maxlen=20)
-        self.airplay_discovery_cache = {}
 
     def observe_firmware(self):
         diagnostics = self.device.info.get("diagnostics")
@@ -238,66 +163,11 @@ class Bench:
             temporary.chmod(0o600)
         temporary.replace(self.path)
 
-    async def partial_playback_evidence(self, kind):
-        """Salvage scalar observations without passing an interrupted capture."""
-        if kind not in ("latency", "startup", "startup_pcm", "stability", "echo") or not self.stream or not self.stream.markers:
-            return None
-        try:
-            pcm, capture_start = self.device.recording()
-        except ValueError:
-            return None
-        horizon = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
-        trials = []
-        for index, (emitted, probe) in enumerate(self.stream.markers):
-            start = max(0, int((emitted - capture_start - .1) * RATE))
-            end = min(len(pcm), int((emitted - capture_start + horizon + len(probe) / RATE) * RATE))
-            detection = await asyncio.to_thread(detect_probe, pcm[start:end], probe)
-            trial = {"trial": index + 1, **detection, "latency_ms": None}
-            if detection["status"] == "detected" and (
-                getattr(self.stream, "marker_timing", None) == "block_handoff_monotonic"
-                or self.stream.schedule_lag_ms <= 50
-            ):
-                latency = (capture_start + start / RATE + detection["offset_seconds"] - emitted) * 1000
-                if latency >= 0:
-                    trial["latency_ms"] = round(latency, 1)
-            trials.append(trial)
-        summary = summarize(trials)
-        if not summary["valid_trials"]:
-            return None
-        return {"scope": "Provisional observations from incomplete capture; test remains failed",
-                "trials": trials, "summary": summary,
-                "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 4, 2)}
-
-    async def init_slim(self):
-        if self.slim:
-            await self.slim.close()
-            self.slim = None
-        self.slim_error = None
-        if not self.config["stream_base_url"]:
-            return
-        try:
-            from .transports import SlimProtoTransport
-            self.slim = SlimProtoTransport(server_host=urlparse(self.config["stream_base_url"]).hostname,
-                                          control_port=self.config["slimproto_port"],
-                                          player_id=self.config["slimproto_player_id"] or None)
-            await self.slim.start()
-        except Exception as exc:
-            self.slim_error = str(exc)
-            if self.slim:
-                with suppress(Exception):
-                    await self.slim.close()
-            self.slim = None
-
     def status(self):
-        return {"version": __version__, "milestone": "audio_bench", "device": self.device.snapshot(),
-                "test": self.test, "config": {k:v for k,v in self.config.items() if k != "device_token"},
-                "transports": {"http": {"available": True},
-                    "slimproto": {"available": self.slim is not None,
-                                  "clients": self.slim.players() if self.slim else [], "reason": self.slim_error},
-                    "airplay": {"available": True, "reason": "Baseline: requires an unpaired RAOP receiver; no automatic pairing"}},
-                "codecs": {"wav": True, "flac": shutil.which("ffmpeg") is not None},
+        return {"version": __version__, "milestone": "wired_audio_bench", "device": self.device.snapshot(),
+                "test": self.test, "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
-                          "reason": "Explicit paid voice benchmarks only; conversational assistant is not enabled"}}
+                          "reason": "Cloud playback trials are gated on wired bench verification"}}
 
     async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
@@ -309,322 +179,130 @@ class Bench:
             with suppress(asyncio.CancelledError):
                 await self.task
 
-    async def run(self, kind, repetitions, *, lead_ms=100, wait_for_wake=False, wake_stimulus=None):
-        from .transports import NativeHTTPTransport, AirPlayTransport
+    async def run(self, kind, repetitions):
         started = time.monotonic()
-        result = {"id": self.test["id"], "kind": kind, "route": self.config["route"],
-                  "codec": self.config["codec"], "started_at": datetime.now(timezone.utc).isoformat(),
-                  "status": "running", "trials": [], "summary": summarize([]), "warnings": [
-                      "Acoustic estimates include microphone processing delay; clock uncertainty is shown separately.",
-                      "This is playback-path latency, not end-of-speech-to-assistant-response latency.",
-                      "Test playback interrupts the current source. Automatic music restoration is not in this bench."]}
+        result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
+                  "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
+                  "trials": [], "warnings": [
+                      "Speaker API acceptance is a software milestone. Acoustic estimates include microphone processing delay."]}
         self.results.insert(0, result)
         del self.results[30:]
-        if kind == "connection":
-            result["warnings"] = ["Silent microphone connection test: no speaker playback or cloud calls. Only aggregate diagnostics are retained."]
-        elif kind == "volume":
-            result["warnings"] = ["Silent AirPlay source switch. No microphone capture or cloud calls."]
-        elif self.config["route"] == "airplay":
-            result["warnings"].append("AirPlay sender timings are software milestones; only microphone detections measure audible output. Microphone pipeline delay remains uncalibrated.")
+        player = sender = None
         try:
-            self.test["phase"] = "synchronizing microphone"
-            wake_at = None
-            if wait_for_wake:
-                await self.device.sync()
-                self.device.wake_event.clear()
-                self.test["phase"] = "armed for Hey Jarvis for 30 seconds"
-                if wake_stimulus is not None:
-                    from .live_audio import StartupPCMSource
-
-                    stimulus = Stream("startup_ack", 2, lead_ms=500, acknowledgment=wake_stimulus)
-                    self.transport = AirPlayTransport.for_wiim(
-                        self.config["wiim_host"], self.config["verify_tls"],
-                        discovery_cache=self.airplay_discovery_cache)
-
-                    async def stimulus_source(*_format):
-                        return StartupPCMSource(stimulus)
-
-                    self.test["phase"] = "playing local synthetic wake stimulus"
-                    await self.transport.play("http://127.0.0.1:8099/wake-stimulus.wav", {
-                        "codec": "wav", "airplay_latency_ms": self.config["airplay_latency_ms"],
-                        "source_factory": stimulus_source})
-                    await self.transport.wait_for_stream(stimulus.connected, timeout=12)
-                    result["warnings"].append(
-                        "The same WiiM plays the wake stimulus and acknowledgment in separate sessions. "
-                        "Wake-to-sound includes stimulus-session teardown.")
-                try:
-                    await asyncio.wait_for(self.device.wake_event.wait(), 30 if wake_stimulus is None else 5)
-                except TimeoutError:
-                    result.update(status="unavailable", error="No Hey Jarvis event received during the arm window")
-                    return
-                wake_at = self.device.wake_event_at
-                if wake_stimulus is not None:
-                    if wake_at < stimulus.started_at + .5:
-                        result.update(status="unavailable", error="Wake arrived before the scripted stimulus could play")
-                        return
-                    self.test["phase"] = "closing wake stimulus before acknowledgment"
-                    await asyncio.wait_for(self.transport.stop(), 8)
-                    await self.transport.close()
-                    self.transport = None
-                    result["wake_stimulus_teardown_ms"] = round((time.monotonic() - wake_at) * 1000, 1)
-                self.test["phase"] = "opening local microphone after wake"
-            capture_margin = 65 if self.config["route"] == "airplay" else 45
-            duration_ms = int((CONNECTION_TEST_SECONDS + 5) * 1000) if kind == "connection" else min(120000, (repetitions * 2 + capture_margin) * 1000)
-            if kind != "volume":
-                if wait_for_wake:
-                    await self.device.begin(result["id"], duration_ms, clock_synced=True)
-                else:
-                    await self.device.begin(result["id"], duration_ms)
-                result["device_session"] = dict(self.device.capture_session)
+            self.test["phase"] = "synchronizing Voice PE and starting capture"
+            await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
+            result["device_session"] = dict(self.device.capture_session)
+            self.test["phase"] = "capturing a quiet baseline"
             if kind == "connection":
-                self.test["phase"] = "checking microphone connection — no speaker playback"
                 await asyncio.sleep(CONNECTION_TEST_SECONDS)
                 await self.device.end()
-                if not self.device.frames:
-                    raise ValueError("No microphone frames received")
-                if self.device.errors:
-                    raise ValueError("; ".join(dict.fromkeys(self.device.errors)))
+                self.device.recording()
                 result.update(status="passed", metric="microphone_connection")
                 return
-            if not wait_for_wake:
-                await asyncio.sleep(.4)
-            if self.config["route"] == "http":
-                self.transport = NativeHTTPTransport(device_url="https://" + self.config["wiim_host"],
-                                                     verify_ssl=self.config["verify_tls"])
-            elif self.config["route"] == "airplay":
-                self.transport = AirPlayTransport.for_wiim(
-                    self.config["wiim_host"], self.config["verify_tls"],
-                    discovery_cache=self.airplay_discovery_cache)
-            else:
-                if not self.slim:
-                    raise ValueError(self.slim_error or "SlimProto server is not ready")
-                self.transport = self.slim
-            direct_pcm = kind in ("startup_pcm", "startup_ack")
-            self.stream = Stream(kind, repetitions, lead_ms=lead_ms,
-                                 acknowledgment=self.cloud_fixture if kind == "startup_ack" else None)
-            extension = self.config["codec"]
-            if self.config["route"] == "slimproto" and extension == "wav":
-                extension = "pcm"
-            url = self.config["stream_base_url"].rstrip("/") + "/stream/" + self.stream.id + "." + extension
-            self.test["phase"] = "waiting for speaker stream"
-            source_options = {}
-            if direct_pcm:
-                from .live_audio import StartupPCMSource
-
-                async def source_factory(*_format):
-                    return StartupPCMSource(self.stream)
-
-                source_options["source_factory"] = source_factory
-            play_requested = time.monotonic()
-            if wake_at is not None:
-                result["wake_to_play_request_ms"] = round((play_requested - wake_at) * 1000, 1)
-            await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1,
-                                            "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"],
-                                            **source_options})
-            result["wire_format"] = ("pcm_s16be_raop" if direct_pcm
-                                     else "pcm_s16le" if extension == "pcm" else extension)
-            if self.config["route"] == "airplay":
-                result["requested_airplay_latency_ms"] = self.config["airplay_latency_ms"]
-            if self.config["route"] == "airplay":
-                await self.transport.wait_for_stream(self.stream.connected, timeout=12)
-            else:
-                try:
-                    await asyncio.wait_for(self.stream.connected.wait(), timeout=12)
-                except asyncio.TimeoutError as exc:
-                    raise ValueError("Speaker did not request the test stream within 12 seconds") from exc
-            if kind == "volume":
-                self.test["phase"] = "checking WiiM volume during digital silence"
-                await asyncio.wait_for(self.stream.done.wait(), timeout=20)
-                self.transport.check_failure()
-                result.update(status="passed", metric="airplay_volume_guard")
-                return
-            self.test["phase"] = "playing acoustic probes — remain quiet"
-            playback_delay_limit = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
-            if direct_pcm:
-                playback_delay_limit = 4
+            signal_pcm, probes = bench_signal(kind, repetitions)
+            pcm = await asyncio.to_thread(stereo_pcm, signal_pcm)
+            await asyncio.sleep(.5)
+            player = JackPlayback(self.device, result["id"])
+            self.device.playback = player
+            self.test["phase"] = "playing through the Voice PE jack"
+            requested_at = time.monotonic()
+            sender = asyncio.create_task(player.send(pcm))
             if kind == "stop":
-                await asyncio.sleep(5)
-                self.test["phase"] = "stopping playback"
-                if self.stream.done.is_set():
-                    raise ValueError("Stream ended before stop; no valid stop measurement is possible")
-                # A real stop is issued while the network stream remains open.
-                result["stop_command_at"] = time.monotonic()
-                self.stream.expected_disconnect = True
-                await self.transport.stop()
-                await asyncio.sleep(5)
+                done, _ = await asyncio.wait({sender}, timeout=2)
+                if done:
+                    sender.result()
+                    raise RuntimeError("Playback ended before the stop check")
+                sender.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sender
+                stop_at = time.monotonic()
+                await player.stop()
             else:
-                await asyncio.wait_for(self.stream.done.wait(), timeout=repetitions * 2 + 20)
-                self.test["phase"] = f"listening for delayed speaker playback (up to {playback_delay_limit:g} seconds)"
-                await asyncio.sleep(playback_delay_limit)
-            self.test["phase"] = "analysing microphone capture"
+                await sender
+            self.test["phase"] = "capturing the playback tail"
+            await asyncio.sleep(.9)
             await self.device.end()
-            pcm, capture_start = self.device.recording()
-            if self.config["route"] == "airplay":
-                self.transport.check_failure()
-            result["capture"] = self.device.capture_diagnostics()
+            captured, capture_start = self.device.recording()
+            self.test["phase"] = "analyzing acoustic evidence"
+            offset_ms = self.device.clock_offset_ms
             if kind == "stop":
-                detection = await asyncio.to_thread(detect_stop, pcm, capture_start, result["stop_command_at"])
-                result["trials"].append({"trial": 1, **detection,
-                    "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 32, 2)})
-                result["metric"] = "stop_to_acoustic_silence"
+                detection = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
+                result.update(metric="stop_to_acoustic_silence", trials=[{"trial": 1, **detection}])
             else:
-                result["metric"] = "stream_marker_to_acoustic_onset"
-            markers = list(enumerate(self.stream.markers))
-            if kind == "startup_ack":
-                markers.reverse()
-            for i, (emitted, probe) in markers:
-                # Each marker gets its own bounded search window, avoiding pairing
-                # unrelated microphone bursts with a different output trial.
-                search_start = max(0, int((emitted - capture_start - .1) * RATE))
-                search_end = min(len(pcm), int((emitted - capture_start + playback_delay_limit + len(probe) / RATE) * RATE))
-                if kind == "startup_ack" and i == 0 and result["trials"]:
-                    later_delay = result["trials"][0]["latency_ms"]
-                    if later_delay is not None:
-                        # Locate the first word independently in a physically
-                        # plausible interval anchored to the second word.
-                        predicted = (emitted - capture_start + later_delay / 1000) * RATE
-                        search_start = max(search_start, int(predicted - .12 * RATE))
-                        search_end = min(search_end, int(predicted + .12 * RATE) + len(probe))
-                detection = await asyncio.to_thread(detect_probe, pcm[search_start:search_end], probe)
-                trial = {"trial": i + 1, **detection, "latency_ms": None,
-                         "search_duration_seconds": round(max(0, search_end - search_start) / RATE, 3),
-                         "clock_uncertainty_ms": round(self.device.clock_rtt_ms / 2 + 4, 2)}
-                if kind == "startup_ack":
-                    trial["clip_slot"] = ("first_word", "second_word")[i]
-                if detection["status"] == "detected":
-                    audible = capture_start + search_start / RATE + detection["offset_seconds"]
-                    latency = (audible - emitted) * 1000
-                    if latency < 0 or (
-                        getattr(self.stream, "marker_timing", None) != "block_handoff_monotonic"
-                        and self.stream.schedule_lag_ms > 50
-                    ):
-                        trial.update(status="unavailable", reason="Clock or stream scheduling uncertainty prevents a reliable measurement")
+                result["metric"] = "speaker_acceptance_to_acoustic_onset"
+                for index, (offset, probe) in enumerate(probes.items()):
+                    accepted = player.accepted_at(offset * 3, offset_ms)
+                    trial = {"trial": index + 1, "status": "unavailable", "latency_ms": None}
+                    if accepted is not None:
+                        lo = max(0, int((accepted - capture_start - .15) * RATE))
+                        hi = max(lo, int((accepted - capture_start + .75) * RATE) + len(probe))
+                        match = await asyncio.to_thread(detect_probe, captured[lo:hi], probe)
+                        trial.update(match)
+                        if match["status"] == "detected":
+                            audible = capture_start + lo / RATE + match["offset_seconds"]
+                            latency = (audible - accepted) * 1000
+                            if latency >= 0:
+                                trial["latency_ms"] = round(latency, 1)
+                                if index == 0:
+                                    trial["cold_startup_ms"] = round((audible - requested_at) * 1000, 1)
+                            else:
+                                trial.update(status="unavailable", reason="Acoustic onset predates the estimated device timestamp")
                     else:
-                        trial["latency_ms"] = round(latency, 1)
-                        if i == 0:
-                            trial["cold_startup_ms"] = round((audible - play_requested) * 1000, 1)
-                            if wake_at is not None:
-                                trial["wake_to_audible_ms"] = round((audible - wake_at) * 1000, 1)
-                            trial["probe_lead_ms"] = lead_ms
-                        trial["detected_after_stop"] = kind == "stop" and audible > result.get("stop_command_at", float("inf"))
-                result["trials"].append(trial)
-            result["summary"] = summarize(result["trials"])
-            if kind == "startup_ack":
-                result["trials"].sort(key=lambda trial: trial["trial"])
-                delays = [trial["latency_ms"] for trial in result["trials"] if trial["latency_ms"] is not None]
-                result["acknowledgment_match"] = ("both_word_windows_agree" if len(delays) == 2
-                                                   and abs(delays[0] - delays[1]) <= 40 else "unavailable")
-                if result["acknowledgment_match"] == "unavailable" and result["trials"]:
-                    result["trials"][0].pop("cold_startup_ms", None)
-                    result["trials"][0].pop("wake_to_audible_ms", None)
-            if kind in ("stability", "echo") and result["summary"]["median_ms"] is not None:
-                result["stability"] = await asyncio.to_thread(detect_stability, pcm, capture_start,
-                    self.stream.started_at, self.stream.duration, result["summary"]["median_ms"], self.stream.markers)
-            result["stream"] = {"bytes_sent": self.stream.bytes_sent,
-                                "max_schedule_lag_ms": round(self.stream.schedule_lag_ms, 2),
-                                "marker_timing": getattr(self.stream, "marker_timing", None),
-                                "marker_schedule_lag_ms": [round(lag, 2) for lag in
-                                    getattr(self.stream, "marker_schedule_lag_ms", [])]}
-            if self.stream.error:
-                raise ValueError(self.stream.error)
-            complete = bool(result["summary"]["valid_trials"])
-            if kind == "startup_ack":
-                complete = result["acknowledgment_match"] == "both_word_windows_agree"
+                        trial["reason"] = "Speaker did not confirm the probe frames"
+                    result["trials"].append(trial)
+            summary = summarize(result["trials"])
             if kind in ("stability", "echo"):
-                complete = complete and result.get("stability", {}).get("status") == "measured"
-            if kind == "echo":
-                from .echo_bench import SCOPE, measure_echo_reduction
+                accepted_start = player.accepted_at(0, offset_ms)
+                if summary["median_ms"] is not None and accepted_start is not None:
+                    markers = [(accepted_start + offset / RATE, probe) for offset, probe in probes.items()]
+                    result["stability"] = await asyncio.to_thread(
+                        detect_stability, captured, capture_start, accepted_start,
+                        len(signal_pcm) / RATE, summary["median_ms"], markers)
+                    if (kind == "echo" and result["stability"]["status"] == "measured"
+                            and player.frames_rendered == player.frames_sent):
+                        from .echo_bench import measure_echo_reduction
+                        from .live_bench import render_reference
 
-                offsets = [trial["latency_ms"] + lag for trial, lag in
-                           zip(result["trials"], self.stream.marker_schedule_lag_ms)
-                           if trial["latency_ms"] is not None]
-                if (complete and len(offsets) >= 2 and max(offsets) - min(offsets) <= 40
-                        and not result["stability"]["dropout_count"]
-                        and self.stream.schedule_lag_ms <= 50):
-                    result["echo"] = await asyncio.to_thread(measure_echo_reduction,
-                        pcm, capture_start, self.stream.reference_pcm, self.stream.started_at,
-                        float(np.median(offsets)))
-                else:
-                    result["echo"] = {"status": "unavailable", "scope": SCOPE,
-                                      "reason": "Need a continuous pilot and two consistent delay estimates"}
-                complete = result["echo"]["status"] == "measured"
-            result["status"] = "measured" if complete else "unavailable"
-            if result["status"] == "unavailable" and kind == "startup_ack":
-                result["warnings"].append("The two acknowledgment words did not both match at a consistent delay.")
-            elif result["status"] == "unavailable" and kind != "echo":
-                if kind == "stability" and result["summary"]["valid_trials"]:
-                    result["warnings"].append("Playback onset was measured, but continuity could not be established. Do not interpret unavailable stability as zero dropouts.")
-                else:
-                    result["warnings"].append(f"Test completed, but no reliable acoustic latency was measured. Check microphone health; playback delayed beyond the {playback_delay_limit:g}-second search limit also cannot be measured.")
+                        reference = await asyncio.to_thread(render_reference, pcm)
+                        result["echo"] = await asyncio.to_thread(
+                            measure_echo_reduction, captured, capture_start, reference,
+                            accepted_start, summary["median_ms"])
+                outcome = result.get("echo" if kind == "echo" else "stability", {})
+                result["status"] = "measured" if outcome.get("status") == "measured" else "unavailable"
+            else:
+                result["status"] = "measured" if summary["valid_trials"] else "unavailable"
+            result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
         except asyncio.CancelledError:
-            interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation", "phase": self.test.get("phase")})
-            result["interruption"] = {**interruption, "elapsed_seconds": round(time.monotonic() - started, 3)}
-            result["status"] = "cancelled" if interruption["reason"] == "user_stop" else "failed"
-            if result["status"] == "failed":
-                messages = {"device_disconnected": "Voice PE connection lost during the test",
-                            "device_muted": "Voice PE reported mute during the test",
-                            "app_shutdown": "App shut down during the test"}
-                result["error"] = messages.get(interruption["reason"], "Test task was unexpectedly interrupted")
+            interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation"})
+            result.update(interruption=interruption,
+                          status="cancelled" if interruption["reason"] == "user_stop" else "failed")
             raise
-        except Exception as exc:
-            result["status"] = "failed"
-            result["error"] = str(exc) or type(exc).__name__
-            result["exception_type"] = type(exc).__name__
+        except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
+            result.update(status="failed", error=str(exc) or type(exc).__name__)
         finally:
-            # A late disconnect must not cancel the cleanup that stops playback
-            # and clears the microphone recording after an earlier failure.
             self.test["finishing"] = True
-            result["device_session"] = dict(self.device.capture_session)
-            result["capture_at_end"] = self.device.capture_diagnostics()
-            result["elapsed_seconds"] = round(time.monotonic() - started, 3)
-            result["ended_phase"] = result.get("interruption", {}).get("phase", self.test.get("phase"))
-            if self.stream:
-                result["stream"] = {**result.get("stream", {}), "bytes_sent": self.stream.bytes_sent,
-                                    "max_schedule_lag_ms": round(self.stream.schedule_lag_ms, 2),
-                                    "connected": self.stream.connected.is_set(), "finished": self.stream.done.is_set(),
-                                    "error": self.stream.error}
-            if self.transport:
-                result["transport"] = self.transport.snapshot()
-                if self.config["route"] == "airplay":
-                    result["transport"]["pending_stage"] = self.transport.pending_stage()
-                try:
-                    await asyncio.wait_for(self.transport.stop(), timeout=8)
-                except Exception as exc:
-                    result["warnings"].append("Player stop could not be confirmed: " + str(exc))
-                if self.config["route"] == "airplay":
+            try:
+                if sender is not None:
+                    if not sender.done():
+                        sender.cancel()
+                    await asyncio.gather(sender, return_exceptions=True)
+                if player is not None:
                     try:
-                        result["transport"]["receiver_after"] = await asyncio.wait_for(self.transport.receiver_output_state(), timeout=3)
-                    except Exception as exc:
-                        result["warnings"].append("WiiM output-state readback unavailable: " + (str(exc) or type(exc).__name__))
-                    if kind == "volume" and result["status"] == "passed":
-                        levels = {event["event"]: event["volume_percent"]
-                                  for event in result["transport"]["events"]
-                                  if event["event"] in ("receiver_before_play", "receiver_before_pcm")}
-                        after = result["transport"].get("receiver_after")
-                        if (len(levels) != 2 or not after or after["muted"]
-                                or any(level != after["volume_percent"] for level in levels.values())):
-                            result.update(status="unavailable",
-                                          error="WiiM volume was not verified stable across the silent switch")
-                if self.transport is not self.slim:
-                    with suppress(Exception):
-                        await self.transport.close()
-                if self.config["route"] == "airplay":
-                    result["transport"]["sender"] = self.transport.snapshot().get("sender")
-                self.transport = None
-            if self.stream:
-                self.stream.stop_requested.set()
-            with suppress(Exception):
-                await self.device.end()
-            result["capture"] = self.device.capture_diagnostics()
-            self.observe_firmware()
-            if result["status"] == "failed":
-                partial = await self.partial_playback_evidence(kind)
-                if partial is not None:
-                    result["partial_playback_evidence"] = partial
-            self.device.frames.clear()
-            result["summary"] = summarize(result["trials"])
-            self.test = {"running": False, "phase": "idle"}
-            self.stream = None
+                        await player.stop()
+                    except (RuntimeError, OSError, TimeoutError):
+                        result["warnings"].append("Voice PE did not confirm the playback stop")
+                    result["playback"] = player.snapshot()
+                with suppress(RuntimeError, OSError, TimeoutError):
+                    await self.device.end()
+                result["capture"] = self.device.capture_diagnostics()
+                result["device_session"] = dict(self.device.capture_session)
+                self.observe_firmware()
+                result["summary"] = summarize(result["trials"])
+                result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            finally:
+                self.device.playback = None
+                self.device.frames.clear()
+                self.test = {"running": False, "phase": "idle"}
 
 
 @web.middleware
@@ -667,8 +345,8 @@ def create_ui(bench):
                 raise ValueError("Only local API key entry is supported")
             bench.cloud_settings.set_key(data["api_key"])
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
-                                  "benchmark_available": True,
-                                  "reason": "Paid voice benchmarks require explicit Start; conversational assistant remains disabled"})
+                                  "benchmark_available": False,
+                                  "reason": "Cloud playback trials are gated on wired bench verification"})
     async def cloud_fixture(request):
         if bench.test["running"]:
             raise web.HTTPConflict(text="Wait for the current test before replacing its fixture")
@@ -690,41 +368,8 @@ def create_ui(bench):
         except Exception as exc:
             return web.json_response({"native_aec3_usable": False, "reason": type(exc).__name__})
     async def cloud_start(request):
-        data = await request.json()
-        if bench.test["running"]:
-            raise web.HTTPConflict(text="A test is already running")
-        transport = data.get("transport", "webrtc")
-        if transport not in ("webrtc", "websocket"):
-            raise ValueError("Choose webrtc or websocket")
-        if not bench.cloud_settings.api_key or bench.cloud_settings.pending or not bench.cloud_fixture:
-            raise ValueError("A local API key, loaded synthetic fixture and confirmed prior finalization are required")
-        if bench.cloud_settings.spent_usd + .05 > bench.cloud_settings.budget_usd:
-            raise ValueError("This attempt would exceed the remaining US$5 API-test budget")
-        if bench.config["route"] != "airplay" or not bench.device.snapshot()["connected"] or bench.device.info.get("muted"):
-            raise ValueError("Select AirPlay and connect/unmute Voice PE before the cloud benchmark")
-        if data.get("comfortable_volume_confirmed") is not True:
-            raise ValueError("Confirm a comfortable amplifier volume before starting")
-        microphone_input = data.get("microphone_input", False)
-        if type(microphone_input) is not bool:
-            raise ValueError("Microphone input selection must be true or false")
-        if microphone_input and data.get("microphone_upload_confirmed") is not True:
-            raise ValueError("Confirm the bounded room microphone upload before starting")
-        followup = None
-        if "followup_b64" in data:
-            if microphone_input:
-                raise ValueError("The follow-up benchmark uses synthetic input only")
-            try:
-                followup = base64.b64decode(data["followup_b64"], validate=True)
-            except (ValueError, TypeError):
-                raise ValueError("Supply a base64 PCM16LE follow-up fixture") from None
-            if len(followup) % 2 or not RATE <= len(followup) <= 10 * RATE:
-                raise ValueError("The follow-up must contain 0.5 to 5 seconds of mono 16 kHz PCM")
-        from .live_bench import run_cloud_benchmark
-        ident = uuid.uuid4().hex
-        bench.test = {"running": True, "id": ident, "phase": "preparing paid voice benchmark"}
-        bench.task = asyncio.create_task(run_cloud_benchmark(
-            bench, transport, bench.cloud_fixture, microphone_input=microphone_input, followup=followup))
-        return web.json_response({"test_id": ident, "transport": transport, "api_budget_usd": 5}, status=202)
+        raise web.HTTPServiceUnavailable(text="Paid trials will resume after wired playback is verified")
+
     async def config(request):
         if request.method == "PUT":
             if bench.test["running"]:
@@ -732,76 +377,40 @@ def create_ui(bench):
             new = validate_config({**bench.config, **await request.json()})
             if new["device_token"] != bench.config["device_token"] and bench.device.ws:
                 await bench.device.ws.close(code=1008, message=b"Pairing changed")
-            if new["wiim_host"] != bench.config["wiim_host"]:
-                for result in bench.results:
-                    if result.get("kind") in ("echo", "startup_ack"):
-                        result["calibration_stale"] = True
             bench.config = new
             bench.save()
-            await bench.init_slim()
         return web.json_response(bench.config)
     async def start(request):
         data = await request.json()
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
-        if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
-            raise ValueError("Confirm a comfortable amplifier volume before starting")
-        kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "startup", "startup_pcm", "startup_ack", "mic_preflight", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
-            raise ValueError("Invalid test type or repetition count")
-        if kind in ("startup", "startup_pcm", "startup_ack") and (bench.config["route"] != "airplay" or repetitions != 2):
-            raise ValueError("Startup check requires AirPlay and two probes")
-        if kind == "startup_ack" and len(bench.cloud_fixture) != 3 * RATE:
-            raise ValueError("Load a 1.5 second acknowledgment with one word per 750 ms slot")
-        if kind == "mic_preflight" and (bench.config["route"] != "airplay" or not bench.cloud_fixture):
-            raise ValueError("Select AirPlay and load a synthetic question for the local microphone check")
-        if kind == "volume" and (bench.config["route"] != "airplay" or repetitions != 1):
-            raise ValueError("Silent volume check requires AirPlay and one repetition")
-        if kind != "volume" and (not bench.device.snapshot()["connected"] or bench.device.info.get("muted")):
-            raise ValueError("Pair and unmute Voice PE first")
-        if kind != "connection" and (not bench.config["wiim_host"] or not bench.config["stream_base_url"]):
-            raise ValueError("Save the WiiM and speaker-reachable stream addresses first")
-        if kind != "connection" and bench.config["codec"] == "flac" and not shutil.which("ffmpeg"):
-            raise ValueError("FLAC requires ffmpeg; it is included in the HA App image")
-        lead_ms = data.get("lead_ms", 100)
-        if type(lead_ms) is not int or lead_ms not in (100, 200, 300, 500):
-            raise ValueError("Probe lead must be 100, 200, 300 or 500 ms")
-        if lead_ms != 100 and kind not in ("startup_pcm", "startup_ack"):
-            raise ValueError("A custom probe lead requires prepared PCM startup")
-        wait_for_wake = data.get("wait_for_wake", False)
-        if type(wait_for_wake) is not bool or (wait_for_wake and kind != "startup_ack"):
-            raise ValueError("Wake arming is only available for the acknowledgment check")
-        wake_stimulus = None
-        if "wake_stimulus_b64" in data:
-            if not wait_for_wake:
-                raise ValueError("A wake stimulus requires the armed acknowledgment check")
-            try:
-                wake_stimulus = base64.b64decode(data["wake_stimulus_b64"], validate=True)
-            except (ValueError, TypeError):
-                raise ValueError("Supply base64 PCM16LE for the local wake stimulus") from None
-            if len(wake_stimulus) != 3 * RATE:
-                raise ValueError("The local wake stimulus must be 1.5 seconds at 16 kHz mono")
+        kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
+        if kind not in ("latency", "stop", "stability", "echo", "connection"):
+            raise ValueError("Unsupported local test")
+        if type(repetitions) is not int or not 1 <= repetitions <= 20:
+            raise ValueError("Choose 1 to 20 repetitions")
+        device = bench.device.snapshot()
+        if not device["connected"] or device.get("muted") or device.get("raw_ready") is not True:
+            raise ValueError("Pair and unmute the Voice PE with verified raw microphone capture")
+        if kind != "connection":
+            if data.get("comfortable_volume_confirmed") is not True:
+                raise ValueError("Confirm comfortable speaker volume before starting")
+            if device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True:
+                raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        if kind == "mic_preflight":
-            from .live_bench import run_cloud_benchmark
-
-            bench.task = asyncio.create_task(run_cloud_benchmark(
-                bench, "", bench.cloud_fixture, local_preflight=True))
-        else:
-            bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms,
-                                                     wait_for_wake=wait_for_wake, wake_stimulus=wake_stimulus))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions))
         return web.json_response({"test_id": ident}, status=202)
+
     async def cancel(request):
         asyncio.create_task(bench.cancel())
         return web.json_response({"stop_requested": True}, status=202)
     async def results(request): return web.json_response({"results": bench.results})
     async def diagnostics(request):
-        config = {k: v for k, v in bench.config.items() if k not in ("device_token", "wiim_host", "stream_base_url", "slimproto_player_id")}
+        config = {k: v for k, v in bench.config.items() if k not in ("device_token", "ha_lan_url")}
         status = bench.status()
         status.pop("config")
         status["device"] = {k:v for k,v in status["device"].items() if k not in ("device_id", "ip", "mac")}
-        status["transports"]["slimproto"]["clients"] = []
         body = {"version": __version__, "config": config, "status": status,
                 "results": bench.results, "firmware_observations": list(bench.firmware_observations),
                 "audio_retained": False, "cloud_calls": bench.cloud_settings.attempt_count,
@@ -816,12 +425,12 @@ def create_ui(bench):
         # Exception strings can contain URLs, therefore redact all configured
         # secrets/addresses recursively from the export as a final boundary.
         content = json.dumps(redact_identifiers(body), indent=2)
-        for key in ("device_token", "wiim_host", "stream_base_url", "slimproto_player_id"):
+        for key in ("device_token", "ha_lan_url"):
             if bench.config.get(key): content = content.replace(bench.config[key], "[redacted]")
         return web.Response(text=content, content_type="application/json", headers={"Content-Disposition": 'attachment; filename="jarvis-diagnostics.json"'})
     async def firmware(request):
-        if not bench.config["stream_base_url"]:
-            raise ValueError("Save the HA LAN stream URL before downloading ESPHome setup")
+        if not bench.config["ha_lan_url"]:
+            raise ValueError("Save the HA LAN URL before downloading ESPHome setup")
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             # A one-time local entry fetches versioned source from GitHub on
@@ -829,7 +438,7 @@ def create_ui(bench):
             archive.write(ROOT / "firmware/voice-pe-repository.yaml", "voice-pe-repository.yaml")
             archive.writestr("SETUP.txt", "Copy voice-pe-repository.yaml into ESPHome Builder. Merge jarvis-secrets-to-merge.yaml into existing secrets.yaml without replacing other values. Keep Wi-Fi secrets local. Validate and install when you choose. Later builds fetch the public GitHub firmware package/components (5-minute cache); no new bundle is required for routine updates. App updates are separate through Home Assistant Apps.\n")
             values = {"jarvis_pairing_token": bench.config["device_token"],
-                      "jarvis_server_url": "ws://" + (urlparse(bench.config["stream_base_url"]).netloc or "YOUR_HA_IP:8099") + "/device",
+                      "jarvis_server_url": "ws://" + (urlparse(bench.config["ha_lan_url"]).netloc or "YOUR_HA_IP:8099") + "/device",
                       **bench.firmware_secrets}
             archive.writestr("jarvis-secrets-to-merge.yaml", "# Merge into Builder secrets.yaml; preserve your Wi-Fi and other device secrets.\n# These local credentials persist across App updates and repeated downloads.\n" + "".join(key + ": " + json.dumps(value) + "\n" for key,value in values.items()))
         return web.Response(body=buffer.getvalue(), content_type="application/zip", headers={"Content-Disposition": 'attachment; filename="jarvis-esphome-setup.zip"'})
@@ -869,7 +478,8 @@ def create_audio(bench):
                 return ws
             bench.device.ws = ws
             accepted = True
-            bench.device.info = {k:message[k] for k in ("device_id", "sample_rate", "muted", "firmware", "xmos_version") if k in message}
+            bench.device.info = {k: message[k] for k in ("device_id", "sample_rate", "muted", "raw_ready",
+                                "firmware", "xmos_version", "playback_protocol", "jack_plugged") if k in message}
             bench.device.receive_json(message)
             bench.observe_firmware()
             await ws.send_json({"type": "hello_ok", "protocol": 1})
@@ -881,6 +491,8 @@ def create_audio(bench):
                     bench.observe_firmware()
                     if bench.device.info.get("muted") and bench.test["running"]:
                         asyncio.create_task(bench.cancel("device_muted"))
+                    elif bench.device.playback and bench.device.info.get("jack_plugged") is False:
+                        asyncio.create_task(bench.cancel("jack_unplugged"))
         except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:
             disconnect_details = {"protocol_error": str(exc), "exception_type": type(exc).__name__, "server_close_code": 1008}
             await ws.close(code=1008, message=b"Invalid device protocol")
@@ -893,59 +505,7 @@ def create_audio(bench):
                 bench.device.info = {}
                 await bench.cancel("device_disconnected", disconnect_details)
         return ws
-    async def stream(request):
-        active = bench.stream
-        raw_pcm = bench.config["route"] == "slimproto" and bench.config["codec"] == "wav"
-        extension = "pcm" if raw_pcm else bench.config["codec"]
-        if not active or request.match_info["name"] != active.id + "." + extension or active.stop_requested.is_set():
-            raise web.HTTPNotFound()
-        content_type = "audio/wav" if bench.config["codec"] == "wav" else "audio/flac"
-        if raw_pcm:
-            content_type = f"audio/pcm;rate={RATE};bitrate=16;channels=1"
-        headers = {"Content-Type": content_type, "Cache-Control": "no-store"}
-        finite_wav = bench.config["route"] == "airplay" and bench.config["codec"] == "wav"
-        data_bytes = int(active.duration * RATE) * 2
-        if finite_wav:
-            headers["Content-Length"] = str(44 + data_bytes)
-        if request.method == "HEAD":
-            return web.Response(headers=headers)
-        if active.consumed:
-            raise web.HTTPGone(text="A measurement stream cannot be replayed")
-        active.consumed = True
-        response = web.StreamResponse(headers=headers)
-        await response.prepare(request)
-        process = None
-        encoder_task = None
-        try:
-            if bench.config["codec"] == "wav":
-                if not raw_pcm:
-                    await response.write(wav_header(data_bytes=data_bytes if finite_wav else None))
-                async for chunk in active.blocks(): await response.write(chunk)
-            else:
-                process = await asyncio.create_subprocess_exec("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "pipe:0", "-c:a", "flac", "-compression_level", "0", "-flush_packets", "1", "-f", "flac", "pipe:1", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                async def encode():
-                    async for chunk in active.blocks():
-                        process.stdin.write(chunk)
-                        await process.stdin.drain()
-                    process.stdin.close()
-                encoder_task = asyncio.create_task(encode())
-                while chunk := await process.stdout.read(4096): await response.write(chunk)
-                await encoder_task
-                if await process.wait() != 0:
-                    raise ValueError("FLAC encoder failed")
-        except (ConnectionError, ValueError) as exc:
-            if not active.stop_requested.is_set() and not active.expected_disconnect: active.error = str(exc)
-        finally:
-            if encoder_task and not encoder_task.done():
-                encoder_task.cancel()
-                with suppress(asyncio.CancelledError): await encoder_task
-            if process and process.returncode is None:
-                process.kill()
-                await process.wait()
-            active.done.set()
-        return response
     app.router.add_get("/device", device)
-    app.router.add_get("/stream/{name}", stream)
     return app
 
 
@@ -961,28 +521,10 @@ async def serve():
     await audio_runner.setup()
     await web.TCPSite(ui_runner, os.environ.get("JARVIS_UI_HOST", "0.0.0.0"), 8098).start()
     await web.TCPSite(audio_runner, "0.0.0.0", 8099).start()
-    await bench.init_slim()
-
-    async def warm_airplay():
-        from .transports import AirPlayTransport
-
-        while True:
-            host = bench.config["wiim_host"]
-            if host and bench.config["route"] == "airplay" and not bench.test["running"]:
-                transport = AirPlayTransport(host, discovery_cache=bench.airplay_discovery_cache)
-                with suppress(Exception):
-                    await asyncio.wait_for(transport.prepare_discovery(), timeout=8)
-            await asyncio.sleep(60)
-
-    discovery = asyncio.create_task(warm_airplay())
     try:
         await shutdown.wait()
     finally:
-        discovery.cancel()
-        with suppress(asyncio.CancelledError):
-            await discovery
         await bench.cancel("app_shutdown")
-        if bench.slim: await bench.slim.close()
         if bench.device.ws is not None: await bench.device.ws.close()
         await audio_runner.cleanup()
         await ui_runner.cleanup()

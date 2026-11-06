@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/microphone/microphone_source.h"
+#include "esphome/components/speaker/speaker.h"
 #include "esphome/components/json/json_util.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
@@ -23,6 +24,8 @@ struct FaultLock {
 class JarvisStream : public Component, public i2c::I2CDevice {
  public:
   void set_microphone(microphone::MicrophoneSource *mic) { mic_ = mic; }
+  void set_speaker(speaker::Speaker *speaker) { speaker_ = speaker; }
+  void set_jack_plugged(bool plugged) { jack_plugged_ = plugged; }
   void set_server_url(const std::string &value) { server_url_ = value; }
   void set_device_id(const std::string &value) { device_id_ = value; }
   void set_token(const std::string &value) { token_ = value; }
@@ -39,6 +42,11 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   struct AudioPacket { uint32_t generation; uint32_t enqueued_ms; uint16_t samples; uint8_t wire[HEADER_BYTES + MAX_SAMPLES * 2]; };
   struct Outgoing { uint32_t epoch; uint32_t capture_generation; uint16_t length; bool refresh_diagnostics; char text[3072]; };
   struct Control { uint32_t epoch; uint8_t kind; char text[768]; };
+  struct PlaybackPacket {
+    uint32_t epoch;
+    PlaybackHeader header;
+    uint8_t pcm[MAX_PLAYBACK_FRAMES * PLAYBACK_FRAME_BYTES];
+  };
   static void network_worker(void *arg);
   void network_worker_();
   bool initialize_client_();
@@ -49,6 +57,9 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void command_(const char *text);
   bool send_json_(const std::string &text, bool capture_start = false, bool refresh_diagnostics = false);
   void stop_capture_(const char *reason);
+  void playback_command_(const std::string &type, JsonObject root);
+  void playback_loop_(uint32_t now);
+  void stop_playback_(const char *reason, bool drained = false);
   bool verify_hardware_();
   void send_state_();
   void record_fault_(FaultReason reason, const esp_websocket_event_data_t *data = nullptr);
@@ -57,13 +68,27 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void diagnostics_json_(JsonObject out);
   static uint32_t now_ms_();
   microphone::MicrophoneSource *mic_{nullptr};
+  speaker::Speaker *speaker_{nullptr};
   esp_websocket_client_handle_t client_{nullptr};
   QueueHandle_t audio_queue_{nullptr}, control_queue_{nullptr}, outgoing_queue_{nullptr};
+  QueueHandle_t playback_queue_{nullptr};
   TaskHandle_t network_worker_handle_{nullptr};
   std::string server_url_, device_id_, token_, capture_id_, incoming_;
   std::atomic<bool> active_{false}, authenticated_{false}, connected_{false}, muted_{true}, transport_fault_{false};
   std::atomic<bool> network_ready_{false}, worker_reset_{false}, shutting_down_{false};
   std::atomic<bool> intentional_stop_{false};
+  std::atomic<bool> playback_overflow_{false};
+  std::string playback_id_;
+  uint32_t playback_generation_{0}, playback_sequence_{0}, playback_activity_{0};
+  uint32_t last_play_clock_report_{0};
+  uint64_t playback_samples_{0};
+  FaultLock playback_clock_lock_;
+  uint32_t rendered_samples_{0}, rendered_end_ms_{0}, reported_samples_{0};
+  PlaybackPacket playback_packet_{};
+  uint8_t playback_i2s_[MAX_PLAYBACK_FRAMES * 8]{};
+  size_t playback_offset_{0};
+  bool playback_pending_{false}, playback_drain_{false}, playback_finishing_{false};
+  bool jack_plugged_{false}, previous_jack_{false};
   std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
   std::atomic<uint32_t> connection_generation_{0};
   FaultHistory<FaultLock> fault_history_;

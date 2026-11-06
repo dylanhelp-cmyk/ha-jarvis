@@ -1,324 +1,165 @@
-/* Local audio bench. All service URLs are relative to preserve HA ingress paths. */
 'use strict';
-const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', startup: 'AirPlay startup check', startup_pcm: 'AirPlay startup with prepared PCM', startup_ack: 'Startup acknowledgment check', mic_preflight: 'Local microphone preflight', stop: 'Stop response', stability: 'Stream stability', echo: 'Quiet-room echo test', volume: 'Silent AirPlay volume check', connection: 'Microphone connection', cloud_latency: 'Voice benchmark'};
-let status = null;
-let dirty = false;
-let configured = false;
-let kind = 'latency';
-let busy = false;
-let polling = false;
-let configLoaded = false;
 
-async function api(path, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-  try {
-    const response = await fetch(path, {cache: 'no-store', signal: controller.signal, ...options, headers: {'Content-Type': 'application/json', ...options.headers}});
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error?.message || body.error || body.message || `Request failed (${response.status}).`);
-    return body;
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('The bench took too long to respond. Check the connection and try again.');
-    throw error;
-  } finally {clearTimeout(timeout);}
+const $ = (id) => document.getElementById(id);
+const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
+  echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+let kind = 'latency';
+let state;
+let busy = false;
+
+async function api(path, method = 'GET', body) {
+  const options = {method, cache: 'no-store'};
+  if (method !== 'GET') {
+    options.headers = {'Content-Type': 'application/json'};
+    options.body = JSON.stringify(body ?? {});
+  }
+  const response = await fetch(path, options);
+  const content = response.headers.get('Content-Type') || '';
+  const payload = content.includes('application/json') ? await response.json() : await response.text();
+  if (!response.ok) throw new Error(payload.error || payload || 'Jarvis request failed');
+  return payload;
 }
-function announce(message, error = false) {
-  $('notice').textContent = String(message);
-  $('notice').classList.toggle('error', error);
-  $('notice').hidden = !message;
+
+function notice(message) {
+  $('notice').hidden = false;
+  $('notice').textContent = message;
 }
-function configValues() {
-  return {wiim_host: $('wiim-host').value.trim(), stream_base_url: $('stream-base-url').value.trim(), route: $('route').value, codec: $('codec').value, repetitions: 3, device_token: $('device-token').value.trim(), verify_tls: $('verify-tls').checked, slimproto_port: Number($('slimproto-port').value), slimproto_player_id: $('slimproto-player').value, airplay_latency_ms: Number($('airplay-latency').value)};
-}
-function updateReadiness() {
-  const running = Boolean(status?.test?.running);
-  const speakerTest = kind !== 'connection';
-  document.querySelector('.preflight').hidden = !speakerTest;
-  const readyText = !speakerTest ? 'Ready for a silent 60-second microphone test.' : kind === 'stop' ? 'Ready for one local stop trial.' : 'Ready for three local onset trials.';
-  let reason = readyText;
-  if (!status) reason = 'Waiting for the bench connection.';
-  else if (running) reason = 'Test in progress. You can stop it at any time.';
-  else if (!configLoaded) reason = 'Connection settings are unavailable. Refresh this page to retry.';
-  else if (dirty) reason = 'Save your changed connection settings first.';
-  else if (speakerTest && !configured) reason = 'Save a WiiM address and reachable stream URL first.';
-  else if (!status.device?.connected) reason = 'Connect the microphone device before testing.';
-  else if (status.device?.muted) reason = 'Unmute the microphone device before testing.';
-  else if (status.device?.raw_ready !== true) reason = 'Waiting for verified raw microphone / XMOS readiness.';
-  else if (speakerTest && !status.transports?.[$('route').value]?.available) reason = 'The selected transport is not available.';
-  else if (speakerTest && $('codec').value === 'flac' && status.codecs?.flac === false) reason = 'FLAC requires ffmpeg. Select WAV or install the supported encoder.';
-  else if (speakerTest && $('route').value === 'slimproto' && !(status.transports?.slimproto?.clients || []).some((player) => player.connected && (!$('slimproto-player').value || player.player_id === $('slimproto-player').value))) reason = 'Connect the selected WiiM player to this SlimProto service first.';
-  else if (speakerTest && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm listening volume and speaker readiness above.';
-  const ready = reason === readyText;
-  $('readiness').textContent = reason;
-  $('run-test').disabled = !ready || busy;
-  $('run-test').textContent = `Run ${labels[kind].toLowerCase()} →`;
-  $('run-test').hidden = running;
+
+function readiness() {
+  const device = state?.device;
+  const running = Boolean(state?.test.running);
+  const speaker = kind !== 'connection';
+  let reason = '';
+  if (!device?.connected) reason = 'Connect the paired Voice PE.';
+  else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
+  else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
+  else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
+  $('readiness').textContent = running ? state.test.phase : reason || 'Ready for a local test.';
+  $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
+  $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
   $('cancel-test').disabled = busy;
-  $('save-config').disabled = busy || running || !configLoaded;
-  document.querySelectorAll('#config-form input, #config-form select').forEach((el) => {el.disabled = running || busy;});
-  const route = $('route').value;
-  $('codec').querySelector('[value="wav"]').textContent = route === 'slimproto' ? 'PCM (uncompressed)' : 'WAV';
-  $('transport-help').textContent = route === 'slimproto' ? 'Requires an available SlimProto service and connected player. Expand advanced transport settings for pairing.' : route === 'airplay' ? 'AirPlay is a baseline transport; receiver capability and credentials must be validated first.' : 'HTTP streams a local test signal to the WiiM.';
-  $('tls-warning').hidden = $('verify-tls').checked;
-  try {$('lms-host').textContent = new URL($('stream-base-url').value).hostname;} catch {$('lms-host').textContent = 'the HA address in your stream URL';}
+  $('save-config').disabled = running || busy;
 }
-function renderStatus(data) {
-  status = data;
-  $('connection-dot').className = 'dot online';
-  $('connection-label').textContent = 'Bench connected';
-  const device = data.device || {};
-  $('device-status').textContent = device.connected ? (device.muted ? 'Connected · muted' : (data.test?.running ? 'Connected · capturing' : device.raw_ready ? 'Ready · microphone idle' : 'Connected · awaiting raw audio')) : 'Awaiting microphone';
-  $('device-detail').textContent = device.connected ? [device.device_id, device.sample_rate ? `${device.sample_rate.toLocaleString()} Hz` : '', device.firmware ? `FW ${device.firmware}` : ''].filter(Boolean).join(' · ') : 'Flash firmware and pair your device';
-  const route = data.config?.route || 'http';
-  $('route-status').textContent = route === 'slimproto' ? 'SlimProto' : route === 'airplay' ? 'AirPlay baseline' : 'Native HTTP';
-  const codecLabel = route === 'slimproto' && data.config?.codec === 'wav' ? 'PCM' : String(data.config?.codec || 'wav').toUpperCase();
-  $('route-detail').textContent = `${codecLabel} · ${data.transports?.[route]?.available ? 'Available' : 'Unavailable'}`;
-  $('test-status').textContent = data.test?.running ? 'Test in progress' : 'Standby';
-  $('test-detail').textContent = data.test?.running ? (data.test.phase || 'Preparing signal') : 'No test starts automatically';
-  $('version').textContent = `v${data.version || '—'} · Local audio milestone`;
-  const slimOption = $('route').querySelector('[value="slimproto"]');
-  slimOption.textContent = data.transports?.slimproto?.available ? 'SlimProto' : 'SlimProto (unavailable)';
-  slimOption.disabled = !data.transports?.slimproto?.available;
-  const airplayOption = $('route').querySelector('[value="airplay"]');
-  airplayOption.disabled = !data.transports?.airplay?.available;
-  airplayOption.textContent = airplayOption.disabled ? 'AirPlay (unavailable)' : 'AirPlay baseline';
-  const slim = data.transports?.slimproto || {};
-  const clients = Array.isArray(slim.clients) ? slim.clients : [];
-  const selectedPlayer = $('slimproto-player').value;
-  const playerOptions = [node('option', '', 'Automatic player')];
-  playerOptions[0].value = '';
-  clients.forEach((player) => {
-    const option = node('option', '', `${player.name || player.player_id}${player.connected ? '' : ' (offline)'}`);
-    option.value = player.player_id;
-    playerOptions.push(option);
-  });
-  if (selectedPlayer && !clients.some((player) => player.player_id === selectedPlayer)) {
-    const option = node('option', '', `${selectedPlayer} (not connected)`); option.value = selectedPlayer; playerOptions.push(option);
-  }
-  $('slimproto-player').replaceChildren(...playerOptions);
-  $('slimproto-player').value = selectedPlayer;
-  $('slimproto-status').textContent = slim.available ? `SlimProto service available · ${clients.filter((player) => player.connected).length} connected player(s).` : `SlimProto unavailable: ${slim.reason || 'save a stream URL to initialize the service.'}`;
-  $('airplay-status').textContent = data.transports?.airplay?.available ? 'AirPlay baseline available.' : `AirPlay unavailable: ${data.transports?.airplay?.reason || 'receiver capability and credentials have not been validated.'}`;
-  const flac = $('codec').querySelector('[value="flac"]');
-  flac.disabled = data.codecs?.flac === false;
-  flac.textContent = flac.disabled ? 'FLAC (ffmpeg required)' : 'FLAC';
-  updateReadiness();
+
+function showStatus(data) {
+  state = data;
+  const device = data.device;
+  $('connection-label').textContent = device.connected ? 'Voice PE connected' : 'Waiting for Voice PE';
+  $('device-status').textContent = device.connected ? (device.muted ? 'Muted' : (device.raw_ready ? 'Ready' : 'Checking microphone')) : 'Disconnected';
+  $('device-detail').textContent = device.firmware ? 'Firmware ' + device.firmware : 'Connect the bench firmware';
+  $('route-status').textContent = 'Voice PE 3.5 mm';
+  $('route-detail').textContent = !device.connected ? 'Waiting for device' : device.playback_protocol !== 1 ? 'Playback firmware needed' : device.jack_plugged ? 'Jack connected' : 'Jack unplugged';
+  $('test-status').textContent = data.test.running ? 'Running' : 'Standby';
+  $('test-detail').textContent = data.test.phase;
+  $('version').textContent = 'App ' + data.version;
+  $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Paid playback is gated on wired verification.';
+  readiness();
 }
-function node(tag, className, text) {
-  const item = document.createElement(tag);
-  if (className) item.className = className;
-  if (text !== undefined) item.textContent = String(text);
-  return item;
+
+function add(parent, tag, value) {
+  const element = document.createElement(tag);
+  element.textContent = value;
+  parent.append(element);
+  return element;
 }
-function milliseconds(value) { return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)} ms` : '—'; }
-function renderResults(data) {
-  const results = Array.isArray(data.results) ? data.results : [];
+
+function showResults(results) {
   if (!results.length) return;
-  const container = $('results-list');
-  container.replaceChildren();
-  results.forEach((result) => {
-    const card = node('article', 'result-card');
-    const top = node('div', 'result-top');
-    top.append(node('h3', '', labels[result.kind] || result.kind || 'Audio test'), node('span', 'tag', result.status === 'unavailable' ? 'Completed · measurement unavailable' : result.status || 'Unknown'));
-    card.append(top);
-    const when = new Date(result.started_at);
-    const date = Number.isNaN(when.getTime()) ? 'Time unavailable' : when.toLocaleString();
-    card.append(node('p', 'result-meta', result.kind === 'connection' ? `${date} · Voice PE → Jarvis · no speaker playback` : `${date} · ${result.route === 'slimproto' ? 'SlimProto' : result.route === 'airplay' ? 'AirPlay' : 'HTTP'} / ${result.wire_format === 'pcm_s16le' ? 'PCM' : String(result.codec || '—').toUpperCase()}`));
-    const metrics = node('div', 'metrics');
-    const stopMetric = result.kind === 'stop';
-    if (result.kind === 'cloud_latency') card.append(node('p', 'result-warning', 'Synthetic input → acoustic reply. This is not measured human end-of-speech latency or full-duplex acceptance.'));
-    const values = result.kind === 'connection' ? [['Captured', `${result.capture?.duration_seconds ?? '—'} s`], ['Frames received', result.capture?.frames ?? '—'], ['Outcome', result.status || '—']] : [[stopMetric ? 'Median stop → silence' : 'Median onset latency', milliseconds(result.summary?.median_ms)], ['95th percentile', milliseconds(result.summary?.p95_ms)], ['Valid trials', `${result.summary?.valid_trials ?? 0} / ${result.trials?.length ?? 0}`]];
-    values.forEach(([label, value]) => {
-      const metric = node('div'); metric.append(node('span', 'metric-label', label), node('span', 'metric-value', value)); metrics.append(metric);
-    });
-    card.append(metrics);
-    if (result.capture) {
-      const health = result.capture;
-      const level = (value) => typeof value === 'number' ? `${value.toFixed(1)} dBFS` : value === null ? 'digital silence' : 'unavailable';
-      card.append(node('p', 'result-meta', `Microphone: ${health.duration_seconds}s captured · RMS ${level(health.rms_dbfs)} · peak ${level(health.peak_dbfs)} · ${((health.clipped_fraction || 0) * 100).toFixed(2)}% clipped.`));
-      if (health.signal === 'digital_silence') card.append(node('p', 'result-warning', 'Microphone frames contain only zeros. Increasing speaker volume cannot resolve digital silence.'));
+  const list = $('results-list');
+  list.replaceChildren();
+  for (const result of results) {
+    const card = document.createElement('article');
+    card.className = 'result-card';
+    list.append(card);
+    add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
+    if (result.error) add(card, 'p', result.error);
+    if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
+    for (const trial of result.trials) {
+      const cold = trial.cold_startup_ms;
+      add(card, 'p', 'Trial ' + trial.trial + ' / ' +
+        (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') : trial.latency_ms + ' ms') +
+        (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
-    if (result.error) card.append(node('p', 'result-warning', `Test error: ${result.error}`));
-    const partial = result.partial_playback_evidence;
-    if (partial) card.append(node('p', 'result-warning', `Incomplete capture: ${partial.summary.valid_trials} provisional onset match(es), median ${milliseconds(partial.summary.median_ms)}. The test remains failed; playback continuity and long-session reliability are unverified.`));
-    if (result.interruption) {
-      const interruption = result.interruption;
-      card.append(node('p', 'result-meta', `Ended after ${interruption.elapsed_seconds ?? '—'}s · ${interruption.reason} · phase: ${interruption.phase || 'unknown'}.`));
-      if (interruption.protocol_error || interruption.socket_error) card.append(node('p', 'result-warning', interruption.protocol_error || interruption.socket_error));
+    if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
+    if (result.stability) add(card, 'p', result.stability.status === 'measured' ?
+      'Pilot gaps ' + result.stability.dropout_count : result.stability.reason);
+    if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
+      'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
+    for (const warning of result.warnings || []) add(card, 'p', warning);
+  }
+}
+
+async function poll() {
+  showStatus(await api('api/status'));
+  if (!state.test.running) showResults((await api('api/results')).results);
+}
+
+async function action(callback) {
+  busy = true;
+  readiness();
+  try {
+    await callback();
+    await poll();
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    busy = false;
+    readiness();
+  }
+}
+
+for (const button of document.querySelectorAll('.test-option')) {
+  button.addEventListener('click', () => {
+    kind = button.dataset.kind;
+    for (const option of document.querySelectorAll('.test-option')) {
+      option.classList.toggle('selected', option === button);
+      option.setAttribute('aria-pressed', String(option === button));
     }
-    const followup = result.firmware_followup;
-    const pcm = result.firmware_pcm;
-    if (pcm) {
-      const longestSend = pcm.send_count ? milliseconds(pcm.max_success_duration_ms) : 'unavailable';
-      const queueAge = pcm.send_count + pcm.failed_send_count ? milliseconds(pcm.max_queue_age_ms) : 'unavailable';
-      card.append(node('p', 'result-meta', `Voice PE upload: ${pcm.send_count} successful sends · ${pcm.failed_send_count} failed · longest successful send ${longestSend} · maximum firmware queue residence ${queueAge}. Queue residence excludes network and microphone pipeline delay.`));
-      const failure = pcm.last_failed_send;
-      if (failure) card.append(node('p', 'result-warning', `Last failed PCM send: returned ${failure.returned_bytes} / ${failure.expected_bytes} bytes after ${milliseconds(failure.duration_ms)}. A zero return alone does not prove a timeout.`));
-    }
-    if (followup?.linked_root_fault) card.append(node('p', 'result-warning', `Voice PE reported: ${followup.linked_root_fault.reason.replaceAll('_', ' ')}. Matched to this capture after reconnect.`));
-    else if (followup?.same_boot === false) card.append(node('p', 'result-warning', 'Voice PE reconnected with a new boot ID. The restart cause is unavailable.'));
-    else if (followup) card.append(node('p', 'result-meta', 'Reconnection diagnostics received; no firmware fault was conclusively matched to this capture.'));
-    const firstColdStart = result.trials?.find((trial) => typeof trial.cold_startup_ms === 'number');
-    if (firstColdStart) card.append(node('p', 'result-meta', `Cold start estimate: ${milliseconds(firstColdStart.cold_startup_ms)} · control command → sound, including the ${firstColdStart.probe_lead_ms ?? 100} ms probe lead-in.`));
-    if (firstColdStart?.wake_to_audible_ms != null) card.append(node('p', 'result-meta', `Voice PE wake event received → audible acknowledgment: ${milliseconds(firstColdStart.wake_to_audible_ms)}.`));
-    const sender = result.transport?.sender;
-    if (result.kind === 'volume') {
-      const events = result.transport?.events || [];
-      const before = events.find((event) => event.event === 'receiver_before_play');
-      const switched = events.find((event) => event.event === 'receiver_before_pcm');
-      const after = result.transport?.receiver_after;
-      const percent = (state) => state ? `${state.volume_percent}%` : 'unavailable';
-      card.append(node('p', 'result-meta', `WiiM volume before switch ${percent(before)} · before PCM ${percent(switched)} · after stop ${percent(after)}.`));
-    }
-    if (sender) card.append(node('p', 'result-meta', `AirPlay sender software: source setup ${milliseconds(sender.source_open_ms)} · first PCM supplied ${milliseconds(sender.first_pcm_handed_to_raop_ms)} after sender start · longest PCM read wait ${milliseconds(sender.max_pcm_read_wait_ms)}. These are not audible-output measurements.`));
-    const estimates = (result.trials || []).map((trial) => trial.clock_uncertainty_ms).filter((value) => typeof value === 'number' && Number.isFinite(value));
-    if (estimates.length) card.append(node('p', 'result-meta', `Clock/detector estimate: ±${Math.max(...estimates).toFixed(1)} ms. Microphone pipeline delay is uncalibrated; this is not a total uncertainty bound.`));
-    if (result.kind === 'echo' && result.echo) {
-      const echo = result.echo;
-      const measurement = echo.status === 'measured'
-        ? `AEC3 pilot reduction: ${echo.pilot_band_reduction_db.toFixed(1)} dB. ${echo.reason}.`
-        : `Echo measurement unavailable: ${echo.reason}.`;
-      card.append(node('p', 'result-meta', measurement));
-      card.append(node('p', 'result-meta', 'Offline analysis of speaker echo in a quiet room. Simultaneous speech and drift require separate tests.'));
-    }
-    if (result.kind === 'stability' || result.kind === 'echo') {
-      const continuity = result.stability;
-      if (typeof continuity?.pilot_snr_db === 'number') card.append(node('p', 'result-meta', `Pilot quality: ${continuity.pilot_snr_db.toFixed(1)} dB above estimated baseline · reference coverage ${Math.round((continuity.reference_coverage || 0) * 100)}%.`));
-      const missing = (result.trials || []).filter((trial) => trial.latency_ms == null).length;
-      card.append(node('p', 'result-meta', `Missing onset probes: ${missing} / ${result.trials?.length || 0}.`));
-      if (continuity?.status === 'measured') {
-        card.append(node('p', 'result-meta', `Pilot continuity: ${continuity.dropout_count ?? 0} gap(s) · ${milliseconds(continuity.dropout_ms)} total · longest gap ${milliseconds(continuity.longest_gap_ms)} · observed ${milliseconds(continuity.observed_ms)}.`));
-        if (continuity.method) card.append(node('p', 'result-meta', `Continuity method: ${continuity.method}`));
-      } else card.append(node('p', 'result-warning', `Continuity unavailable: ${continuity?.reason || 'insufficient acoustic evidence.'}`));
-    }
-    if (result.trials?.length) {
-      const table = node('table', 'trial-table');
-      const caption = node('caption', 'skip', `${labels[result.kind] || 'Audio test'} trial measurements`); table.append(caption);
-      const head = node('thead'); const row = node('tr');
-      ['Trial', stopMetric ? 'Stop → silence' : 'Onset latency', 'Confidence', 'Outcome'].forEach((label) => {const cell = node('th', '', label); cell.scope = 'col'; row.append(cell);}); head.append(row); table.append(head);
-      const body = node('tbody');
-      result.trials.forEach((trial) => {
-        const row = node('tr');
-        const confidence = typeof trial.confidence === 'number' ? `${Math.round(trial.confidence * 100)}%` : '—';
-        [trial.trial, milliseconds(trial.latency_ms), confidence, trial.reason || trial.status || 'Unavailable'].forEach((value) => row.append(node('td', '', value ?? '—')));
-        body.append(row);
-      }); table.append(body); card.append(table);
-    }
-    (result.warnings || []).forEach((warning) => card.append(node('p', 'result-warning', warning)));
-    container.append(card);
+    readiness();
   });
 }
-async function poll() {
-  if (document.hidden || polling) return;
-  polling = true;
-  const requests = await Promise.allSettled([api('api/status'), api('api/results')]);
-  if (requests[0].status === 'fulfilled') renderStatus(requests[0].value);
-  else {
-    status = null;
-    $('connection-dot').className = 'dot error';
-    $('connection-label').textContent = 'Bench unreachable · retrying';
-    $('device-status').textContent = 'Status unavailable';
-    $('device-detail').textContent = 'Checking connection every 2 seconds';
-    updateReadiness();
-  }
-  if (requests[1].status === 'fulfilled') renderResults(requests[1].value);
-  polling = false;
-}
-$('config-form').addEventListener('input', () => {dirty = true; $('save-state').textContent = 'Unsaved changes'; updateReadiness();});
-$('config-form').addEventListener('submit', async (event) => {
+for (const id of ['volume-confirmed', 'idle-confirmed']) $(id).addEventListener('change', readiness);
+
+$('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  busy = true; updateReadiness();
-  try {
-    const values = configValues();
-    const stream = new URL(values.stream_base_url);
-    if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Use an HTTP or HTTPS stream base URL.');
-    await api('api/config', {method: 'PUT', body: JSON.stringify(values)});
-    dirty = false; configured = Boolean(values.wiim_host && values.stream_base_url);
-    $('save-state').textContent = 'Connection saved';
-    announce('Connection saved. Set a comfortable volume before running a test.');
-    await poll();
-  } catch (error) {announce(error.message, true);}
-  finally {busy = false; updateReadiness();}
-});
-document.querySelectorAll('.test-option').forEach((button) => button.addEventListener('click', () => {
-  kind = button.dataset.kind;
-  $('startup-lead-field').hidden = !['startup_pcm', 'startup_ack'].includes(kind);
-  $('wake-arm-field').hidden = kind !== 'startup_ack';
-  document.querySelectorAll('.test-option').forEach((option) => {option.classList.toggle('selected', option === button); option.setAttribute('aria-pressed', String(option === button));});
-  updateReadiness();
-}));
-['volume-confirmed', 'idle-confirmed'].forEach((id) => $(id).addEventListener('change', updateReadiness));
-$('run-test').addEventListener('click', async () => {
-  if ($('run-test').disabled) return;
-  busy = true; updateReadiness();
-  try {
-    const repetitions = ['startup', 'startup_pcm', 'startup_ack'].includes(kind) ? 2 : ['stop', 'volume'].includes(kind) ? 1 : 3;
-    const lead_ms = ['startup_pcm', 'startup_ack'].includes(kind) ? Number($('startup-lead').value) : 100;
-    const wait_for_wake = kind === 'startup_ack' && $('wake-arm').checked;
-    await api('api/tests', {method: 'POST', body: JSON.stringify({kind, repetitions, lead_ms, wait_for_wake, comfortable_volume_confirmed: true})});
-    announce(kind === 'connection' ? 'Silent microphone test started. No speaker playback; leave Voice PE connected for 60 seconds.' : `${labels[kind]} started. Keep Voice PE in its normal listening location and the room quiet.`);
-    await poll();
-  } catch (error) {announce(error.message, true);}
-  finally {busy = false; updateReadiness();}
-});
-$('cancel-test').addEventListener('click', async () => {
-  busy = true; updateReadiness();
-  try {await api('api/tests/current', {method: 'DELETE'}); announce('Stop requested. Previous music playback is not restored automatically.'); await poll();}
-  catch (error) {announce(error.message, true);}
-  finally {busy = false; updateReadiness();}
+  action(async () => {
+    const config = {ha_lan_url: $('ha-lan-url').value.trim(), repetitions: Number($('repetitions').value)};
+    if ($('device-token').value) config.device_token = $('device-token').value;
+    await api('api/config', 'PUT', config);
+    $('save-state').textContent = 'Connection saved.';
+  });
 });
 $('reveal-token').addEventListener('click', () => {
-  const show = $('device-token').type === 'password';
-  $('device-token').type = show ? 'text' : 'password';
-  $('reveal-token').textContent = show ? 'Hide' : 'Show';
-  $('reveal-token').setAttribute('aria-pressed', String(show));
-  $('reveal-token').setAttribute('aria-label', `${show ? 'Hide' : 'Show'} device token`);
+  const input = $('device-token');
+  const reveal = input.type === 'password';
+  input.type = reveal ? 'text' : 'password';
+  $('reveal-token').textContent = reveal ? 'Hide' : 'Show';
+  $('reveal-token').setAttribute('aria-pressed', String(reveal));
 });
-$('copy-token').addEventListener('click', async () => {
-  try {await navigator.clipboard.writeText($('device-token').value); announce('Device token copied. Keep it private.');}
-  catch {announce('Clipboard is unavailable here. Use Show, then select and copy the token manually.', true);}
+$('copy-token').addEventListener('click', () => {
+  navigator.clipboard.writeText($('device-token').value).catch(() => notice('Clipboard access unavailable.'));
 });
-async function initialize() {
-  try {
-    const config = await api('api/config');
-    for (const key of ['wiim_host', 'stream_base_url', 'route', 'codec', 'device_token', 'slimproto_port', 'slimproto_player_id', 'airplay_latency_ms']) {
-      const field = document.querySelector(`[name="${key}"]`);
-      if (config[key] !== undefined) {
-        if (key === 'slimproto_player_id' && config[key]) {
-          const option = node('option', '', config[key]); option.value = config[key]; field.append(option);
-        }
-        field.value = config[key];
-      }
-    }
-    $('verify-tls').checked = config.verify_tls !== false;
-    configLoaded = true; configured = Boolean(config.wiim_host && config.stream_base_url);
-    $('save-state').textContent = configured ? 'Saved connection loaded' : 'Set up your connection';
-  } catch (error) {$('save-state').textContent = 'Could not load settings'; announce(error.message, true);}
-  await poll(); updateReadiness();
-}
-$('cloud-form').addEventListener('submit', async (event) => {
+$('run-test').addEventListener('click', () => action(() => api('api/tests', 'POST', {
+  kind, comfortable_volume_confirmed: $('volume-confirmed').checked
+})));
+$('cancel-test').addEventListener('click', () => action(() => api('api/tests/current', 'DELETE')));
+$('cloud-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  try {
-    const settings = await api('api/cloud', {method: 'PUT', body: JSON.stringify({api_key: $('openai-key').value.trim()})});
+  action(async () => {
+    await api('api/cloud', 'PUT', {api_key: $('openai-key').value});
     $('openai-key').value = '';
-    $('cloud-state').textContent = settings.api_key_configured ? 'Key saved locally. Paid benchmarks require an explicit Start.' : 'No key configured.';
-  } catch (error) { $('cloud-state').textContent = error.message; }
+  });
 });
-$('run-cloud-test').addEventListener('click', async () => {
-  if (!$('volume-confirmed').checked || !$('idle-confirmed').checked) {
-    announce('Confirm comfortable volume and an idle speaker before a paid benchmark.', true); return;
-  }
-  try {
-    const microphoneInput = $('live-microphone').checked;
-    await api('api/cloud/tests', {method: 'POST', body: JSON.stringify({transport: $('live-transport').value, comfortable_volume_confirmed: true, microphone_input: microphoneInput, microphone_upload_confirmed: microphoneInput})});
-    $('live-microphone').checked = false;
-    announce('Paid synthetic voice benchmark started. Use Stop test to cancel.');
-    await poll();
-  } catch (error) { announce(error.message, true); }
-});
-api('api/cloud').then((settings) => { $('cloud-state').textContent = settings.api_key_configured ? 'API key configured locally; initial API-test cap US$5.' : 'API key needed before live conversation benchmarks.'; }).catch(() => { $('cloud-state').textContent = 'Credential status unavailable.'; });
-document.addEventListener('visibilitychange', () => {if (!document.hidden) poll();});
-initialize();
-setInterval(poll, 2000);
+
+async function initialize() {
+  const config = await api('api/config');
+  $('ha-lan-url').value = config.ha_lan_url;
+  $('repetitions').value = config.repetitions;
+  $('device-token').value = config.device_token;
+  $('save-state').textContent = 'Connection loaded.';
+  await poll();
+}
+
+initialize().catch((error) => notice(error.message));
+setInterval(() => { if (!busy) poll().catch((error) => notice(error.message)); }, 1500);

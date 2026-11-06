@@ -1,3 +1,8 @@
+# 0.2.0
+
+- Replace the wireless playback bench with authenticated 48 kHz stereo playback through the Voice PE 3.5 mm jack. Requires playback-capable Voice PE firmware.
+- Preserve pairing and API-test spending while retiring the old playback settings. Keep paid playback gated pending hardware verification of the wired route.
+
 # 0.1.36
 
 - Add a 200 ms acknowledgment lead-in option for comparison with the verified 300 ms setting. Cold timing continues to include the selected silence.
