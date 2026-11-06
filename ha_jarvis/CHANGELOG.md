@@ -1,3 +1,8 @@
+# 0.1.29
+
+- Allow an agent-supplied synthetic follow-up in the same paid voice session and AirPlay stream. Report the first and warm follow-up turns separately. Room audio stays local.
+- App-only update. Compare the same two synthetic questions across transports.
+
 # 0.1.28
 
 - Allow the local armed test to play a synthetic wake stimulus supplied by the test runner, close that session and measure the acknowledgment on a fresh session.

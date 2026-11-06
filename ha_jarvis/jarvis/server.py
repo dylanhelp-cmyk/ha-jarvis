@@ -709,11 +709,21 @@ def create_ui(bench):
             raise ValueError("Microphone input selection must be true or false")
         if microphone_input and data.get("microphone_upload_confirmed") is not True:
             raise ValueError("Confirm the bounded room microphone upload before starting")
+        followup = None
+        if "followup_b64" in data:
+            if microphone_input:
+                raise ValueError("The follow-up benchmark uses synthetic input only")
+            try:
+                followup = base64.b64decode(data["followup_b64"], validate=True)
+            except (ValueError, TypeError):
+                raise ValueError("Supply a base64 PCM16LE follow-up fixture") from None
+            if len(followup) % 2 or not RATE <= len(followup) <= 10 * RATE:
+                raise ValueError("The follow-up must contain 0.5 to 5 seconds of mono 16 kHz PCM")
         from .live_bench import run_cloud_benchmark
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing paid voice benchmark"}
         bench.task = asyncio.create_task(run_cloud_benchmark(
-            bench, transport, bench.cloud_fixture, microphone_input=microphone_input))
+            bench, transport, bench.cloud_fixture, microphone_input=microphone_input, followup=followup))
         return web.json_response({"test_id": ident, "transport": transport, "api_budget_usd": 5}, status=202)
     async def config(request):
         if request.method == "PUT":

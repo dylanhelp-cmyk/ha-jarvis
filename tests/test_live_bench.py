@@ -223,6 +223,26 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["trials"][0]["latency_ms"], 1200.0)
         self.assertTrue(result["cloud"]["finalization_confirmed"])
 
+    async def test_followup_reuses_session_with_a_separate_acoustic_reference(self):
+        followup = np.full(640, 1700, dtype="<i2").tobytes()
+        original_send = FakeLive.send_audio
+
+        async def send(session, pcm):
+            if pcm == followup[:640]:
+                session.replied = False
+            await original_send(session, pcm)
+
+        detected = {"status": "detected", "latency_ms": 1100.0}
+        with patch("jarvis.live_bench.POST_INPUT_SECONDS", 2), \
+             patch.object(FakeLive, "send_audio", send), \
+             patch("jarvis.live_bench.match_response", return_value=detected) as matcher:
+            await run_cloud_benchmark(self.bench, "websocket", self.fixture, followup=followup)
+        result = self.bench.results[0]
+        self.assertEqual(result["status"], "measured", result)
+        self.assertEqual([trial["turn"] for trial in result["trials"]], ["first", "warm_followup"])
+        self.assertEqual(len(FakeLive.instances), 1)
+        self.assertEqual(matcher.call_count, 2)
+
     async def test_startup_overlaps_and_fixture_waits_for_speaker_pull(self):
         capture_entered = asyncio.Event()
         release_capture = asyncio.Event()
