@@ -20,6 +20,8 @@ from av import AudioFrame, AudioResampler
 
 
 RATE = 16000
+MODEL = "gpt-live-1"
+VOICE = "marin"
 INSTRUCTIONS = "Wait silently for a spoken question, then answer briefly in one short sentence. Do not greet, delegate work or use tools."
 
 
@@ -82,12 +84,13 @@ class _PCMTrack(AudioStreamTrack):
 
 class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
-                 startup_timeout=15, close_timeout=10):
+                 startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
+        self.greeting, self.on_transcript = greeting, on_transcript
         self.max_seconds, self.startup_timeout, self.close_timeout = max_seconds, startup_timeout, close_timeout
         self.metrics = LiveMetrics(transport)
         self._http = self._ws = self._pc = self._channel = self._track = None
@@ -116,9 +119,11 @@ class LiveSession:
             self._close_task = asyncio.create_task(self._close())
 
     def _config(self):
-        config = {"model": "gpt-live-1", "instructions": INSTRUCTIONS,
+        config = {"model": MODEL, "instructions": self.greeting or INSTRUCTIONS,
                   "store": False, "delegation": {"type": "client"},
-                  "audio": {"output": {"voice": "marin"}}}
+                  "audio": {"output": {"voice": VOICE}}}
+        if self.greeting:
+            config["input"] = [{"role": "developer", "content": [{"type": "input_text", "text": self.greeting}]}]
         if self.transport == "websocket":
             config["audio"]["format"] = {"type": "audio/pcm", "rate": RATE}
         return config
@@ -280,6 +285,8 @@ class LiveSession:
                     self._close_task = asyncio.create_task(self._close())
         elif kind == "session.output_audio.delta" and self.transport == "websocket":
             self._queue_audio(base64.b64decode(event["delta"], validate=True))
+        elif kind == "session.output_transcript.delta" and self.on_transcript is not None:
+            self.on_transcript(event["delta"])
         elif kind == "error":
             self._fail("Cloud session reported an error")
         # Transcript text and delegated payloads are never retained or logged.
@@ -301,6 +308,12 @@ class LiveSession:
         except Exception:
             self._fail("Cloud microphone send failed")
             raise LiveSessionError("Cloud microphone send failed") from None
+
+    async def request_greeting(self):
+        if not self.greeting or self.transport != "websocket" or not self._ready.is_set() or self._closing:
+            raise LiveSessionError("Greeting session is not ready")
+        await self._ws.send_json({"type": "session.commentary.append", "event_id": "cached_ack",
+                                  "delegation_id": None, "content": self.greeting})
 
     async def _watchdog(self):
         await asyncio.sleep(max(0, self.max_seconds - self.close_timeout - (time.monotonic() - self._started_at)))

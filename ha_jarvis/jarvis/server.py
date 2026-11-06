@@ -23,6 +23,7 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
+from .acknowledgment import cache_path, generate_acknowledgment
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device
 from .cloud_settings import CloudSettings
@@ -76,7 +77,8 @@ def bench_signal(kind, repetitions):
     if kind in ("stability", "echo"):
         last = max(probes)
         start = last + len(probes[last]) + int(STABILITY_PILOT_GAP_SECONDS * RATE)
-        end = len(pcm) - RATE
+        # Leave a guard for resampling filter ringing before the analysis tail.
+        end = len(pcm) - RATE - (RATE // 50 if kind == "echo" else 0)
         pcm[start:end] = pilot(np.arange(start, end) / RATE)
     return pcm, probes
 
@@ -91,6 +93,7 @@ class Bench:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cloud_settings = CloudSettings(self.data_dir)
         self.cloud_fixture = b""
+        self.acknowledgment = {"phase": "idle"}
         self.path = self.data_dir / "settings.json"
         self.firmware_secrets_path = self.data_dir / "firmware-secrets.json"
         self.config = {**DEFAULTS, "device_token": secrets.token_urlsafe(32)}
@@ -178,6 +181,16 @@ class Bench:
                 self.task.cancel()
             with suppress(asyncio.CancelledError):
                 await self.task
+
+    async def prepare_acknowledgment(self):
+        try:
+            metadata = await generate_acknowledgment(self.cloud_settings, self.data_dir)
+            self.acknowledgment = {"phase": "generated", **metadata}
+        except asyncio.CancelledError:
+            self.acknowledgment = {"phase": "cancelled"}
+            raise
+        except Exception as exc:
+            self.acknowledgment = {"phase": "failed", "error_type": type(exc).__name__}
 
     async def run(self, kind, repetitions):
         started = time.monotonic()
@@ -350,6 +363,29 @@ def create_ui(bench):
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
                                   "benchmark_available": False,
                                   "reason": "Cloud playback trials are gated on wired bench verification"})
+    async def cloud_acknowledgment(request):
+        if request.method == "POST":
+            data = await request.json()
+            if not isinstance(data, dict) or set(data) != {"confirm_paid"} or data["confirm_paid"] is not True:
+                raise ValueError("Explicitly confirm the paid greeting generation")
+            if bench.test["running"] or (bench.task and not bench.task.done()):
+                raise web.HTTPConflict(text="Wait for the current test to finish")
+            public = bench.cloud_settings.public()
+            if not public["api_key_configured"] or public["paid_retry_blocked"]:
+                raise ValueError("A configured key and a settled budget ledger are required")
+            bench.acknowledgment = {"phase": "generating"}
+            bench.test = {"running": True, "phase": "generating greeting with digital silence"}
+            bench.task = asyncio.create_task(bench.prepare_acknowledgment())
+            # Restore idle even when cancellation wins before the coroutine first runs.
+            def finished(task):
+                if task.cancelled():
+                    bench.acknowledgment = {"phase": "cancelled"}
+                bench.test = {"running": False, "phase": "idle"}
+            bench.task.add_done_callback(finished)
+        return web.json_response({**bench.acknowledgment,
+                                  "cached_on_host": cache_path(bench.data_dir).is_file()},
+                                 status=202 if request.method == "POST" else 200)
+
     async def cloud_fixture(request):
         if bench.test["running"]:
             raise web.HTTPConflict(text="Wait for the current test before replacing its fixture")
@@ -451,6 +487,8 @@ def create_ui(bench):
     app.router.add_get("/api/cloud", cloud_settings)
     app.router.add_put("/api/cloud", cloud_settings)
     app.router.add_put("/api/cloud/fixture", cloud_fixture)
+    app.router.add_get("/api/cloud/acknowledgment", cloud_acknowledgment)
+    app.router.add_post("/api/cloud/acknowledgment", cloud_acknowledgment)
     app.router.add_get("/api/audio/capabilities", audio_capabilities)
     app.router.add_post("/api/cloud/tests", cloud_start)
     app.router.add_get("/api/config", config)

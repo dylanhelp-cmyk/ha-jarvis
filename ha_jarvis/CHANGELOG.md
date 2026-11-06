@@ -1,3 +1,8 @@
+# 0.2.2
+
+- Add a 20 ms guard before the required silent tail in the local echo reference. Repeat the Echo test with firmware 0.2.1.
+- Add a paid greeting generation endpoint using digital silence and local candidate storage.
+
 # 0.2.1
 
 - Report missing echo prerequisites explicitly and add a paired playback regression test.
