@@ -9,10 +9,26 @@ from pyatv.protocols.raop import RaopStream
 from pyatv.protocols.raop.protocols import StreamContext
 
 from jarvis.airplay_source import progressive_stream_file, sender_telemetry
-from jarvis.live_audio import LiveAudioSource, StaleAudioGeneration
+from jarvis.live_audio import LiveAudioSource, StaleAudioGeneration, StartupPCMSource
+from jarvis.server import Stream
 
 
 class LiveAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_pcm_marks_probes_only_when_requested(self):
+        stream = Stream("startup_pcm", 2)
+        source = StartupPCMSource(stream)
+        self.assertFalse(stream.connected.is_set())
+        self.assertEqual(await source.readframes(4300), bytes(4300 * 4))
+        self.assertTrue(stream.connected.is_set())
+        self.assertEqual(stream.markers, [])
+        await source.readframes(352)
+        self.assertEqual(len(stream.markers), 1)
+        self.assertGreaterEqual(stream.markers[0][0], stream.started_at)
+        await source.readframes(4 * 44100)
+        self.assertEqual(len(stream.markers), 2)
+        self.assertEqual(await source.readframes(352), b"")
+        self.assertTrue(stream.done.is_set())
+
     async def test_render_tap_receives_exact_packet_with_inserted_silence(self):
         tap = Mock()
         source = LiveAudioSource(clock=lambda: 10.0, on_render=tap)

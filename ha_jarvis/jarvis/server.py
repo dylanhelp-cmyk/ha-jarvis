@@ -85,16 +85,17 @@ class Stream:
         self.error = None
         self.expected_disconnect = False
         self.duration = 30 if self.kind == "stop" else 1 + self.repetitions * 2.0 + 5
+        if self.kind == "startup_pcm":
+            self.duration = 4
 
-    async def blocks(self):
-        # Finish source generation before anchoring the paced stream clock.
+    def prepare_pcm(self):
         total = int(self.duration * RATE)
         probes = {}
         pcm = np.zeros(total, dtype="<i2")
         for i in range(0 if self.kind == "volume" else self.repetitions):
             # Swap the first two known probe identities for the startup check.
             # This distinguishes a weak reference from a startup-specific loss.
-            seed = 514 - i if self.kind == "startup" else 513 + i
+            seed = 514 - i if self.kind in ("startup", "startup_pcm") else 513 + i
             probe = make_probe(seed)
             offset = int((.1 + i * 2) * RATE)
             pcm[offset:offset + len(probe)] = probe
@@ -113,9 +114,14 @@ class Stream:
             pcm[2 * RATE:] = ((np.sin(2 * np.pi * 937 * t) + np.sin(2 * np.pi * 1579 * t)) * .05 * 32767).astype("<i2")
             probes.clear()
         self.reference_pcm = pcm
+        return pcm, probes
+
+    async def blocks(self):
+        # Finish source generation before anchoring the paced stream clock.
+        pcm, probes = self.prepare_pcm()
         self.started_at = time.monotonic()
         self.connected.set()
-        for start in range(0, total, 320):
+        for start in range(0, len(pcm), 320):
             if self.stop_requested.is_set():
                 break
             deadline = self.started_at + start / RATE
@@ -219,7 +225,7 @@ class Bench:
 
     async def partial_playback_evidence(self, kind):
         """Salvage scalar observations without passing an interrupted capture."""
-        if kind not in ("latency", "startup", "stability", "echo") or not self.stream or not self.stream.markers:
+        if kind not in ("latency", "startup", "startup_pcm", "stability", "echo") or not self.stream or not self.stream.markers:
             return None
         try:
             pcm, capture_start = self.device.recording()
@@ -340,10 +346,20 @@ class Bench:
                 extension = "pcm"
             url = self.config["stream_base_url"].rstrip("/") + "/stream/" + self.stream.id + "." + extension
             self.test["phase"] = "waiting for speaker stream"
+            source_options = {}
+            if kind == "startup_pcm":
+                from .live_audio import StartupPCMSource
+
+                async def source_factory(*_format):
+                    return StartupPCMSource(self.stream)
+
+                source_options["source_factory"] = source_factory
             play_requested = time.monotonic()
             await self.transport.play(url, {"codec": self.config["codec"], "sample_rate": RATE, "channels": 1,
-                                            "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"]})
-            result["wire_format"] = "pcm_s16le" if extension == "pcm" else extension
+                                            "sample_size": 16, "airplay_latency_ms": self.config["airplay_latency_ms"],
+                                            **source_options})
+            result["wire_format"] = ("pcm_s16be_raop" if kind == "startup_pcm"
+                                     else "pcm_s16le" if extension == "pcm" else extension)
             if self.config["route"] == "airplay":
                 result["requested_airplay_latency_ms"] = self.config["airplay_latency_ms"]
             if self.config["route"] == "airplay":
@@ -361,6 +377,8 @@ class Bench:
                 return
             self.test["phase"] = "playing acoustic probes — remain quiet"
             playback_delay_limit = MAX_PLAYBACK_DELAY_SECONDS * (2 if self.config["route"] == "airplay" else 1)
+            if kind == "startup_pcm":
+                playback_delay_limit = 4
             if kind == "stop":
                 await asyncio.sleep(5)
                 self.test["phase"] = "stopping playback"
@@ -628,9 +646,9 @@ def create_ui(bench):
         if data.get("kind") != "connection" and data.get("comfortable_volume_confirmed") is not True:
             raise ValueError("Confirm a comfortable amplifier volume before starting")
         kind, repetitions = data.get("kind"), data.get("repetitions", 3)
-        if kind not in ("latency", "startup", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
+        if kind not in ("latency", "startup", "startup_pcm", "stop", "stability", "echo", "connection", "volume") or type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Invalid test type or repetition count")
-        if kind == "startup" and (bench.config["route"] != "airplay" or repetitions != 2):
+        if kind in ("startup", "startup_pcm") and (bench.config["route"] != "airplay" or repetitions != 2):
             raise ValueError("Startup check requires AirPlay and two probes")
         if kind == "volume" and (bench.config["route"] != "airplay" or repetitions != 1):
             raise ValueError("Silent volume check requires AirPlay and one repetition")

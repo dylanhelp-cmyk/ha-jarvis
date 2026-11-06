@@ -83,6 +83,7 @@ class Device:
         self.started = asyncio.Event()
         self.stopped = asyncio.Event()
         self.frames = []
+        self._capture_samples = 0
         self.clock_offset_ms = None
         self.clock_rtt_ms = None
         self.sync_pending = {}
@@ -93,10 +94,15 @@ class Device:
         self.last_frame_at = None
         self.capture_session = {}
         self.pcm_consumer = None
+        self.wake_count = 0
+        self.last_wake_at = None
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
-                "clock_rtt_ms": self.clock_rtt_ms, "capturing": self.capture_id is not None}
+                "clock_rtt_ms": self.clock_rtt_ms, "capturing": self.capture_id is not None,
+                "wake_count": self.wake_count,
+                "last_wake_age_ms": (round((time.monotonic() - self.last_wake_at) * 1000)
+                                     if self.last_wake_at is not None else None)}
 
     async def sync(self):
         self.clock_offset_ms = self.clock_rtt_ms = None
@@ -135,6 +141,11 @@ class Device:
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")
+        elif kind == "wake_word" and self.info.get("muted") is False:
+            word = message.get("wake_word")
+            if isinstance(word, str) and word.strip().casefold().replace("_", " ") == "hey jarvis":
+                self.wake_count += 1
+                self.last_wake_at = time.monotonic()
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:
             self.stop_info = {key: message[key] for key in ("reason", "samples_seen", "dropped_frames") if key in message}
             self.stopped.set()
@@ -158,9 +169,11 @@ class Device:
         self.next_sample = frame.first_sample + len(frame.samples)
         self.last_seq = frame.sequence
         # Never maintain an unbounded microphone backlog.
-        if sum(len(f.samples) for f in self.frames) + len(frame.samples) > RATE * 120:
+        total_samples = self._capture_samples + len(frame.samples)
+        if total_samples > RATE * 120:
             raise ValueError("Capture exceeded the 120-second memory limit")
         self.frames.append(frame)
+        self._capture_samples = total_samples
         self.last_frame_at = time.monotonic()
         if self.pcm_consumer is not None:
             self.pcm_consumer(frame, self.clock_offset_ms)
@@ -187,6 +200,7 @@ class Device:
         if self.info.get("raw_ready") is not True:
             raise ValueError("Voice PE has not confirmed the raw microphone stage and compatible XMOS firmware")
         self.frames.clear()
+        self._capture_samples = 0
         self.errors.clear()
         self.next_sample = self.last_seq = None
         self.stop_info = self.last_frame_at = None

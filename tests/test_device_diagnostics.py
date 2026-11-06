@@ -25,6 +25,20 @@ def pcm_summary():
 
 
 class FirmwareDiagnosticsTests(unittest.TestCase):
+    def test_wake_telemetry_counts_only_expected_unmuted_word(self):
+        device = Device()
+        wake = {"type": "wake_word", "wake_word": "Hey Jarvis"}
+        device.receive_json(wake)
+        device.receive_json({"type": "mute", "muted": False})
+        device.receive_json({"type": "wake_word", "wake_word": "Hey Siri"})
+        device.receive_json(wake)
+        device.receive_json({"type": "mute", "muted": True})
+        device.receive_json(wake)
+        status = device.snapshot()
+        self.assertEqual(status["wake_count"], 1)
+        self.assertGreaterEqual(status["last_wake_age_ms"], 0)
+        self.assertFalse(status["capturing"])
+
     def test_optional_pcm_summary_is_bounded_and_redacts_unknown_fields(self):
         value = diagnostics()
         self.assertIsNone(parse_diagnostics(value)['pcm_send'])

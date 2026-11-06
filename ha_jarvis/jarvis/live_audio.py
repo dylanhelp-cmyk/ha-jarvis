@@ -13,6 +13,54 @@ from pyatv.protocols.raop.audio_source import AudioSource
 from pyatv.support.metadata import EMPTY_METADATA
 
 
+class StartupPCMSource(AudioSource):
+    """Finite startup probes, converted before AirPlay starts its packet clock."""
+
+    sample_rate = 44100
+    channels = 2
+    sample_size = 2
+
+    def __init__(self, stream):
+        self.stream = stream
+        samples, probes = stream.prepare_pcm()
+        self.probes = {offset * self.sample_rate // 16000: probe for offset, probe in probes.items()}
+        frame = av.AudioFrame.from_ndarray(np.repeat(samples, 2).reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = 16000
+        converter = av.AudioResampler(format="s16", layout="stereo", rate=self.sample_rate)
+        self.pcm = b"".join(block.to_ndarray().astype(">i2").tobytes()
+                            for block in converter.resample(frame) + converter.resample(None))
+        self.offset = 0
+
+    @property
+    def duration(self):
+        return len(self.pcm) / (4 * self.sample_rate)
+
+    async def readframes(self, nframes):
+        end = min(self.offset + nframes, len(self.pcm) // 4)
+        if end == self.offset:
+            self.stream.done.set()
+            return b""
+        now = time.monotonic()
+        if self.offset == 0:
+            self.stream.started_at = now
+            self.stream.connected.set()
+        for marker in tuple(self.probes):
+            if self.offset <= marker < end:
+                probe = self.probes.pop(marker)
+                self.stream.markers.append((now + (marker - self.offset) / self.sample_rate, probe))
+                self.stream.marker_timing = "block_handoff_monotonic"
+        data = self.pcm[self.offset * 4:end * 4]
+        self.stream.bytes_sent += len(data)
+        self.offset = end
+        return data
+
+    async def get_metadata(self):
+        return EMPTY_METADATA
+
+    async def close(self):
+        self.stream.done.set()
+
+
 class StaleAudioGeneration(RuntimeError):
     """A cancelled reply attempted to enqueue more audio."""
 

@@ -1,3 +1,9 @@
+# 0.1.23
+
+- Add a local startup comparison that hands prepared PCM to AirPlay without HTTP decoding. Match the same probe signals using their sender handoff times.
+- Count authenticated, unmuted Hey Jarvis events locally. Track captured samples without rescanning the recording on every packet.
+- App-only update. Compare prepared PCM with the existing AirPlay startup check at the same timing and volume.
+
 # 0.1.22
 
 - Add a local AirPlay startup check with the two known probes reversed to isolate loss of the first probe.
