@@ -1,3 +1,8 @@
+# 0.1.34
+
+- Match the acoustic question against the exact rendered AirPlay PCM. Include any inserted silence and anchor the search to sender handoff.
+- App-only update. Repeat the local microphone preflight with the same synthetic question.
+
 # 0.1.33
 
 - Add a local microphone preflight. Play the synthetic question and check that its verified acoustic endpoints fit in the bounded Voice PE sample window without opening a cloud session.

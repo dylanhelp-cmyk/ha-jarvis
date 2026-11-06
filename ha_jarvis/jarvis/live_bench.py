@@ -477,13 +477,16 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                                      if first_pcm is not None else None})
         measurement_end = fixture_end_at
         if microphone_input:
-            question_reference = np.frombuffer(question, dtype="<i2")
-            input_match = await asyncio.to_thread(
-                match_response, captured, capture_start, question_reference, 0,
-                fixture_requested_at, fixture_requested_at, handoff_at=lambda offset: fixture_requested_at + offset / RATE,
-                acoustic_delay_range=acoustic_delay_range(calibration))
+            question_reference = await asyncio.to_thread(render_reference, rendered[:reply_start_frame * 4])
+            question_bounds = voiced_bounds(question_reference)
+            input_match = {"status": "unavailable", "reason": "No voiced question PCM reached AirPlay"}
+            if question_bounds is not None:
+                input_match = await asyncio.to_thread(
+                    match_response, captured, capture_start, question_reference, question_bounds[0],
+                    fixture_requested_at, fixture_requested_at, handoff_at=handoff_at,
+                    acoustic_delay_range=acoustic_delay_range(calibration))
             result["acoustic_input"] = input_match
-            measurement_end = (input_match["audible_onset_at"] + len(question_reference) / RATE
+            measurement_end = (input_match["audible_onset_at"] + (question_bounds[1] - question_bounds[0]) / RATE
                                if input_match["status"] == "detected" else None)
             result["estimated_acoustic_question_end_at"] = measurement_end
             if measurement_end is not None and not (
