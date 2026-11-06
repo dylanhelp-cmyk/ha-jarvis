@@ -230,6 +230,8 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         async def send(session, pcm):
             if pcm == followup[:640]:
                 session.replied = False
+            # A continuous stream can retain a packet of digital silence.
+            FakeSource.instances[0].queued_frames = 352
             await original_send(session, pcm)
 
         detected = {"status": "detected", "latency_ms": 1100.0}
@@ -242,6 +244,7 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([trial["turn"] for trial in result["trials"]], ["first", "warm_followup"])
         self.assertEqual(len(FakeLive.instances), 1)
         self.assertEqual(matcher.call_count, 2)
+        self.assertTrue(all(boundary["queued_ms"] > 0 for boundary in result["reply_boundaries"]))
 
     async def test_startup_overlaps_and_fixture_waits_for_speaker_pull(self):
         capture_entered = asyncio.Event()

@@ -128,6 +128,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
     render_offsets = []
     render_handoffs = []
     first_voiced_at = last_voiced_at = None
+    last_voiced_render_at = None
     previous_callback_at = previous_chunk_seconds = None
     reference_gap = False
     fixture_end_at = None
@@ -148,12 +149,15 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
     first_turn = None
 
     def on_render(pcm, handed_off_at):
-        nonlocal alignment_error
+        nonlocal alignment_error, last_voiced_render_at
         if len(rendered) + len(pcm) > MAX_RENDER_BYTES:
             raise BufferError("AirPlay render reference exceeded the benchmark RAM limit")
         render_offsets.append(len(rendered) // 4)
         render_handoffs.append(handed_off_at)
         rendered.extend(pcm)
+        mono = np.frombuffer(pcm, dtype=">i2")[::2].astype(float)
+        if len(mono) and float(np.mean(mono * mono)) >= 100 ** 2:
+            last_voiced_render_at = handed_off_at
         if alignment is not None and alignment_error is None:
             try:
                 alignment.render(pcm, handed_off_at)
@@ -313,7 +317,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 playback.cancel()
                 await asyncio.gather(playback, return_exceptions=True)
 
-    async def exchange(question, *, quiet_seconds=QUIET_SECONDS):
+    async def exchange(question):
         nonlocal fixture_started, max_lag_ms
         paced_at = time.monotonic()
         sent_samples = 0
@@ -336,11 +340,25 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         endpoint = time.monotonic()
         deadline = endpoint + POST_INPUT_SECONDS
         bench.test["phase"] = "waiting for generated reply while streaming silence"
+        completion = "observation_timeout"
         while time.monotonic() < deadline:
             await send(bytes(640))
-            if last_voiced_at is not None and time.monotonic() - last_voiced_at >= quiet_seconds and source.queued_frames == 0:
-                return endpoint, "quiet_and_drained"
-        return endpoint, "observation_timeout"
+            now = time.monotonic()
+            if (last_voiced_at is not None and last_voiced_render_at is not None
+                    and now - max(last_voiced_at, last_voiced_render_at) >= QUIET_SECONDS
+                    and source.queued_frames <= RENDER_RATE // 10):
+                # Continuous cloud silence can keep the FIFO nonempty after
+                # the audible reply has passed through it.
+                completion = "quiet_and_drained"
+                break
+        now = time.monotonic()
+        result.setdefault("reply_boundaries", []).append({
+            "status": completion,
+            "cloud_voiced_age_ms": round((now - last_voiced_at) * 1000, 1) if last_voiced_at is not None else None,
+            "render_voiced_age_ms": round((now - last_voiced_render_at) * 1000, 1) if last_voiced_render_at is not None else None,
+            "queued_ms": round(source.queued_frames / RENDER_RATE * 1000, 1),
+        })
+        return endpoint, completion
 
     try:
         if transport not in ("webrtc", "websocket"):
@@ -391,13 +409,12 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 fixture_started = True
             else:
                 bench.test["phase"] = "sending paced canned question; microphone is not uploaded"
-            fixture_end_at, completion = await exchange(
-                b"" if microphone_input else question,
-                quiet_seconds=QUIET_SECONDS + (.75 if next_question is not None else 0))
+            fixture_end_at, completion = await exchange(b"" if microphone_input else question)
             if next_question is not None and completion == "quiet_and_drained":
                 reply_start_frame = len(rendered) // 4
                 first_turn = (fixture_end_at, first_voiced_at, reply_start_frame)
                 first_voiced_at = last_voiced_at = None
+                last_voiced_render_at = None
                 previous_callback_at = previous_chunk_seconds = None
                 bench.test["phase"] = "sending a follow-up in the existing voice session"
                 fixture_end_at, completion = await exchange(next_question)

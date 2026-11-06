@@ -1,3 +1,8 @@
+# 0.1.30
+
+- Use one second without voiced cloud or AirPlay PCM to pace the scripted follow-up. Allow up to 100 ms queued audio so a continuing stream of silence does not prevent a turn boundary. Record the two voice ages and queue size.
+- App-only update. Compare both transports with the same synthetic fixtures and inspect the reply-boundary diagnostics.
+
 # 0.1.29
 
 - Allow an agent-supplied synthetic follow-up in the same paid voice session and AirPlay stream. Report the first and warm follow-up turns separately. Room audio stays local.
