@@ -1,3 +1,9 @@
+# 0.1.35
+
+- Give the synthetic talker's AirPlay stream a 300 ms silent lead-in before the microphone capture window. The lead precedes the question and its measured endpoint.
+- Use verified acknowledgment timing for the raw scripted microphone test as well as local preflight. Room microphone upload still requires separate authorization.
+- App-only update. Repeat the local preflight and inspect the opening acoustic window and endpoint coverage.
+
 # 0.1.34
 
 - Match the acoustic question against the exact rendered AirPlay PCM. Include any inserted silence and anchor the search to sender handoff.

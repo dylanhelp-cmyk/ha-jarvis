@@ -21,6 +21,7 @@ from .transports import AirPlayTransport
 QUIET_SECONDS = 1.0
 POST_INPUT_SECONDS = 15.0
 PHYSICAL_TAIL_SECONDS = 2.0
+ACOUSTIC_FIXTURE_LEAD_SECONDS = .3
 RENDER_RATE = 44100
 MAX_RENDER_BYTES = 75 * RENDER_RATE * 4
 
@@ -395,11 +396,11 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
         calibration = recent_calibration()
         match_calibration = calibration or recent_calibration(allow_ack=True)
-        if local_preflight:
+        if microphone_input:
             calibration = match_calibration
         if microphone_input:
             if calibration is None or not 0 < calibration[0] <= 3000:
-                raise RuntimeError("Run a quiet-room AirPlay calibration before the acoustic microphone test")
+                raise RuntimeError("Verify an AirPlay acknowledgment or run a quiet-room calibration before the microphone test")
             bench.device.pcm_consumer = on_capture
         elif calibration is not None and calibration[0] <= 3000:
             try:
@@ -422,6 +423,10 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             if microphone_input:
                 bench.test["phase"] = ("playing synthetic question and checking local capture" if local_preflight
                                        else "playing synthetic question and streaming bounded room microphone")
+                # This speaker is the synthetic talker. Give its fresh stream
+                # the tested startup lead before exposing the first phoneme.
+                await asyncio.sleep(ACOUSTIC_FIXTURE_LEAD_SECONDS)
+                result["acoustic_fixture_lead_ms"] = round(ACOUSTIC_FIXTURE_LEAD_SECONDS * 1000)
                 await play_acoustic_question(question, calibration)
                 reply_start_frame = len(rendered) // 4
                 fixture_started = True
