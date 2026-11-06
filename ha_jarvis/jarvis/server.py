@@ -734,7 +734,7 @@ def create_ui(bench):
                 await bench.device.ws.close(code=1008, message=b"Pairing changed")
             if new["wiim_host"] != bench.config["wiim_host"]:
                 for result in bench.results:
-                    if result.get("kind") == "echo":
+                    if result.get("kind") in ("echo", "startup_ack"):
                         result["calibration_stale"] = True
             bench.config = new
             bench.save()

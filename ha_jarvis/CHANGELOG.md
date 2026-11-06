@@ -1,3 +1,8 @@
+# 0.1.32
+
+- Use a recent verified acknowledgment at the same receiver level and timing to bound reply matching when a room echo calibration is unavailable.
+- App-only update. Verify both acknowledgment words, then compare the synthetic follow-up under the same playback settings.
+
 # 0.1.31
 
 - Allow a 150 ms AirPlay timing request for a controlled comparison. Compare wake acknowledgment and stability with 250 ms before selecting a setting.

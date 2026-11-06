@@ -186,18 +186,23 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         index = bisect_right(render_offsets, render_frame) - 1
         return render_handoffs[index]
 
-    def recent_calibration():
+    def recent_calibration(*, allow_ack=False):
         timing = bench.config["airplay_latency_ms"]
         for prior in bench.results[1:]:
             echo = prior.get("echo", {})
             receiver = prior.get("transport", {}).get("receiver_after") or {}
             if (prior.get("route") != "airplay" or prior.get("status") not in ("measured", "unavailable")
                     or prior.get("calibration_stale")
-                    or echo.get("delay_assumed_ms") is None or prior.get("requested_airplay_latency_ms") != timing
+                    or prior.get("requested_airplay_latency_ms") != timing
                     or receiver.get("volume_percent") is None
                     or (datetime.now(timezone.utc) - datetime.fromisoformat(prior["started_at"])).total_seconds() > 900):
                 continue
-            return echo["delay_assumed_ms"], receiver["volume_percent"]
+            delay = echo.get("delay_assumed_ms")
+            if delay is not None:
+                return delay, receiver["volume_percent"]
+            if allow_ack and prior.get("acknowledgment_match") == "both_word_windows_agree":
+                delays = [trial["latency_ms"] for trial in prior["trials"]]
+                return float(np.median(delays)), receiver["volume_percent"]
         return None
 
     def calibration_matches_receiver(calibration):
@@ -382,6 +387,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
         result["fixture"] = {"input_samples": len(fixture_samples), "trimmed_samples": len(question) // 2,
                              "trimmed_head_samples": bounds[0], "trimmed_tail_samples": len(fixture_samples) - bounds[1]}
         calibration = recent_calibration()
+        match_calibration = calibration or recent_calibration(allow_ack=True)
         if microphone_input:
             if calibration is None or not 0 < calibration[0] <= 3000:
                 raise RuntimeError("Run a quiet-room AirPlay calibration before the acoustic microphone test")
@@ -449,7 +455,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
                 first_detection = await asyncio.to_thread(
                     match_response, captured, capture_start, first_reference, first_bounds[0],
                     first_end, first_pcm, handoff_at=handoff_at,
-                    acoustic_delay_range=acoustic_delay_range(calibration))
+                    acoustic_delay_range=acoustic_delay_range(match_calibration))
             result["trials"].append({"trial": 1, "turn": "first", **first_detection,
                                      "first_voiced_pcm_ms": round((first_pcm - first_end) * 1000, 1)
                                      if first_pcm is not None else None})
@@ -483,7 +489,7 @@ async def run_cloud_benchmark(bench, transport: str, fixture: bytes, *, micropho
             if output_bounds is None:
                 detection = {"status": "unavailable", "latency_ms": None, "reason": "No voiced PCM reached the AirPlay sender"}
             else:
-                delay_range = acoustic_delay_range(calibration)
+                delay_range = acoustic_delay_range(match_calibration)
                 detection = await asyncio.to_thread(match_response, captured, capture_start,
                     reference, output_bounds[0], measurement_end, first_voiced_at,
                     handoff_at=handoff_at, acoustic_delay_range=delay_range)

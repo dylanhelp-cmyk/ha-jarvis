@@ -246,6 +246,21 @@ class CloudBenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(matcher.call_count, 2)
         self.assertTrue(all(boundary["queued_ms"] > 0 for boundary in result["reply_boundaries"]))
 
+    async def test_verified_acknowledgment_bounds_reply_matching_without_enabling_aec(self):
+        self.bench.results.append({
+            "kind": "startup_ack", "route": "airplay", "status": "measured",
+            "requested_airplay_latency_ms": 500, "started_at": datetime.now(timezone.utc).isoformat(),
+            "acknowledgment_match": "both_word_windows_agree",
+            "trials": [{"latency_ms": 445}, {"latency_ms": 455}],
+            "transport": {"receiver_after": {"volume_percent": 40}},
+        })
+        detected = {"status": "detected", "latency_ms": 1100.0}
+        with patch("jarvis.live_bench.match_response", return_value=detected):
+            await run_cloud_benchmark(self.bench, "websocket", self.fixture)
+        result = self.bench.results[0]
+        self.assertEqual(result["trials"][0]["acoustic_search_delay_range_ms"], [150, 750])
+        self.assertNotIn("live_echo", result)
+
     async def test_startup_overlaps_and_fixture_waits_for_speaker_pull(self):
         capture_entered = asyncio.Event()
         release_capture = asyncio.Event()
