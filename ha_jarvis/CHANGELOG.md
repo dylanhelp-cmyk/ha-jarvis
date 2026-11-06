@@ -1,3 +1,8 @@
+# 0.1.28
+
+- Allow the local armed test to play a synthetic wake stimulus supplied by the test runner, close that session and measure the acknowledgment on a fresh session.
+- App-only update. The scripted test reports wake stimulus teardown separately from acknowledgment playback. Manual arming remains available.
+
 # 0.1.27
 
 - Add an optional one-shot, 30-second wake arm to the local acknowledgment test. Synchronize clocks while arming, start capture on a new wake and report wake receipt to acoustic onset.

@@ -309,7 +309,7 @@ class Bench:
             with suppress(asyncio.CancelledError):
                 await self.task
 
-    async def run(self, kind, repetitions, *, lead_ms=100, wait_for_wake=False):
+    async def run(self, kind, repetitions, *, lead_ms=100, wait_for_wake=False, wake_stimulus=None):
         from .transports import NativeHTTPTransport, AirPlayTransport
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": self.config["route"],
@@ -333,12 +333,40 @@ class Bench:
                 await self.device.sync()
                 self.device.wake_event.clear()
                 self.test["phase"] = "armed for Hey Jarvis for 30 seconds"
+                if wake_stimulus is not None:
+                    from .live_audio import StartupPCMSource
+
+                    stimulus = Stream("startup_ack", 2, lead_ms=500, acknowledgment=wake_stimulus)
+                    self.transport = AirPlayTransport.for_wiim(
+                        self.config["wiim_host"], self.config["verify_tls"],
+                        discovery_cache=self.airplay_discovery_cache)
+
+                    async def stimulus_source(*_format):
+                        return StartupPCMSource(stimulus)
+
+                    self.test["phase"] = "playing local synthetic wake stimulus"
+                    await self.transport.play("http://127.0.0.1:8099/wake-stimulus.wav", {
+                        "codec": "wav", "airplay_latency_ms": self.config["airplay_latency_ms"],
+                        "source_factory": stimulus_source})
+                    await self.transport.wait_for_stream(stimulus.connected, timeout=12)
+                    result["warnings"].append(
+                        "The same WiiM plays the wake stimulus and acknowledgment in separate sessions. "
+                        "Wake-to-sound includes stimulus-session teardown.")
                 try:
-                    await asyncio.wait_for(self.device.wake_event.wait(), 30)
+                    await asyncio.wait_for(self.device.wake_event.wait(), 30 if wake_stimulus is None else 5)
                 except TimeoutError:
                     result.update(status="unavailable", error="No Hey Jarvis event received during the arm window")
                     return
                 wake_at = self.device.wake_event_at
+                if wake_stimulus is not None:
+                    if wake_at < stimulus.started_at + .5:
+                        result.update(status="unavailable", error="Wake arrived before the scripted stimulus could play")
+                        return
+                    self.test["phase"] = "closing wake stimulus before acknowledgment"
+                    await asyncio.wait_for(self.transport.stop(), 8)
+                    await self.transport.close()
+                    self.transport = None
+                    result["wake_stimulus_teardown_ms"] = round((time.monotonic() - wake_at) * 1000, 1)
                 self.test["phase"] = "opening local microphone after wake"
             capture_margin = 65 if self.config["route"] == "airplay" else 45
             duration_ms = int((CONNECTION_TEST_SECONDS + 5) * 1000) if kind == "connection" else min(120000, (repetitions * 2 + capture_margin) * 1000)
@@ -731,9 +759,20 @@ def create_ui(bench):
         wait_for_wake = data.get("wait_for_wake", False)
         if type(wait_for_wake) is not bool or (wait_for_wake and kind != "startup_ack"):
             raise ValueError("Wake arming is only available for the acknowledgment check")
+        wake_stimulus = None
+        if "wake_stimulus_b64" in data:
+            if not wait_for_wake:
+                raise ValueError("A wake stimulus requires the armed acknowledgment check")
+            try:
+                wake_stimulus = base64.b64decode(data["wake_stimulus_b64"], validate=True)
+            except (ValueError, TypeError):
+                raise ValueError("Supply base64 PCM16LE for the local wake stimulus") from None
+            if len(wake_stimulus) != 3 * RATE:
+                raise ValueError("The local wake stimulus must be 1.5 seconds at 16 kHz mono")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms, wait_for_wake=wait_for_wake))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, lead_ms=lead_ms,
+                                                 wait_for_wake=wait_for_wake, wake_stimulus=wake_stimulus))
         return web.json_response({"test_id": ident}, status=202)
     async def cancel(request):
         asyncio.create_task(bench.cancel())
