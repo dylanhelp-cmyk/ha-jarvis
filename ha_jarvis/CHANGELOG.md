@@ -1,3 +1,7 @@
+# 0.2.27
+
+- Run the isolated Realtime comparison silently and report the time to returned voice audio. This experiment uses generated input and opens neither the room microphone nor the speaker.
+
 # 0.2.26
 
 - Drain queued reply audio after a failed synthetic comparison. Preserve the failure reason in the result.

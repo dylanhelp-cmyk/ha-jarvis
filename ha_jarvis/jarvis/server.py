@@ -542,16 +542,21 @@ class Bench:
         result["metric"] = "synthetic_digital_speech_end_to_audible_reply"
         result["cloud"] = await benchmark_replies(self.device, self.cloud_settings, transport,
                                                    result["id"], fixtures, timings, stage, profile)
-        await asyncio.sleep(.35)
-        await self.device.end()
-        captured, capture_start = self.device.recording()
-        result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
-        offset = self.device.clock_offset_ms
-        delay = self.alignment_delay()
+        if result["cloud"]["playback_enabled"]:
+            await asyncio.sleep(.35)
+            await self.device.end()
+            captured, capture_start = self.device.recording()
+            result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
+            offset = self.device.clock_offset_ms
+            delay = self.alignment_delay()
         for index, (endpoint, reply, answer_check) in enumerate(timings, 1):
-            match = await asyncio.to_thread(
-                match_streamed_reply, captured, capture_start, reply, endpoint, offset,
-                alignment_ms=delay, clock_uncertainty_ms=result["clock_uncertainty_ms"])
+            if result["cloud"]["playback_enabled"]:
+                match = await asyncio.to_thread(
+                    match_streamed_reply, captured, capture_start, reply, endpoint, offset,
+                    alignment_ms=delay, clock_uncertainty_ms=result["clock_uncertainty_ms"])
+            else:
+                match = {"status": "digital_only", "latency_ms": None,
+                         "reason": "Provider timing only. Speaker playback was disabled."}
             audible_at = match.get("audible_onset_at")
             match.update(trial=index, turn="first" if index == 1 else "warm_followup",
                          digital_end_to_cloud_voice_ms=round((reply.first_voice_at - endpoint) * 1000, 1),
@@ -565,7 +570,8 @@ class Bench:
             result["trials"].append({"trial": index, "turn": "first" if index == 1 else "warm_followup",
                                      "status": "unavailable", "latency_ms": None,
                                      "reason": "The synthetic turn did not complete"})
-        result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
+        result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
+                                             for x in result["trials"]) else "unavailable"
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False):
@@ -577,7 +583,13 @@ class Bench:
         self.results.insert(0, result)
         del self.results[30:]
         player = sender = None
+        digital_only = kind == "synthetic_replies" and startup_transport == "realtime"
         try:
+            if digital_only:
+                result["route"] = "digital"
+                result["warnings"].clear()
+                await self.measure_synthetic_replies(result, startup_transport, reply_profile)
+                return
             self.test["phase"] = "synchronizing Voice PE and starting capture"
             wake_kind = kind in ("wake_ack", "voice_turn")
             armed = wake_kind and self.device.info.get("wake_capture_protocol") == 1
@@ -714,11 +726,12 @@ class Bench:
                     except (RuntimeError, OSError, TimeoutError):
                         result["warnings"].append("Voice PE did not confirm the playback stop")
                     result["playback"] = player.snapshot()
-                with suppress(RuntimeError, OSError, TimeoutError):
-                    await self.device.end()
-                result["capture"] = self.device.capture_diagnostics()
-                result["device_session"] = dict(self.device.capture_session)
-                self.observe_firmware()
+                if not digital_only:
+                    with suppress(RuntimeError, OSError, TimeoutError):
+                        await self.device.end()
+                    result["capture"] = self.device.capture_diagnostics()
+                    result["device_session"] = dict(self.device.capture_session)
+                    self.observe_firmware()
                 result["summary"] = summarize(result["trials"])
                 result["elapsed_seconds"] = round(time.monotonic() - started, 3)
             finally:
@@ -868,13 +881,14 @@ def create_ui(bench):
             raise ValueError("Choose a supported synthetic reply profile")
         if transport not in ("websocket", "webrtc", "realtime") or data["confirm_paid"] is not True:
             raise ValueError("Explicitly confirm a paid synthetic reply test and choose the transport")
-        if data["comfortable_volume_confirmed"] is not True:
+        if transport != "realtime" and data["comfortable_volume_confirmed"] is not True:
             raise ValueError("Confirm comfortable speaker volume")
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         device = bench.device.snapshot()
-        if (not device["connected"] or device.get("muted") or device.get("raw_ready") is not True
-                or device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True):
+        if transport != "realtime" and (not device["connected"] or device.get("muted")
+                or device.get("raw_ready") is not True or device.get("playback_protocol") != 1
+                or device.get("jack_plugged") is not True):
             raise ValueError("Connect the paired Voice PE and speakers before starting")
         settings = bench.cloud_settings.public()
         if not settings["api_key_configured"] or settings["paid_retry_blocked"]:

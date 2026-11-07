@@ -271,15 +271,17 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                               instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
     failure = None
     try:
-        stage("connecting to GPT-Live")
+        stage("connecting to OpenAI Realtime" if transport == "realtime" else "connecting to GPT-Live")
         await session.start()
         for index, (fixture, endpoint) in enumerate(fixtures, 1):
             reply = BenchReply(device, f"{identity}-{index}", output_gain_db=-6,
                                output_buffer_seconds=8 if transport == "realtime" else 1)
             current = reply
-            device.playback = reply.player
-            sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
-                                                                   source_prime_packets=12))
+            sender = None
+            if transport != "realtime":
+                device.playback = reply.player
+                sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
+                                                                       source_prime_packets=12))
             stage(f"streaming synthetic turn {index}")
             origin = time.monotonic()
             if transport == "realtime":
@@ -288,7 +290,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
             fixture_end_at = None
             try:
                 while time.monotonic() < origin + len(fixture) / (2 * RATE) + 9:
-                    if sender.done():
+                    if sender is not None and sender.done():
                         sender.result()
                         raise RuntimeError("Reply playback ended before the turn finished")
                     if session.metrics.error:
@@ -310,11 +312,14 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                 else:
                     raise TimeoutError("No complete spoken reply arrived within the trial window")
                 current = None
-                async with asyncio.timeout(3):
-                    await reply.finish()
-                    await sender
-                if reply.player.frames_rendered != reply.player.frames_sent:
-                    raise RuntimeError("Voice PE did not confirm rendering the complete synthetic reply")
+                if sender is not None:
+                    async with asyncio.timeout(3):
+                        await reply.finish()
+                        await sender
+                    if reply.player.frames_rendered != reply.player.frames_sent:
+                        raise RuntimeError("Voice PE did not confirm rendering the complete synthetic reply")
+                if reply.first_voice_at is None:
+                    raise RuntimeError("The synthetic reply contained no voiced audio")
                 expected = ("paris", "seine")[index - 1]
                 answer_check = (expected in re.findall(r"[a-z]+", reply.transcript.casefold())
                                 if reply.transcript.strip() else None)
@@ -322,7 +327,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                 timings.append((fixture_end_at, reply, answer_check))
             except (OSError, RuntimeError, ValueError, TimeoutError):
                 current = None
-                if reply.first_voice_at is not None and not sender.done():
+                if sender is not None and reply.first_voice_at is not None and not sender.done():
                     with suppress(OSError, RuntimeError, ValueError, TimeoutError):
                         async with asyncio.timeout(8):
                             await reply.finish()
@@ -330,17 +335,19 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                 raise
             finally:
                 current = None
-                if not sender.done():
-                    sender.cancel()
-                await asyncio.gather(sender, return_exceptions=True)
-                with suppress(OSError, RuntimeError, TimeoutError):
-                    await reply.player.stop()
+                if sender is not None:
+                    if not sender.done():
+                        sender.cancel()
+                    await asyncio.gather(sender, return_exceptions=True)
+                    with suppress(OSError, RuntimeError, TimeoutError):
+                        await reply.player.stop()
                 device.playback = None
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         failure = session.metrics.error or str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
-    return {"transport": transport, "model": metrics.model, "profile": profile, "playback_prime_ms": 50, "source_reserve_ms": 120,
+    return {"transport": transport, "model": metrics.model, "profile": profile,
+            "playback_enabled": transport != "realtime", "playback_prime_ms": 50, "source_reserve_ms": 120,
             "output_gain_db": -6, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}

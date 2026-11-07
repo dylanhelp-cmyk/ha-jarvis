@@ -39,6 +39,26 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_realtime_benchmark_uses_neither_microphone_nor_speaker(self):
+        from types import SimpleNamespace
+
+        async def benchmark(_device, _settings, _transport, _id, _fixtures, timings, _stage, _profile):
+            player = SimpleNamespace(snapshot=lambda: {})
+            timings.append((1.0, SimpleNamespace(first_voice_at=1.4, player=player), True))
+            return {"playback_enabled": False, "failure": None}
+
+        self.bench.test = {"id": "digital", "running": True}
+        with (patch.object(self.bench.device, "begin") as begin,
+              patch("jarvis.live_bench.synthesize_fixture", return_value=(bytes(640), 320)),
+              patch("jarvis.live_bench.benchmark_replies", side_effect=benchmark)):
+            await self.bench.run("synthetic_replies", 2, "realtime")
+        begin.assert_not_called()
+        result = self.bench.results[0]
+        self.assertEqual(result["route"], "digital")
+        self.assertNotIn("capture", result)
+        self.assertEqual(result["trials"][0]["digital_end_to_cloud_voice_ms"], 400)
+        self.assertIsNone(result["trials"][0]["latency_ms"])
+
     async def test_cloud_key_stays_local_and_never_enters_read_or_diagnostic_responses(self):
         key = 'sk-test-local-only-' + 'x' * 32
         response = await self.ui.put('/api/cloud', json={'api_key':key})
