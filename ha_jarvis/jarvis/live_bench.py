@@ -104,6 +104,40 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
             "method": "multiple generated-reply spectral windows with reference-offset compensation"}
 
 
+def match_streamed_reply(captured, capture_start, reply, endpoint_at, clock_offset_ms,
+                         *, alignment_ms=None, clock_uncertainty_ms=0):
+    """Search actual room audio near the device's confirmed render timeline."""
+    reference = render_reference(bytes(reply.pcm))
+    onset = reply.first_voice_sample
+    if onset is None or onset >= len(reference):
+        return {"status": "unavailable", "reason": "Reply reference had no usable speech", "latency_ms": None}
+
+    span = reply.player.confirmed_span()
+    span_error_ms = abs(span[1] - span[0] - reply.player.frames_sent / 48) if span else None
+    if alignment_ms is not None and span_error_ms is not None and span_error_ms <= 40:
+        dma_start = (span[0] + clock_offset_ms) / 1000
+        margin_ms = clock_uncertainty_ms + span_error_ms + 25
+        delay_range = ((alignment_ms - margin_ms) / 1000, (alignment_ms + margin_ms) / 1000)
+
+        def handoff(sample):
+            return dma_start + sample / RATE
+
+        scope = "confirmed DMA span and current echo alignment"
+    else:
+        delay_range = (-.04, .45)
+
+        def handoff(sample):
+            return reply.player.accepted_at(sample * 3, clock_offset_ms)
+
+        scope = "speaker acceptance timestamps"
+
+    match = match_response(captured, capture_start, reference, onset, endpoint_at, reply.first_voice_at,
+                           handoff_at=handoff, acoustic_delay_range=delay_range,
+                           window_seconds=.14, onset_horizon_seconds=.28)
+    match["acoustic_search_clock"] = scope
+    return match
+
+
 SYNTHETIC_PROMPTS = (
     "What is the capital of France?",
     "And which river flows through that city?",

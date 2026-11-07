@@ -5,7 +5,8 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE, make_probe
-from jarvis.live_bench import BenchReply, match_response, render_reference, voiced_bounds
+from jarvis.live_bench import BenchReply, match_response, match_streamed_reply, render_reference, voiced_bounds
+from jarvis.playback import stereo_pcm
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
@@ -36,6 +37,21 @@ class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReplyMatchingTests(unittest.TestCase):
+    def test_calibrated_stream_matching_rejects_a_stronger_late_copy(self):
+        pcm = stereo_pcm(make_probe(513)[:int(.42 * RATE)])
+        reference = render_reference(pcm)
+        capture = np.zeros(RATE, dtype="<i2")
+        early, late = int(.24 * RATE), int(.60 * RATE)
+        capture[early:early + len(reference)] = (reference * .4).astype("<i2")
+        capture[late:late + len(reference)] += reference[:len(capture) - late]
+        player = SimpleNamespace(frames_sent=len(pcm) // 4, confirmed_span=lambda: (100207, 100627))
+        reply = SimpleNamespace(pcm=pcm, player=player, first_voice_at=100, first_voice_sample=0)
+        measured = match_streamed_reply(capture, 100, reply, 100, 0,
+                                        alignment_ms=33, clock_uncertainty_ms=20)
+        self.assertEqual(measured["status"], "detected", measured)
+        self.assertAlmostEqual(measured["latency_ms"], 240, delta=12)
+        self.assertEqual(measured["acoustic_search_clock"], "confirmed DMA span and current echo alignment")
+
     def test_generated_reference_matches_acoustic_copy_with_window_offset_compensation(self):
         reply = np.concatenate((np.zeros(1600, dtype="<i2"), make_probe(513), make_probe(514)))
         captured = np.zeros(6 * RATE, dtype="<i2")

@@ -418,7 +418,7 @@ class Bench:
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect):
         from .conversation_trial import run_voice_turn
-        from .live_bench import match_response, render_reference
+        from .live_bench import match_streamed_reply
 
         device = self.device
         cached = await asyncio.to_thread(verified_render, self.data_dir)
@@ -454,22 +454,10 @@ class Bench:
                 "peak_pcm": int(np.max(np.abs(output.astype(np.int32)), initial=0)),
                 "full_scale_samples": int(np.count_nonzero((output == -32768) | (output == 32767))),
             }
-            reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
-            if reply.first_voice_sample is None or reply.first_voice_sample >= len(reference):
-                match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
-            else:
-                # Limit each match to the time its samples could have reached
-                # the jack. A later copy elsewhere in the recording can win
-                # an unrestricted spectral search.
-                lo = max(0, round((reply.first_voice_at - .04 - capture_start) * RATE))
-                hi = min(len(captured), round((reply.first_voice_at + 1.2 - capture_start) * RATE))
-                def handoff(sample):
-                    return reply.player.accepted_at(sample * 3, device.clock_offset_ms)
-                match = await asyncio.to_thread(match_response, captured[lo:hi], capture_start + lo / RATE,
-                                                reference, reply.first_voice_sample, reply.first_voice_at, reply.first_voice_at,
-                                                handoff_at=handoff, acoustic_delay_range=(-.04, .45),
-                                                window_seconds=.14, onset_horizon_seconds=.28)
-                match.pop("fixture_end_to_audible_ms", None)
+            match = await asyncio.to_thread(
+                match_streamed_reply, captured, capture_start, reply, reply.first_voice_at, device.clock_offset_ms,
+                alignment_ms=delay, clock_uncertainty_ms=result["clock_uncertainty_ms"])
+            match.pop("fixture_end_to_audible_ms", None)
             trial = {"trial": index + 1, "turn": "warm_followup" if index else "first", **match}
             result["trials"].append(trial)
             turn["status"] = "measured" if match["status"] == "detected" else "unavailable"
@@ -544,8 +532,7 @@ class Bench:
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
     async def measure_synthetic_replies(self, result, transport, profile):
-        from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
-                                 render_reference, synthesize_fixture)
+        from .live_bench import SYNTHETIC_PROMPTS, benchmark_replies, match_streamed_reply, synthesize_fixture
 
         self.test["phase"] = "synthesizing fixed test prompts locally"
         fixtures = [await synthesize_fixture(prompt) for prompt in SYNTHETIC_PROMPTS]
@@ -560,17 +547,11 @@ class Bench:
         captured, capture_start = self.device.recording()
         result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
         offset = self.device.clock_offset_ms
+        delay = self.alignment_delay()
         for index, (endpoint, reply, answer_check) in enumerate(timings, 1):
-            reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
-            if reply.first_voice_sample is None or reply.first_voice_sample >= len(reference):
-                match = {"status": "unavailable", "reason": "Reply reference has no usable speech", "latency_ms": None}
-            else:
-                def handoff(sample):
-                    return reply.player.accepted_at(sample * 3, offset)
-                match = await asyncio.to_thread(
-                    match_response, captured, capture_start, reference, reply.first_voice_sample,
-                    endpoint, reply.first_voice_at, handoff_at=handoff,
-                    acoustic_delay_range=(-.04, .45), window_seconds=.14, onset_horizon_seconds=.28)
+            match = await asyncio.to_thread(
+                match_streamed_reply, captured, capture_start, reply, endpoint, offset,
+                alignment_ms=delay, clock_uncertainty_ms=result["clock_uncertainty_ms"])
             audible_at = match.get("audible_onset_at")
             match.update(trial=index, turn="first" if index == 1 else "warm_followup",
                          digital_end_to_cloud_voice_ms=round((reply.first_voice_at - endpoint) * 1000, 1),

@@ -1,3 +1,8 @@
+# 0.2.24
+
+- Narrow acoustic reply matching with the Voice PE's confirmed playback clock and current echo alignment. Require independent microphone windows to agree before reporting latency.
+- App-only update. Run Echo reference alignment to make calibrated reply timing available.
+
 # 0.2.23
 
 - Retry a timed-out wake clip transfer once on the same paired connection. Ignore late confirmations from the failed transfer.
