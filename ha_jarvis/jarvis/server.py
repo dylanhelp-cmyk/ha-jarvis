@@ -866,7 +866,7 @@ def create_ui(bench):
         profile = data.get("profile", "baseline")
         if not isinstance(profile, str) or profile not in REPLY_PROFILES:
             raise ValueError("Choose a supported synthetic reply profile")
-        if transport not in ("websocket", "webrtc") or data["confirm_paid"] is not True:
+        if transport not in ("websocket", "webrtc", "realtime") or data["confirm_paid"] is not True:
             raise ValueError("Explicitly confirm a paid synthetic reply test and choose the transport")
         if data["comfortable_volume_confirmed"] is not True:
             raise ValueError("Confirm comfortable speaker volume")

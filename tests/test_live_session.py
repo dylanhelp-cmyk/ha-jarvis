@@ -13,6 +13,7 @@ from av import AudioFrame
 
 from jarvis.cloud_settings import CloudSettings, CloudBudgetError
 from jarvis.live_session import LiveSession, LiveSessionError, _PCMTrack
+from jarvis.realtime_bench import MODEL as REALTIME_MODEL, RealtimeBenchmarkSession
 
 
 class FakeWS:
@@ -145,6 +146,44 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         result = LiveSession(self.settings, on_audio=self.output, close_timeout=.05, **kwargs)
         self.sessions.append(result)
         return result
+
+    async def test_realtime_bench_limits_replies_and_settles_response_usage(self):
+        class RealtimeWS(FakeWS):
+            async def send_json(self, value):
+                await super().send_json(value)
+                if value["type"] == "session.update":
+                    self.event({"type": "session.updated", "session": {"id": "realtime_offline"}})
+                elif value["type"] == "response.create":
+                    self.event({"type": "response.output_audio.delta",
+                                "delta": base64.b64encode(bytes(960)).decode()})
+                    self.event({"type": "response.done", "response": {"status": "completed",
+                                "usage": {"input_tokens": 100, "output_tokens": 80}}})
+
+        ws = RealtimeWS()
+        http = FakeHTTP(ws)
+        session = RealtimeBenchmarkSession(self.settings, on_audio=self.output, instructions="Answer briefly.",
+                                           on_transcript=None)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=http):
+            await session.start()
+        self.sessions.append(session)
+        self.assertTrue(http.url.endswith("?model=" + REALTIME_MODEL))
+        config = ws.sent[0]["session"]
+        self.assertFalse(config["audio"]["input"]["turn_detection"]["create_response"])
+        self.assertEqual(config["max_output_tokens"], 512)
+        for turn in (1, 2):
+            session.arm_turn()
+            await session.send_audio(bytes(640))
+            ws.event({"type": "input_audio_buffer.committed"})
+            ws.event({"type": "input_audio_buffer.committed"})
+            async with asyncio.timeout(1):
+                while session.completed < turn:
+                    await asyncio.sleep(.001)
+        with self.assertRaises(LiveSessionError):
+            session.arm_turn()
+        self.assertEqual(sum(event["type"] == "response.create" for event in ws.sent), 2)
+        self.assertTrue((await session.close()).finalization_confirmed)
+        self.assertAlmostEqual(self.settings.spent_usd, .0052)
+        self.assertIsNone(self.settings.pending)
 
     async def test_websocket_order_format_output_and_final_cumulative_usage(self):
         ws = FakeWS()

@@ -253,8 +253,14 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         if current is not None and isinstance(delta, str):
             current.transcript = (current.transcript + delta)[:512]
 
-    session = LiveSession(settings, on_audio=on_audio, transport=transport,
-                          instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
+    if transport == "realtime":
+        from .realtime_bench import RealtimeBenchmarkSession
+
+        session = RealtimeBenchmarkSession(settings, on_audio=on_audio,
+                                           instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
+    else:
+        session = LiveSession(settings, on_audio=on_audio, transport=transport,
+                              instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
     failure = None
     try:
         stage("connecting to GPT-Live")
@@ -267,6 +273,8 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                                                                    source_prime_packets=12))
             stage(f"streaming synthetic turn {index}")
             origin = time.monotonic()
+            if transport == "realtime":
+                session.arm_turn()
             input_samples = 0
             fixture_end_at = None
             try:
@@ -313,7 +321,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         failure = str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
-    return {"transport": transport, "profile": profile, "playback_prime_ms": 50, "source_reserve_ms": 120,
+    return {"transport": transport, "model": metrics.model, "profile": profile, "playback_prime_ms": 50, "source_reserve_ms": 120,
             "output_gain_db": -6, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}

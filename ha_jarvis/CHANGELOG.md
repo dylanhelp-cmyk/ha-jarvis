@@ -1,3 +1,8 @@
+# 0.2.25
+
+- Add a separate synthetic comparison for GPT-Realtime-2.1 Mini over WebSocket with 220 ms of silence to detect the end of speech.
+- Keep the comparison limited to two generated prompts and two replies. Settle its token usage against the existing test budget.
+
 # 0.2.24
 
 - Narrow acoustic reply matching with the Voice PE's confirmed playback clock and current echo alignment. Require independent microphone windows to agree before reporting latency.

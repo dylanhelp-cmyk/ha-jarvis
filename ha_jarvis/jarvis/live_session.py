@@ -132,7 +132,7 @@ class LiveSession:
     async def start(self):
         if self._attempt or self._disposed:
             raise LiveSessionError("A LiveSession can start only once")
-        self._attempt = self.settings.reserve_attempt(transport=self.transport)
+        self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport)
         self._started_at = time.monotonic()
         try:
             self._http = aiohttp.ClientSession(
@@ -144,10 +144,7 @@ class LiveSession:
                 if self.transport == "webrtc":
                     await self._start_webrtc()
                 else:
-                    self._ws = await self._http.ws_connect("wss://api.openai.com/v1/live/sessions",
-                                                          max_msg_size=262144)
-                    self._spawn(self._receive_ws())
-                    await self._ws.send_json({"type": "session.start", "session": self._config()})
+                    await self._start_websocket()
                 ready = asyncio.create_task(self._ready.wait())
                 failed = asyncio.create_task(self._failed.wait())
                 try:
@@ -166,6 +163,11 @@ class LiveSession:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise LiveSessionError(self.metrics.error) from None
+
+    async def _start_websocket(self):
+        self._ws = await self._http.ws_connect("wss://api.openai.com/v1/live/sessions", max_msg_size=262144)
+        self._spawn(self._receive_ws())
+        await self._ws.send_json({"type": "session.start", "session": self._config()})
 
     async def _start_webrtc(self):
         self._pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))

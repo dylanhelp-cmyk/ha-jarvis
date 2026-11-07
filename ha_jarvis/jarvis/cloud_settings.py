@@ -79,12 +79,12 @@ class CloudSettings:
             raise CloudBudgetError("Invalid saved cloud spending; paid calls are blocked")
 
     def reserve_attempt(self, *, transport):
-        """Reserve a full 60-second attempt before any network operation.
+        """Reserve up to US$0.05 per attempt before any network operation.
 
         This is a single-App ledger. Never create parallel paid session owners.
         A process restart leaves pending attempts blocked until accounted for.
         """
-        if transport not in ("webrtc", "websocket"):
+        if transport not in ("webrtc", "websocket", "realtime"):
             raise ValueError("Unknown cloud transport")
         # Other objects constructed before the current attempt must also see its
         # durable reservation. This method is synchronous on the App event loop.
@@ -129,8 +129,20 @@ class CloudSettings:
         pending = self._attempt(attempt_id)
         # Initialization is a floor/credit, never another 15 seconds added.
         billed = max(pending["usage_seconds"], 15 if pending["transport"] == "webrtc" else 0)
+        self._settle(billed * VOICE_USD_PER_SECOND)
+
+    def finalize_realtime(self, attempt_id, estimated_usd):
+        pending = self._attempt(attempt_id)
+        if pending["transport"] != "realtime":
+            raise CloudBudgetError("Only Realtime attempts use token billing")
+        if estimated_usd is not None and (not math.isfinite(estimated_usd) or estimated_usd < 0):
+            raise CloudBudgetError("Invalid Realtime cost estimate")
+        # If response usage is incomplete, debit the entire reservation.
+        self._settle(pending["reserved_usd"] if estimated_usd is None else estimated_usd)
+
+    def _settle(self, amount):
         old_spent, old_pending = self.spent_usd, self.pending
-        self.spent_usd += billed * VOICE_USD_PER_SECOND
+        self.spent_usd += amount
         self.pending = None
         try:
             self._save()
