@@ -1,0 +1,94 @@
+import asyncio
+from types import SimpleNamespace
+import time
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+
+from jarvis.audio import PCMFrame
+from jarvis.conversation_trial import run_voice_turn
+from jarvis.opening_audio import OpeningAudio
+
+
+class LocalEcho:
+    def __init__(self, delay):
+        self.delay = delay
+
+    def render(self, *args, **kwargs):
+        pass
+
+    def finish_render(self, *args):
+        pass
+
+    def capture(self, frame, offset):
+        return frame.samples.tobytes()
+
+
+class SimulatedSession:
+    def __init__(self, settings, *, on_audio, **kwargs):
+        self.on_audio = on_audio
+        self.metrics = SimpleNamespace(error=None, ready_ms=5, finalization_confirmed=True, usage_seconds=0)
+        self.sent = settings
+
+    async def start(self):
+        self.sent.append("ready")
+
+    async def send_audio(self, pcm):
+        self.sent.append(pcm)
+        if len(self.sent) == 3:
+            await self.on_audio(bytes(640), 16000)
+
+    async def close(self):
+        self.sent.append("closed")
+        return self.metrics
+
+
+class SimulatedReply:
+    def __init__(self, device, identity):
+        self.first_voice_at = self.last_voice_at = None
+        self.player = self
+        self.frames_sent = self.frames_rendered = 480
+        self.draining = asyncio.Event()
+
+    async def receive(self, audio, rate):
+        self.first_voice_at = time.monotonic()
+        self.last_voice_at = self.first_voice_at - .7
+
+    async def send_stream(self, unused, *, prime_packets):
+        await self.draining.wait()
+
+    def chunks(self):
+        return None
+
+    async def finish(self):
+        self.draining.set()
+
+    def snapshot(self):
+        return {"frames_rendered": self.frames_rendered}
+
+    async def stop(self):
+        self.draining.set()
+
+
+class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_confirmed_wake_sends_ordered_opening_then_drains_and_closes(self):
+        with patch("jarvis.conversation_trial.LiveSession", SimulatedSession),              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            event = asyncio.Event()
+            event.set()
+            device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=event,
+                                     wake_playback_terminal={"drained": True, "rendered_samples": 480,
+                                                             "first_rendered_ms": 10, "last_rendered_ms": 20},
+                                     clock_offset_ms=0, errors=[], info={"jack_plugged": True})
+            opening = OpeningAudio()
+            samples = np.arange(768, dtype="<i2")
+            stamp = int(time.monotonic() * 1000)
+            for i in range(3):
+                opening.offer(PCMFrame(i, i * 256, stamp + i * 16, samples[i * 256:(i + 1) * 256]), 0)
+            messages, result = [], {"id": "test"}
+            await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, lambda phase: None)
+            self.assertEqual(messages, ["ready", samples[:320].tobytes(), samples[320:640].tobytes(), "closed"])
+            self.assertEqual(result["input_samples_sent"], 640)
+            self.assertEqual(result["playback"]["frames_rendered"], 480)
+            self.assertIsNone(device.pcm_consumer)
+            self.assertIsNone(device.playback)

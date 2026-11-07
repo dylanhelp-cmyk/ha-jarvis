@@ -104,6 +104,7 @@ class Device:
         self.wake_event = asyncio.Event()
         self.wake_details = {}
         self.wake_playback_terminal = {}
+        self.wake_terminal_event = asyncio.Event()
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -141,6 +142,7 @@ class Device:
                 self.wake_playback_terminal = {key: message[key] for key in
                     ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
                 self.wake_playback_terminal["drained"] = kind == "play_drained"
+                self.wake_terminal_event.set()
         elif kind in ("ack_cache_ready", "ack_cache_progress", "ack_cache_committed", "ack_cache_error"):
             if self.wake_cache_upload is not None:
                 self.wake_cache_upload.receive(message)

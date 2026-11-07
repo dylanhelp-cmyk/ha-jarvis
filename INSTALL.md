@@ -4,7 +4,9 @@
 2. Reuse the existing ESPHome Builder entry and local secrets. Follow the [firmware instructions](ha_jarvis/firmware/INSTALL.md) to validate, compile and update the paired Voice PE. Keep port 8099 private on the LAN.
 3. Connect powered speakers to the Voice PE's 3.5 mm jack. Start at a low, comfortable speaker level. Confirm the App reports the device and output ready, then run one local playback test. Review the acoustic result separately from transport timing and export diagnostics if a measurement is unavailable.
 
-The wired bench is the first milestone. Conversational playback, echo acceptance and Assist control require later gates. Local tests make no OpenAI calls. API credentials stay in the App's local data and audio and transcript retention default off.
+Local tests make no OpenAI calls. API credentials stay in the App's local data and audio and transcript retention default off.
+
+To try one voice reply, run **Echo reference alignment** with the speakers in their usual position. Then select **One-turn voice preview**, review and confirm the per-run room microphone consent, and start. At the armed status, say “Hey Jarvis” followed by one short question. The preview sends cleaned audio to OpenAI GPT-Live, uses the API test budget and ends after the reply. Repeat alignment after moving the speakers or restarting the App or Voice PE. Follow-ups, interruptions and Assist actions are future milestones.
 
 ## Recovery
 

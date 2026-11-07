@@ -53,6 +53,7 @@
             <button class="test-option" data-kind="echo" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Quiet-room echo test</strong><small>Measure pilot suppression with offline AEC3.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="render_alignment" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Echo reference alignment</strong><small>Play two approved clips to check the render timestamps and the gap between them.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="wake_ack" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">↗</span><span><strong>Wake acknowledgment</strong><small>Wait for the armed status, then say Hey Jarvis once.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
+            <button class="test-option" data-kind="voice_turn" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">↗</span><span><strong>One-turn voice preview</strong><small>After Hey Jarvis, ask one short question. Uses OpenAI and plays its reply through the jack.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="connection" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">·</span><span><strong>Microphone connection</strong><small>60-second silent capture. No speaker playback or cloud calls.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
           </div>
           <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>I have set the speakers connected to the 3.5 mm jack to a comfortable volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The speaker is idle. I understand a test can interrupt music and previous playback is not restored automatically.</span></label></div>
@@ -65,9 +66,13 @@
             </select>
             <p class="field-help">The cloud connection starts at wake. Room audio stays on this App.</p>
           </div>
+          <div id="voice-turn-consent" hidden>
+            <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from this one turn to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
+            <p class="field-help">This preview ends after one answer. Follow-ups, interruptions and device actions are outside this preview. Run Echo reference alignment first.</p>
+          </div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
-          <p class="local-note"><span aria-hidden="true">◇</span> Local signals, local measurements. No AI or paid cloud calls.</p>
+          <p class="local-note"><span aria-hidden="true">◇</span> Local tests use no paid calls. Cloud tests are labelled and require a separate Start action.</p>
         </section>
       </div>
       <section class="panel results" aria-labelledby="results-title"><div class="results-heading"><div class="section-heading"><span class="step">03</span><div><h2 id="results-title">Evidence, at a glance</h2><p>Missing detections stay missing. They never become zero latency.</p></div></div><a class="button subtle" href="api/diagnostics" download>Export diagnostics <span aria-hidden="true">↓</span></a></div><div id="results-list"><div class="empty-state"><span aria-hidden="true">∿</span><h3>Your first measurement goes here.</h3><p>Save the connection, pair the microphone, then run a local audio test.</p></div></div></section>

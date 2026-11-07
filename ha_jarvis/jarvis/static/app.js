@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'One-turn voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -33,6 +33,7 @@ function readiness() {
   const wakeTest = kind === 'wake_ack';
   const startup = $('wake-startup-transport');
   $('wake-startup-options').hidden = !wakeTest;
+  $('voice-turn-consent').hidden = kind !== 'voice_turn';
   startup.disabled = running || busy;
   let reason = '';
   if (!device?.connected) reason = 'Connect the paired Voice PE.';
@@ -42,7 +43,10 @@ function readiness() {
   else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
-  $('readiness').textContent = running ? state.test.phase : reason || 'Ready for a local test.';
+  else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
+  else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
+  else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for this turn.';
+  $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for one authorized cloud voice turn.' : 'Ready for a local test.');
   $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
@@ -126,6 +130,9 @@ function showResults(results) {
       }
     }
     if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
+    if (result.kind === 'voice_turn' && result.digital_first_voice_ms != null) {
+      add(card, 'p', 'First returned speech ' + result.digital_first_voice_ms + ' ms after input streaming began.');
+    }
     if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {
@@ -174,7 +181,7 @@ for (const button of document.querySelectorAll('.test-option')) {
     readiness();
   });
 }
-for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport']) $(id).addEventListener('change', readiness);
+for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport', 'voice-turn-confirmed']) $(id).addEventListener('change', readiness);
 
 $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -200,6 +207,11 @@ $('run-test').addEventListener('click', () => {
   if (startup && !window.confirm('Start one budgeted GPT-Live startup test on the next wake? Room microphone audio stays local.')) return;
   const body = {kind, comfortable_volume_confirmed: $('volume-confirmed').checked};
   if (startup) Object.assign(body, {startup_transport: startup, confirm_paid: true});
+  if (kind === 'voice_turn') {
+    if (!$('voice-turn-confirmed').checked) return;
+    $('voice-turn-confirmed').checked = false;
+    Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true});
+  }
   action(() => api('api/tests', 'POST', body));
 });
 $('cancel-test').addEventListener('click', () => action(() => api('api/tests/current', 'DELETE')));

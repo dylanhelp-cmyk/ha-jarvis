@@ -1,3 +1,7 @@
+# 0.2.11
+
+- Add a one-turn voice preview after a successful Echo reference alignment. It requires per-run consent to send cleaned microphone audio to OpenAI GPT-Live. Say Hey Jarvis, then ask a short question. Firmware 0.2.3 is sufficient.
+
 # 0.2.10
 
 - Run the two-clip echo alignment test using the same 50 ms playback reserve as streamed replies. App-only update.

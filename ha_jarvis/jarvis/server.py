@@ -113,6 +113,7 @@ class Bench:
             with suppress(OSError): self.firmware_secrets_path.chmod(0o600)
         self.device = Device()
         self.opening_audio = None
+        self.echo_alignment = None
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
@@ -212,9 +213,10 @@ class Bench:
 
     def status(self):
         return {"version": __version__, "milestone": "wired_audio_bench", "device": self.device.snapshot(),
-                "test": self.test, "acknowledgment": self.acknowledgment_status(), "config": {k: v for k, v in self.config.items() if k != "device_token"},
+                "test": self.test, "echo_alignment_ready": self.alignment_delay() is not None,
+                "acknowledgment": self.acknowledgment_status(), "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
-                          "reason": "Paid reply tests use only built-in synthetic prompts"}}
+                          "reason": "The voice preview requires separate per-run room microphone consent"}}
 
     async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
@@ -236,12 +238,18 @@ class Bench:
         except Exception as exc:
             self.acknowledgment = {"phase": "failed", "error_type": type(exc).__name__}
 
-    async def measure_wake_ack(self, result, startup_transport):
+    def alignment_delay(self):
+        if self.echo_alignment is None:
+            return None
+        boot, ident, delay = self.echo_alignment
+        if (self.device.info.get("jack_plugged") is True
+                and self.device.info.get("diagnostics", {}).get("boot_id") == boot
+                and self.device.info.get("ack_cache_id") == ident):
+            return delay
+        return None
+
+    async def wait_for_wake(self, result):
         device = self.device
-        cached = await asyncio.to_thread(verified_render, self.data_dir)
-        if cached is None or device.info.get("ack_cache_id") != cached[0]:
-            raise ValueError("Verify and preload the wake acknowledgment first")
-        ident, pcm = cached
         self.test["phase"] = "armed for Hey Jarvis"
         waiting = [asyncio.create_task(device.wake_event.wait())]
         if device.awaiting_wake:
@@ -255,6 +263,16 @@ class Bench:
         if not device.wake_event.is_set():
             result.update(status="unavailable", reason=device.arm_stop_reason or
                           "No Hey Jarvis wake detected during the 30-second window")
+            return False
+        return True
+
+    async def measure_wake_ack(self, result, startup_transport):
+        device = self.device
+        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        if cached is None or device.info.get("ack_cache_id") != cached[0]:
+            raise ValueError("Verify and preload the wake acknowledgment first")
+        ident, pcm = cached
+        if not await self.wait_for_wake(result):
             return
         self.test["phase"] = "capturing the acknowledgment"
         wake = dict(device.wake_details)
@@ -371,6 +389,38 @@ class Bench:
                 terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
                 match.get("audible_onset_at"), bounds[0])
 
+    async def measure_voice_turn(self, result):
+        from .conversation_trial import run_voice_turn
+        from .live_bench import match_response, render_reference, voiced_bounds
+
+        device = self.device
+        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        delay = self.alignment_delay()
+        if cached is None or delay is None:
+            raise ValueError("Run a successful echo reference alignment first")
+        ident, pcm = cached
+        if not await self.wait_for_wake(result):
+            return
+        if device.wake_details.get("ack_cache_id") != ident:
+            raise RuntimeError("The verified wake acknowledgment did not start")
+        def stage(phase):
+            self.test["phase"] = phase
+        result["metric"] = "returned_voice_to_audible_reply"
+        reply = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage)
+        await asyncio.sleep(.25)
+        await device.end()
+        captured, capture_start = device.recording()
+        reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
+        bounds = voiced_bounds(reference)
+        if bounds is None:
+            match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
+        else:
+            match = await asyncio.to_thread(match_response, captured, capture_start, reference, bounds[0],
+                                            reply.first_voice_at, reply.first_voice_at, window_seconds=.14)
+            match.pop("fixture_end_to_audible_ms", None)
+        result["trials"] = [{"trial": 1, **match}]
+        result["status"] = "measured" if match["status"] == "detected" else "unavailable"
+
     async def measure_render_alignment(self, result):
         from .live_bench import match_response, render_reference, voiced_bounds
         from .streaming_aec import check_confirmed_references
@@ -379,7 +429,8 @@ class Bench:
         cached = await asyncio.to_thread(verified_render, self.data_dir)
         if cached is None:
             raise ValueError("Verify the wake acknowledgment before checking render alignment")
-        _, pcm = cached
+        ident, pcm = cached
+        self.echo_alignment = None
         reference = await asyncio.to_thread(render_reference, pcm)
         bounds = voiced_bounds(reference)
         if bounds is None:
@@ -424,6 +475,9 @@ class Bench:
             outcome = await asyncio.to_thread(check_confirmed_references, tuple(device.frames),
                                                 renders, offset, sum(delays) / 2)
         result["render_alignment"] = outcome
+        boot = device.info.get("diagnostics", {}).get("boot_id")
+        if outcome["status"] == "processed" and boot and device.info.get("ack_cache_id") == ident:
+            self.echo_alignment = (boot, ident, outcome["estimated_delay_ms"])
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
@@ -479,16 +533,18 @@ class Bench:
         player = sender = None
         try:
             self.test["phase"] = "synchronizing Voice PE and starting capture"
-            armed = kind == "wake_ack" and self.device.info.get("wake_capture_protocol") == 1
-            if kind == "wake_ack":
+            wake_kind = kind in ("wake_ack", "voice_turn")
+            armed = wake_kind and self.device.info.get("wake_capture_protocol") == 1
+            if wake_kind:
                 self.device.wake_event.clear()
                 self.device.wake_details = {}
                 self.device.wake_playback_terminal = {}
+                self.device.wake_terminal_event.clear()
                 result["wake_capture_mode"] = "device_armed" if armed else "prestarted_bench_capture"
             if armed:
                 self.opening_audio = OpeningAudio()
                 self.device.pcm_consumer = self.opening_audio.offer
-                await self.device.begin(result["id"], 5000, arm_timeout_ms=32000)
+                await self.device.begin(result["id"], 30000 if kind == "voice_turn" else 5000, arm_timeout_ms=32000)
             else:
                 await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
             result["device_session"] = dict(self.device.capture_session)
@@ -498,6 +554,9 @@ class Bench:
                 await self.device.end()
                 self.device.recording()
                 result.update(status="passed", metric="microphone_connection")
+                return
+            if kind == "voice_turn":
+                await self.measure_voice_turn(result)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -660,7 +719,7 @@ def create_ui(bench):
             bench.cloud_settings.set_key(data["api_key"])
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
                                   "benchmark_available": True,
-                                  "reason": "Paid reply tests use only built-in synthetic prompts"})
+                                  "reason": "The voice preview requires separate per-run room microphone consent"})
     async def cloud_acknowledgment(request):
         if request.method == "POST":
             data = await request.json()
@@ -772,7 +831,7 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment"):
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "voice_turn"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
@@ -784,7 +843,15 @@ def create_ui(bench):
                 raise ValueError("Confirm comfortable speaker volume before starting")
             if device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True:
                 raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
-        if kind == "wake_ack" and not bench.acknowledgment_status()["cached_on_device"]:
+        if kind == "voice_turn":
+            if data.get("confirm_paid") is not True or data.get("allow_room_audio_to_openai") is not True:
+                raise ValueError("Explicitly authorize sending cleaned microphone audio to OpenAI for this turn")
+            settings = bench.cloud_settings.public()
+            if not settings["api_key_configured"] or settings["paid_retry_blocked"]:
+                raise ValueError("A configured key and a settled budget ledger are required")
+            if device.get("wake_capture_protocol") != 1 or bench.alignment_delay() is None:
+                raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
+        if kind in ("wake_ack", "voice_turn") and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
         if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
             raise ValueError("Verify the wake clip before testing its render alignment")
@@ -894,6 +961,8 @@ def create_audio(bench):
                 elif frame.type == WSMsgType.TEXT:
                     message = json.loads(frame.data)
                     bench.device.receive_json(message)
+                    if bench.device.info.get("jack_plugged") is False:
+                        bench.echo_alignment = None
                     if message.get("type") == "status":
                         bench.maybe_preload_wake_cache()
                     bench.observe_firmware()

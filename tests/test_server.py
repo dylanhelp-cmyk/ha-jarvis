@@ -153,6 +153,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(simulator, return_exceptions=True)
             await ws.close()
 
+    async def test_room_voice_preview_requires_separate_explicit_authorization(self):
+        ws = await self.audio.ws_connect("/device")
+        try:
+            await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
+                                "sample_rate": RATE, "channels": 1, "raw_ready": True, "muted": False,
+                                "jack_plugged": True, "playback_protocol": 1, "wake_capture_protocol": 1})
+            await ws.receive_json(timeout=2)
+            response = await self.ui.post("/api/tests", json={"kind": "voice_turn", "confirm_paid": True,
+                                          "comfortable_volume_confirmed": True})
+            self.assertEqual(response.status, 400)
+            self.assertIn("Explicitly authorize", await response.text())
+            self.assertIsNone(self.bench.task)
+            self.assertIsNone(self.bench.device.capture_id)
+        finally:
+            await ws.close()
+
     async def test_armed_capture_preserves_first_samples_and_disarms(self):
         from jarvis.opening_audio import OpeningAudio
         ws = await self.audio.ws_connect("/device")
