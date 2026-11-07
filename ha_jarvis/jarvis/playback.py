@@ -27,6 +27,61 @@ def stereo_pcm(samples):
     return b"".join(np.repeat(block.to_ndarray().ravel(), 2).astype("<i2").tobytes() for block in blocks)
 
 
+class WakeCacheUpload:
+    """Install one bounded cache over the current authenticated device socket."""
+
+    def __init__(self, device):
+        self.device = device
+        self.ws = device.ws
+        self.generation = secrets.randbelow(0xFFFFFFFF) + 1
+        self.replies = asyncio.Queue(maxsize=1)
+
+    def receive(self, message):
+        if message.get("generation") == self.generation and self.replies.empty():
+            self.replies.put_nowait(message)
+
+    async def _expect(self, kind):
+        reply = await asyncio.wait_for(self.replies.get(), 2)
+        if reply.get("type") != kind:
+            raise RuntimeError("Voice PE rejected the wake cache")
+        return reply
+
+    async def _command(self, kind, **data):
+        if self.device.ws is not self.ws or self.ws is None or self.ws.closed:
+            raise RuntimeError("Voice PE disconnected during wake cache transfer")
+        await asyncio.wait_for(self.ws.send_json({"type": kind, "generation": self.generation, **data}), 2)
+
+    async def send(self, identity, pcm):
+        frame_bytes = CHANNELS * 2
+        frames = len(pcm) // frame_bytes
+        if not 0 < frames <= RATE or len(pcm) % frame_bytes:
+            raise ValueError("The wake clip must be at most one second")
+        try:
+            async with asyncio.timeout(15):
+                await self._command("ack_cache_start", cache_id=identity, samples=frames)
+                await self._expect("ack_cache_ready")
+                for sequence, first in enumerate(range(0, frames, PACKET_FRAMES)):
+                    count = min(PACKET_FRAMES, frames - first)
+                    header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, first)
+                    payload = pcm[first * frame_bytes:(first + count) * frame_bytes]
+                    await asyncio.wait_for(self.ws.send_bytes(header + payload), 2)
+                    reply = await self._expect("ack_cache_progress")
+                    if reply.get("samples") != first + count:
+                        raise RuntimeError("Voice PE reported an unexpected wake cache offset")
+                await self._command("ack_cache_commit")
+                reply = await self._expect("ack_cache_committed")
+                if reply.get("cache_id") != identity:
+                    raise RuntimeError("Voice PE confirmed an unexpected wake cache")
+        except (OSError, RuntimeError, TimeoutError, asyncio.CancelledError):
+            if self.device.ws is self.ws and self.ws and not self.ws.closed:
+                # aiohttp sends in order, so an abort cannot precede the upload it cancels.
+                try:
+                    await self._command("ack_cache_abort")
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+            raise
+
+
 class JackPlayback:
     """One generation on the current paired socket. Never replays on reconnect."""
 

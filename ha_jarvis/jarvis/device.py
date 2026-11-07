@@ -95,10 +95,12 @@ class Device:
         self.capture_session = {}
         self.pcm_consumer = None
         self.playback = None
+        self.wake_cache_upload = None
         self.wake_count = 0
         self.last_wake_at = None
         self.wake_event = asyncio.Event()
-        self.wake_event_at = None
+        self.wake_details = {}
+        self.wake_playback_terminal = {}
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
@@ -128,6 +130,15 @@ class Device:
         if kind in ("play_started", "play_render", "play_clock", "play_stopped", "play_drained"):
             if self.playback is not None:
                 self.playback.receive(message)
+            if (kind in ("play_stopped", "play_drained") and message.get("source") == "wake_ack"
+                    and message.get("playback_id") == self.wake_details.get("ack_playback_id")
+                    and message.get("generation") == self.wake_details.get("ack_generation")):
+                self.wake_playback_terminal = {key: message[key] for key in
+                    ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
+                self.wake_playback_terminal["drained"] = kind == "play_drained"
+        elif kind in ("ack_cache_ready", "ack_cache_progress", "ack_cache_committed", "ack_cache_error"):
+            if self.wake_cache_upload is not None:
+                self.wake_cache_upload.receive(message)
         elif kind == "clock_sync":
             sent = self.sync_pending.pop(str(message.get("id")), None)
             if sent is not None:
@@ -143,7 +154,7 @@ class Device:
                     self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
-            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol"):
+            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id"):
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")
@@ -153,7 +164,10 @@ class Device:
                 self.wake_count += 1
                 self.last_wake_at = time.monotonic()
                 if not self.wake_event.is_set():
-                    self.wake_event_at = self.last_wake_at
+                    self.wake_details = {key: message[key] for key in
+                        ("device_time_ms", "ack_playback_id", "ack_generation", "ack_cache_id",
+                         "ack_samples", "ack_reason") if key in message}
+                    self.wake_playback_terminal = {}
                     self.wake_event.set()
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:
             self.stop_info = {key: message[key] for key in ("reason", "samples_seen", "dropped_frames") if key in message}

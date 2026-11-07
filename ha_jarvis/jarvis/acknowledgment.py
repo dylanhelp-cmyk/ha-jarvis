@@ -1,14 +1,18 @@
 """Generate a bounded greeting asset without accessing the room microphone."""
 
 import asyncio
+import hashlib
+import io
 import os
 import re
 import time
+import wave
 
 import numpy as np
 
 from .live_bench import voiced_bounds
 from .live_session import LiveSession, MODEL, RATE, VOICE
+from .playback import stereo_pcm
 
 
 PHRASE = "Yes sir"
@@ -17,6 +21,41 @@ GREETING = 'Say exactly "Yes sir" once, then stay silent. Do not add any other w
 
 def cache_path(data_dir):
     return data_dir / f"ack-{MODEL}-{VOICE}-yes-sir.pcm"
+
+
+def read_candidate(data_dir):
+    with cache_path(data_dir).open("rb") as file:
+        pcm = file.read(5 * RATE)
+    if not RATE // 4 <= len(pcm) <= 9 * RATE // 2 or len(pcm) % 2:
+        raise ValueError("Cached acknowledgment has an invalid length")
+    return pcm
+
+
+def candidate_wav(pcm):
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        wav.writeframes(pcm)
+    return output.getvalue()
+
+
+def candidate_identity(pcm):
+    return hashlib.sha256(pcm).hexdigest()
+
+
+def approval_path(data_dir):
+    return cache_path(data_dir).with_suffix(".verified")
+
+
+def verified_render(data_dir):
+    path = approval_path(data_dir)
+    if not path.is_file() or not cache_path(data_dir).is_file():
+        return None
+    pcm = read_candidate(data_dir)
+    ident = candidate_identity(pcm)
+    if path.read_text(encoding="ascii").strip() != ident:
+        return None
+    return ident, stereo_pcm(np.frombuffer(pcm, dtype="<i2"))
 
 
 async def generate_acknowledgment(settings, data_dir):

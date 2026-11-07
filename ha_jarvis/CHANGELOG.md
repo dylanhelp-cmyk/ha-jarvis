@@ -1,3 +1,8 @@
+# 0.2.3
+
+- Preview the generated wake clip and approve the exact phrase before it can play on the device.
+- Preload the approved clip onto a paired Voice PE with cache-capable firmware. Run the local Wake acknowledgment test and say Hey Jarvis when armed to measure firmware wake detection to audible playback.
+
 # 0.2.2
 
 - Add a 20 ms guard before the required silent tail in the local echo reference. Repeat the Echo test with firmware 0.2.1.

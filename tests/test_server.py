@@ -153,6 +153,48 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(simulator, return_exceptions=True)
             await ws.close()
 
+    async def test_verified_greeting_is_preloaded_without_streaming_it_as_playback(self):
+        from jarvis.acknowledgment import cache_path, candidate_identity
+        pcm = np.full(RATE // 4, 900, dtype="<i2").tobytes()
+        cache_path(self.bench.data_dir).write_bytes(pcm)
+        identity = candidate_identity(pcm)
+        preview = await self.ui.get("/api/acknowledgment/preview", params={"clip": identity})
+        self.assertEqual(preview.status, 200)
+        self.assertTrue((await preview.read()).startswith(b"RIFF"))
+        bad = await self.ui.post("/api/acknowledgment/verify",
+                                 json={"clip": "stale", "heard_exact_phrase": True})
+        self.assertEqual(bad.status, 400)
+        approved = await self.ui.post("/api/acknowledgment/verify",
+                                      json={"clip": identity, "heard_exact_phrase": True})
+        self.assertTrue((await approved.json())["verified"])
+        ws = await self.audio.ws_connect("/device")
+        try:
+            await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
+                                "sample_rate": RATE, "channels": 1, "ack_cache_protocol": 1})
+            self.assertEqual((await ws.receive_json(timeout=2))["type"], "hello_ok")
+            start = await ws.receive_json(timeout=2)
+            self.assertEqual(start["type"], "ack_cache_start")
+            self.assertEqual(start["cache_id"], identity)
+            generation = start["generation"]
+            await ws.send_json({"type": "ack_cache_ready", "generation": generation})
+            sent = sequence = 0
+            while sent < start["samples"]:
+                frame = await ws.receive_bytes(timeout=2)
+                magic, _, _, count, packet_generation, packet_sequence, first = HEADER.unpack_from(frame)
+                self.assertEqual((magic, packet_generation, packet_sequence, first),
+                                 (b"JPLY", generation, sequence, sent))
+                sent += count
+                sequence += 1
+                await ws.send_json({"type": "ack_cache_progress", "generation": generation, "samples": sent})
+            self.assertEqual((await ws.receive_json(timeout=2))["type"], "ack_cache_commit")
+            await ws.send_json({"type": "ack_cache_committed", "generation": generation, "cache_id": identity})
+            await asyncio.wait_for(self.bench.task, 2)
+            self.assertTrue(self.bench.acknowledgment_status()["cached_on_device"])
+            self.assertIsNone(self.bench.device.capture_id)
+            self.assertIsNone(self.bench.device.playback)
+        finally:
+            await ws.close()
+
     async def test_cross_origin_and_non_json_control_are_rejected(self):
         response = await self.ui.put('/api/config', json={}, headers={'Origin':'https://untrusted.example'})
         self.assertEqual(response.status, 403)

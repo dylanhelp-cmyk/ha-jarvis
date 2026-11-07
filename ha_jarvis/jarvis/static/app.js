@@ -2,10 +2,11 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  wake_ack: 'Wake acknowledgment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
+let listenedClip;
 
 async function api(path, method = 'GET', body) {
   const options = {method, cache: 'no-store'};
@@ -34,12 +35,16 @@ function readiness() {
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
   else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
+  else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   $('readiness').textContent = running ? state.test.phase : reason || 'Ready for a local test.';
   $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
   $('cancel-test').disabled = busy;
   $('save-config').disabled = running || busy;
+  const ack = state?.acknowledgment;
+  $('verify-ack').disabled = running || busy || !ack?.candidate_id || listenedClip !== ack.candidate_id;
+  $('generate-ack').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
 }
 
 function showStatus(data) {
@@ -54,6 +59,23 @@ function showStatus(data) {
   $('test-detail').textContent = data.test.phase;
   $('version').textContent = 'App ' + data.version;
   $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Paid playback is gated on wired verification.';
+  const ack = data.acknowledgment;
+  const preview = $('ack-preview');
+  if (preview.dataset.clip !== (ack.candidate_id || '')) {
+    preview.dataset.clip = ack.candidate_id || '';
+    listenedClip = undefined;
+    if (ack.candidate_id) preview.src = 'api/acknowledgment/preview?clip=' + encodeURIComponent(ack.candidate_id);
+    else preview.removeAttribute('src');
+  }
+  preview.hidden = !ack.cached_on_host;
+  $('verify-ack').hidden = !ack.cached_on_host || ack.verified;
+  $('generate-ack').hidden = ack.verified;
+  $('generate-ack').textContent = ack.cached_on_host ? 'Replace clip (paid API test)' : 'Generate clip (paid API test)';
+  $('ack-state').textContent = ack.cached_on_device ? 'Verified clip cached on Voice PE.' :
+    ack.verified ? 'Verified clip saved. Waiting for compatible Voice PE firmware to preload it.' :
+    ack.cached_on_host ? 'Play the clip and confirm it says exactly “Yes sir”.' :
+    ack.phase === 'failed' ? 'Generation failed. Check the API budget and key before retrying.' :
+    'Generate the cached greeting in the selected GPT-Live voice.';
   readiness();
 }
 
@@ -163,3 +185,16 @@ async function initialize() {
 
 initialize().catch((error) => notice(error.message));
 setInterval(() => { if (!busy) poll().catch((error) => notice(error.message)); }, 1500);
+
+$('ack-preview').addEventListener('ended', (event) => {
+  listenedClip = event.currentTarget.dataset.clip;
+  readiness();
+});
+$('verify-ack').addEventListener('click', () => action(() => api('api/acknowledgment/verify', 'POST', {
+  clip: listenedClip, heard_exact_phrase: true
+})));
+$('generate-ack').addEventListener('click', () => {
+  if (window.confirm('Start one budgeted GPT-Live greeting test using digital silence?')) {
+    action(() => api('api/cloud/acknowledgment', 'POST', {confirm_paid: true}));
+  }
+});
