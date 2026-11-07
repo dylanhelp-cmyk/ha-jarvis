@@ -239,7 +239,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         result["reply_source_reserve_ms"] = source_prime_packets * 10
         chunks = stream.reply_chunks(reply) if early_echo else reply.chunks()
         sender = asyncio.create_task(reply.player.send_stream(chunks, prime_packets=5,
-                                                               source_prime_packets=source_prime_packets))
+                                                               source_prime_packets=source_prime_packets,
+                                                               recover_reply_stalls=True))
         phase(listening_phase)
         set_output(reply)
         origin = listening_started = time.monotonic()

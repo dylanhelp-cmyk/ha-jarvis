@@ -15,6 +15,8 @@ CHANNELS = 2
 PACKET_FRAMES = 480
 HEADER = struct.Struct("<4sBBHIIQ")
 MAX_IN_FLIGHT = 6 * PACKET_FRAMES
+MAX_SEND_LAG_MS = 100
+MAX_REPLY_RECOVERY_LAG_MS = 500
 
 
 def stereo_pcm(samples):
@@ -104,6 +106,8 @@ class JackPlayback:
         self.terminal_confirmed = False
         self.max_in_flight = 0
         self.max_send_lag_ms = 0.0
+        self.schedule_rebases = 0
+        self.schedule_shift_ms = 0.0
         self.max_source_wait_ms = 0.0
         self.source_prime_wait_ms = None
         self.play_start_wait_ms = None
@@ -158,7 +162,8 @@ class JackPlayback:
                 yield pcm[offset:offset + size]
         await self.send_stream(chunks(), prime_packets=prime_packets)
 
-    async def send_stream(self, chunks, *, prime_packets=1, source_prime_packets=None):
+    async def send_stream(self, chunks, *, prime_packets=1, source_prime_packets=None,
+                          recover_reply_stalls=False):
         """Start once PCM exists and preserve sample timing across arriving chunks."""
         frame_bytes = CHANNELS * 2
         packet_bytes = PACKET_FRAMES * frame_bytes
@@ -225,8 +230,14 @@ class JackPlayback:
                 raise RuntimeError("Voice PE disconnected")
             lag = max(0.0, (time.monotonic() - due) * 1000)
             self.max_send_lag_ms = max(self.max_send_lag_ms, lag)
-            if lag > 100:
-                raise RuntimeError("Voice PE sender fell behind; playback stopped without acceleration")
+            if lag > MAX_SEND_LAG_MS:
+                if not recover_reply_stalls or lag > MAX_REPLY_RECOVERY_LAG_MS:
+                    raise RuntimeError("Voice PE sender fell behind; playback stopped without acceleration")
+                # A short source stall may be audible. Move the schedule forward
+                # so the next packets keep their normal cadence.
+                anchor += lag / 1000
+                self.schedule_rebases += 1
+                self.schedule_shift_ms += lag
             count = len(payload) // frame_bytes
             header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, self.frames_sent)
             self.frames_sent += count
@@ -274,6 +285,8 @@ class JackPlayback:
                 "frames_rendered": self.frames_rendered, "last_rendered_device_ms": self.last_rendered_ms,
                 "max_in_flight_ms": round(self.max_in_flight / RATE * 1000, 1),
                 "max_send_lag_ms": round(self.max_send_lag_ms, 1),
+                "schedule_rebases": self.schedule_rebases,
+                "schedule_shift_ms": round(self.schedule_shift_ms, 1),
                 "max_source_wait_ms": round(self.max_source_wait_ms, 1), "reason": self.reason,
                 "clock_scope": "speaker acceptance and firmware output counters, not acoustic output"}
         if self.source_prime_wait_ms is not None:

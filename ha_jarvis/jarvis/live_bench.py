@@ -281,7 +281,8 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
             if transport != "realtime":
                 device.playback = reply.player
                 sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
-                                                                       source_prime_packets=12))
+                                                                       source_prime_packets=12,
+                                                                       recover_reply_stalls=True))
             stage(f"streaming synthetic turn {index}")
             origin = time.monotonic()
             if transport == "realtime":

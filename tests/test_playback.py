@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -84,6 +85,49 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.commands, ["play_start", "play_drain"])
         self.assertIn("source_prime_wait_ms", player.snapshot())
         self.assertIn("play_start_wait_after_prime_ms", player.snapshot())
+
+    async def test_reply_stall_preserves_order_and_resumes_at_normal_cadence(self):
+        for recover, delay, should_drain in [(True, .25, True), (False, .25, False), (True, .6, False)]:
+            with self.subTest(recover=recover, delay=delay):
+                clock = 10.0
+                sent = []
+                ws = FakeSocket()
+                ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "stall")
+                payloads = [bytes([value]) * (480 * 4) for value in (1, 2, 3)]
+
+                async def sleep(seconds):
+                    nonlocal clock
+                    clock += seconds
+
+                async def record(packet):
+                    sent.append((clock, packet[HEADER.size:]))
+                    await FakeSocket.send_bytes(ws, packet)
+
+                async def chunks():
+                    nonlocal clock
+                    yield payloads[0]
+                    clock += delay
+                    yield b"".join(payloads[1:])
+
+                ws.send_bytes = record
+                with (patch("jarvis.playback.time", SimpleNamespace(monotonic=lambda: clock)),
+                      patch("jarvis.playback.asyncio.sleep", sleep)):
+                    if should_drain:
+                        await player.send_stream(chunks(), recover_reply_stalls=recover)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "sender fell behind"):
+                            await player.send_stream(chunks(), recover_reply_stalls=recover)
+
+                if should_drain:
+                    self.assertEqual(ws.commands, ["play_start", "play_drain"])
+                    self.assertEqual([packet[5:] for packet in ws.packets], [(0, 0), (1, 480), (2, 960)])
+                    self.assertEqual([payload for _, payload in sent], payloads)
+                    self.assertAlmostEqual(sent[2][0] - sent[1][0], .01)
+                    self.assertEqual(player.snapshot()["schedule_rebases"], 1)
+                    self.assertEqual(player.snapshot()["schedule_shift_ms"], 240.0)
+                else:
+                    self.assertEqual(ws.commands, ["play_start"])
+                    self.assertEqual(len(sent), 1)
 
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()

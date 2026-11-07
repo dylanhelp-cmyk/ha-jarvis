@@ -1,3 +1,7 @@
+# 0.2.28
+
+- Keep streamed GPT-Live reply samples in order through brief delivery stalls. Resume at normal speed and report any sender schedule shifts in diagnostics. Longer stalls still stop the reply.
+
 # 0.2.27
 
 - Run the isolated Realtime comparison silently and report the time to returned voice audio. This experiment uses generated input and opens neither the room microphone nor the speaker.

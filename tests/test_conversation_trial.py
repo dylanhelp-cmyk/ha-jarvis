@@ -56,7 +56,7 @@ class SimulatedReply:
         self.first_voice_at = time.monotonic()
         self.last_voice_at = self.first_voice_at - .7
 
-    async def send_stream(self, unused, *, prime_packets, source_prime_packets):
+    async def send_stream(self, unused, *, prime_packets, source_prime_packets, recover_reply_stalls):
         await self.draining.wait()
 
     def chunks(self):
