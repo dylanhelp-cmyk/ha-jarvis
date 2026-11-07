@@ -1,3 +1,7 @@
+# 0.2.38
+
+- Add an optional Assist voice preview for one on or off command to a named light or switch. The token stays local and the App checks the resulting state through Assist.
+
 # 0.2.37
 
 - Compare suspected speech to the confirmed playback waveform during the local Interruption check. Ignore candidates that still resemble the speaker output.

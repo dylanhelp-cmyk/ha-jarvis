@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -26,7 +26,8 @@ import numpy as np
 from . import __version__
 from .acknowledgment import (approval_path, cache_path, candidate_identity, candidate_wav,
                              generate_acknowledgment, read_candidate, verified_render)
-from .assist import AssistDiscoveryError, discover_tools
+from .assist import AssistClient, AssistDiscoveryError, discover_tools
+from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device
 from .opening_audio import OpeningAudio
@@ -418,7 +419,7 @@ class Bench:
                 result["opening_prefix_echo"] = {"status": "unavailable",
                     "reason": "No usable partial render report matched the completed acknowledgment"}
 
-    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False):
+    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False, assist_delegation=None):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_streamed_reply
 
@@ -443,7 +444,8 @@ class Bench:
         result["metric"] = "returned_voice_to_audible_reply"
         replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
                                        gain_db=gain_db, follow_up=follow_up,
-                                       wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby)
+                                       wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
+                                       assist_delegation=assist_delegation)
         if not replies:
             return
         await asyncio.sleep(.25)
@@ -768,7 +770,7 @@ class Bench:
             self.test = {"running": True, "id": uuid.uuid4().hex, "phase": "rearming for Hey Jarvis", "standby": True}
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
-                  follow_up=False, preconnect=False, *, standby=False):
+                  follow_up=False, preconnect=False, *, standby=False, assist_preview=None):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -776,7 +778,8 @@ class Bench:
                       "Speaker API acceptance is a software milestone. Acoustic estimates include microphone processing delay."]}
         self.results.insert(0, result)
         del self.results[30:]
-        player = sender = None
+        player = sender = assist_delegation = None
+        resources = AsyncExitStack()
         digital_only = kind == "synthetic_replies" and startup_transport == "realtime"
         if standby:
             result["standby"] = True
@@ -786,6 +789,15 @@ class Bench:
                 result["warnings"].clear()
                 await self.measure_synthetic_replies(result, startup_transport, reply_profile)
                 return
+            if assist_preview is not None:
+                token, domain, name = assist_preview
+                result["assist_preview"] = True
+                self.test["phase"] = "checking the selected Assist device"
+                origin = os.environ.get("JARVIS_ASSIST_ORIGIN", "http://127.0.0.1:8123")
+                client = await resources.enter_async_context(AssistClient(origin, token))
+                assist_delegation = AssistDelegation(client, await client.list_tools(), preview_target=(domain, name))
+                if await assist_delegation.preview_state("setup") not in ("on", "off"):
+                    raise ValueError("Assist could not uniquely resolve the selected light or switch")
             self.test["phase"] = "synchronizing Voice PE and starting capture"
             wake_kind = kind in ("wake_ack", "voice_turn")
             armed = wake_kind and self.device.info.get("wake_capture_protocol") == 1
@@ -818,7 +830,8 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "voice_turn":
-                await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby)
+                await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby,
+                                              assist_delegation=assist_delegation)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -969,6 +982,7 @@ class Bench:
                 result["summary"] = summarize(result["trials"])
                 result["elapsed_seconds"] = round(time.monotonic() - started, 3)
             finally:
+                await resources.aclose()
                 self.device.playback = None
                 self.device.pcm_consumer = None
                 self.opening_audio = None
@@ -1172,6 +1186,18 @@ def create_ui(bench):
             raise ValueError("Wake standby uses the voice preview and connects only after wake")
         if standby and data.get("allow_repeated_wake_audio") is not True:
             raise ValueError("Explicitly authorize cleaned microphone audio after each wake while standby is enabled")
+        assist_preview = data.get("assist_preview")
+        if assist_preview is not None:
+            if (kind != "voice_turn" or standby or follow_up or preconnect
+                    or data.get("allow_assist_power_action") is not True
+                    or not isinstance(assist_preview, dict) or set(assist_preview) != {"token", "domain", "name"}):
+                raise ValueError("Assist power control needs separate consent for a single voice preview")
+            token, domain, name = (assist_preview[key] for key in ("token", "domain", "name"))
+            if (not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{1,2048}", token)
+                    or domain not in ("light", "switch") or not isinstance(name, str)
+                    or not 0 < len(name.strip()) <= 128 or not name.isprintable()):
+                raise ValueError("Enter a Home Assistant token and the exact name of an exposed light or switch")
+            assist_preview = (token, domain, name.strip())
         gain_db = data.get("input_gain_db", 24 if kind == "voice_turn" else 0)
         if type(gain_db) is not int or gain_db not in (0, 12, 24, 36):
             raise ValueError("Choose 0, 12, 24 or 36 dB of preview microphone gain")
@@ -1206,7 +1232,8 @@ def create_ui(bench):
             bench.task = asyncio.create_task(bench.run_standby(gain_db))
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
-                                                      follow_up=follow_up, preconnect=preconnect))
+                                                      follow_up=follow_up, preconnect=preconnect,
+                                                      assist_preview=assist_preview))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

@@ -388,7 +388,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
-                         follow_up=False, wait_for_preconnected_wake=None, standby=False):
+                         follow_up=False, wait_for_preconnected_wake=None, standby=False, assist_delegation=None):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -404,9 +404,14 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             await output.receive(audio, rate)
 
     result["connection_start"] = "before_wake" if preconnect else "on_wake"
+    instructions = INSTRUCTIONS
+    if assist_delegation is not None:
+        instructions = ("You are Jarvis, a concise British-style voice assistant. Do not greet. "
+                        "For an explicit request to turn a named light or switch on or off, Generate <|SpawnThinking|>. "
+                        "Wait for the tool result before saying the device changed. Report only verified outcomes.")
     session = LiveSession(settings, on_audio=on_audio, transport="websocket",
                           max_seconds=60 if follow_up or preconnect else 30,
-                          startup_timeout=3, instructions=INSTRUCTIONS)
+                          startup_timeout=3, instructions=instructions, assist_delegation=assist_delegation)
     try:
         phase("preconnecting to GPT-Live" if preconnect else
               "connecting to GPT-Live while the cached acknowledgment plays")
@@ -503,6 +508,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                     "playback_id": wake["ack_playback_id"], "generation": wake["ack_generation"]}), 1)
         metrics = await session.close()
         profile = "wake standby" if standby else ("warm follow-up preview" if follow_up else "one-turn preview")
+        if assist_delegation is not None:
+            profile = "single-device Assist preview"
         result["cloud"] = {"transport": "websocket", "profile": profile,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
                            "finalization_confirmed": metrics.finalization_confirmed,

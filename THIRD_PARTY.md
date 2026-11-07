@@ -13,3 +13,5 @@ The cloud transport installs [aiortc 1.15.0](https://pypi.org/project/aiortc/1.1
 The App runs Debian's [eSpeak NG package](https://packages.debian.org/bookworm/espeak-ng) as a separate process for fixed synthetic test prompts. Its installed license notices remain under `/usr/share/doc/espeak-ng/copyright`.
 
 [webrtcvad-wheels 2.0.14.post1](https://pypi.org/project/webrtcvad-wheels/2.0.14.post1/) provides the local speech activity estimate. Its wheel retains the Python wrapper and bundled WebRTC notices.
+
+[PyYAML 6.0.3](https://pypi.org/project/PyYAML/6.0.3/) parses local Assist context using its safe loader. The installed distribution retains its MIT license.

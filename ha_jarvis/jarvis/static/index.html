@@ -75,8 +75,18 @@
             <label class="check"><input id="voice-preconnect" type="checkbox"><span>Compare preconnection. Start the paid GPT-Live session before wake and wait up to 15 seconds for “Hey Jarvis.” The wait uses the API test budget. Microphone audio starts at wake.</span></label>
             <label class="check"><input id="voice-follow-up" type="checkbox"><span>Measure one warm follow-up on the same GPT-Live connection. Wait until the App says “listening for your warm follow-up” before speaking again.</span></label>
             <label class="check"><input id="voice-standby" type="checkbox"><span>Stay ready for “Hey Jarvis” after each preview. This authorizes sending cleaned room microphone audio to OpenAI after each wake and using the API test budget until you stop standby. The idle microphone stays local. Standby ends on app restart.</span></label>
+            <label class="check"><input id="voice-assist" type="checkbox"><span>Allow one on or off command for a named Assist-exposed light or switch during this preview.</span></label>
+            <div id="voice-assist-fields" hidden>
+              <label for="voice-assist-name">Exact device name in Assist</label>
+              <input id="voice-assist-name" type="text" maxlength="128" autocomplete="off">
+              <label for="voice-assist-domain">Device type</label>
+              <select id="voice-assist-domain"><option value="light">Light</option><option value="switch">Switch</option></select>
+              <label for="voice-assist-token">Home Assistant access token</label>
+              <input id="voice-assist-token" type="password" autocomplete="off" maxlength="2048">
+              <p class="field-help">Use a non-admin Home Assistant account. Jarvis uses the token locally for this run.</p>
+            </div>
             <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from the selected voice mode to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
-            <p class="field-help">The single-run preview ends after the selected one or two replies. Wake standby supports multiple follow-ups. Wait for the reply to finish before speaking. Device actions are outside this preview. Run Echo reference alignment first.</p>
+            <p class="field-help">The single-run preview ends after the selected one or two replies. Wake standby supports multiple follow-ups. Wait for the reply to finish before speaking. Run Echo reference alignment first.</p>
           </div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>

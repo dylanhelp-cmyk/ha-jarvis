@@ -11,6 +11,7 @@ import aiohttp
 import numpy as np
 from av import AudioFrame
 
+from jarvis.assist_delegation import AssistDelegation
 from jarvis.cloud_settings import CloudSettings, CloudBudgetError
 from jarvis.live_session import LiveSession, LiveSessionError, _PCMTrack
 from jarvis.realtime_bench import MODEL as REALTIME_MODEL, RealtimeBenchmarkSession
@@ -146,6 +147,82 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         result = LiveSession(self.settings, on_audio=self.output, close_timeout=.05, **kwargs)
         self.sessions.append(result)
         return result
+
+    async def test_responses_delegation_waits_for_a_complete_batch_and_keeps_audio_running(self):
+        ws = FakeWS()
+        tool_started = asyncio.Event()
+        finish_tool = asyncio.Event()
+
+        async def call_tool(*_):
+            tool_started.set()
+            await finish_tool.wait()
+            return {"outcome": "reported", "text": "private Home Assistant response"}
+
+        client = SimpleNamespace(call_tool=AsyncMock(side_effect=call_tool))
+        catalog = [{"name": "HassTurnOn", "description": "Turn on an exposed device",
+                    "inputSchema": {"type": "object"}}]
+        bridge = AssistDelegation(client, catalog)
+        session = self.session(transport="websocket", assist_delegation=bridge)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+
+        config = ws.sent[0]["session"]["delegation"]
+        self.assertEqual(config["responses"]["model"], "gpt-6-luna")
+        self.assertEqual([tool["name"] for tool in config["responses"]["tools"]], ["HassTurnOn"])
+
+        def emit(kind, delegation="task", **data):
+            session._event({"type": "response.event", "delegation_id": delegation,
+                            "event": {"type": kind, **data}})
+
+        def item(call_id, name="HassTurnOn"):
+            return {"type": "function_call", "call_id": call_id, "name": name,
+                    "arguments": '{"name":"Example lamp"}'}
+
+        emit("response.created", response={"id": "failed"})
+        emit("response.output_item.done", item=item("cancelled"))
+        emit("response.failed", response={"id": "failed", "status": "failed"})
+        emit("response.created", response={"id": "ok"})
+        emit("response.output_item.done", delegation="foreign", item=item("foreign"))
+        emit("response.output_item.done", item=item("denied", "AdministrativeTool"))
+        emit("response.output_item.done", item=item("permitted"))
+        emit("response.output_item.done", item=item("permitted"))
+        client.call_tool.assert_not_called()
+
+        emit("response.completed", response={"id": "ok", "status": "completed"})
+        emit("response.completed", response={"id": "ok", "status": "completed"})
+        await asyncio.wait_for(tool_started.wait(), 1)
+        self.assertEqual(len([m for m in ws.sent if m["type"] == "response.create"]), 0)
+        await session.send_audio(bytes(640))
+        finish_tool.set()
+        await asyncio.wait_for(session._delegation_task, 1)
+        client.call_tool.assert_awaited_once_with("permitted", "HassTurnOn", {"name": "Example lamp"})
+        outputs = [m["item"] for m in ws.sent if m["type"] == "response.item.create"]
+        self.assertEqual([m["call_id"] for m in outputs], ["denied", "permitted"])
+        self.assertEqual([json.loads(m["output"])["outcome"] for m in outputs], ["rejected", "unverified"])
+        self.assertNotIn("private Home Assistant response", str(ws.sent))
+        self.assertEqual([m["type"] for m in ws.sent][-2:], ["response.item.create", "response.create"])
+
+    async def test_delegation_closes_at_the_reserved_response_limit(self):
+        ws = FakeWS()
+        catalog = [{"name": "HassTurnOn", "inputSchema": {"type": "object"}}]
+        client = SimpleNamespace(call_tool=AsyncMock())
+        session = self.session(transport="websocket", assist_delegation=AssistDelegation(client, catalog))
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        reserved = self.settings.pending["reserved_usd"]
+        for i in range(3):
+            session._event({"type": "response.event", "delegation_id": f"task_{i}", "event": {
+                "type": "response.created", "response": {"id": f"response_{i}", "model": "gpt-6-luna"}}})
+            if i < 2:
+                session._event({"type": "response.event", "delegation_id": f"task_{i}", "event": {
+                    "type": "response.completed", "response": {"id": f"response_{i}", "status": "completed",
+                        "usage": {"input_tokens": 200, "output_tokens": 20}}}})
+        self.assertEqual(session.metrics.error, "Delegated response budget limit reached")
+        self.assertTrue((await session.close()).finalization_confirmed)
+        self.assertIsNone(self.settings.pending)
+        self.assertGreater(self.settings.spent_usd, .05)
+        self.assertLess(self.settings.spent_usd, reserved)
+        client.call_tool.assert_not_called()
 
     async def test_realtime_bench_limits_replies_and_settles_response_usage(self):
         class RealtimeWS(FakeWS):

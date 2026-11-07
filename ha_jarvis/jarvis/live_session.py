@@ -1,4 +1,4 @@
-"""Bounded GPT-Live transport bench; no tools, recording, or acoustic claims.
+"""Bounded GPT-Live transport with optional App-owned function delegation.
 
 Caller supplies real-time paced PCM16LE mono at 16 kHz. Audio callback receives
 the same format. start() is the only paid entry point; constructing is inert.
@@ -13,10 +13,13 @@ from dataclasses import dataclass
 from fractions import Fraction
 import json
 import time
+import uuid
 
 import aiohttp
 from aiortc import AudioStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from av import AudioFrame, AudioResampler
+
+from .cloud_settings import BACKEND_RESPONSE_LIMIT, CloudBudgetError
 
 
 RATE = 16000
@@ -85,11 +88,16 @@ class _PCMTrack(AudioStreamTrack):
 class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
                  startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
-                 output_buffer_seconds=1):
+                 output_buffer_seconds=1, assist_delegation=None):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
+        if assist_delegation is not None and (transport != "websocket" or greeting):
+            raise ValueError("Assist delegation requires a conversational WebSocket session")
+        self.assist_delegation = assist_delegation
+        self._delegation_task = None
+        self._assist_result_submitted = False
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
         self.greeting, self.on_transcript = greeting, on_transcript
         self.instructions = instructions
@@ -125,6 +133,8 @@ class LiveSession:
         config = {"model": MODEL, "instructions": self.greeting or self.instructions,
                   "store": False, "delegation": {"type": "client"},
                   "audio": {"output": {"voice": VOICE}}}
+        if self.assist_delegation is not None:
+            config["delegation"] = self.assist_delegation.config()
         if self.greeting:
             config["input"] = [{"role": "developer", "content": [{"type": "input_text", "text": self.greeting}]}]
         if self.transport == "websocket":
@@ -134,7 +144,8 @@ class LiveSession:
     async def start(self):
         if self._attempt or self._disposed:
             raise LiveSessionError("A LiveSession can start only once")
-        self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport)
+        backend_model = self.assist_delegation.model if self.assist_delegation is not None else None
+        self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport, backend_model=backend_model)
         self._started_at = time.monotonic()
         try:
             self._http = aiohttp.ClientSession(
@@ -238,7 +249,8 @@ class LiveSession:
                 self._fail("Cloud audio track ended unexpectedly")
 
     def _queue_audio(self, pcm):
-        if self._closing or not pcm:
+        if (self._closing or not pcm or (self.assist_delegation is not None
+                and self.assist_delegation.preview_target is not None and not self._assist_result_submitted)):
             return
         if len(pcm) % 2 or self._output_bytes + len(pcm) > self._output_limit_bytes:
             self._fail("Cloud output queue exceeded its limit or contained invalid PCM")
@@ -294,9 +306,49 @@ class LiveSession:
             self.on_transcript(event["delta"])
         elif kind == "error":
             self._fail("Cloud session reported an error")
-        # Transcript text and delegated payloads are never retained or logged.
-        elif kind == "session.delegation.created":
+        elif kind == "session.delegation.created" and self.assist_delegation is None:
             self._fail("Unexpected delegation in voice-only benchmark")
+        elif kind == "response.event" and self.assist_delegation is not None:
+            try:
+                nested = event.get("event")
+                if isinstance(nested, dict) and nested.get("type") in (
+                        "response.created", "response.completed", "response.failed",
+                        "response.incomplete", "response.cancelled"):
+                    response = nested.get("response") or {}
+                    count = self.settings.observe_backend_response(self._attempt, response.get("id"),
+                        usage=response.get("usage"), model=response.get("model"))
+                    if count > BACKEND_RESPONSE_LIMIT:
+                        self._fail("Delegated response budget limit reached")
+                        return
+                if self._closing or self._failed.is_set():
+                    return
+                batch = self.assist_delegation.observe(event)
+                if batch:
+                    if self._delegation_task is not None and not self._delegation_task.done():
+                        raise ValueError("Overlapping Assist execution")
+                    self._delegation_task = self._spawn(self._return_assist_results(batch))
+            except (CloudBudgetError, TypeError, AttributeError):
+                self.settings.mark_backend_unconfirmed(self._attempt)
+                self._fail("Could not confirm delegated usage")
+            except ValueError:
+                self._fail("Invalid Assist delegation event")
+
+    async def _return_assist_results(self, batch):
+        try:
+            for call_id, (name, arguments) in batch.calls.items():
+                if self._closing or self._final.is_set():
+                    return
+                result = await self.assist_delegation.execute(call_id, name, arguments)
+                if self._closing or self._final.is_set():
+                    return
+                await self._ws.send_json({"type": "response.item.create", "event_id": uuid.uuid4().hex,
+                    "item": {"type": "function_call_output", "call_id": call_id,
+                             "output": json.dumps(result, allow_nan=False)}})
+            if not self._closing and not self._final.is_set():
+                await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
+                self._assist_result_submitted = True
+        except Exception:
+            self._fail("Could not return Assist delegation results")
 
     async def send_audio(self, pcm):
         if not self._ready.is_set() or self._closing or self._final.is_set() or self._failed.is_set():
@@ -337,6 +389,9 @@ class LiveSession:
             return self.metrics
         self._closing = True
         try:
+            if self._delegation_task is not None and not self._delegation_task.done():
+                self._delegation_task.cancel()
+                await asyncio.gather(self._delegation_task, return_exceptions=True)
             if self._attempt and not self._final.is_set():
                 remaining = max(0, self.max_seconds - (time.monotonic() - self._started_at))
                 try:

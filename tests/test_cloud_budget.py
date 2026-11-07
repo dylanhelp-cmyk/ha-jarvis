@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from jarvis.cloud_settings import CloudBudgetError, CloudSettings
+from jarvis.cloud_settings import CloudBudgetError, CloudSettings, _backend_allowance
 
 
 class CloudBudgetTests(unittest.TestCase):
@@ -69,6 +69,32 @@ class CloudBudgetTests(unittest.TestCase):
                 self.settings.observe_usage(attempt, value)
         with self.assertRaises(CloudBudgetError):
             self.settings.finalize("different-attempt", 5)
+
+    def test_delegation_reserves_before_start_and_debits_each_response_once(self):
+        model = "gpt-6-luna"
+        attempt = self.settings.reserve_attempt(transport="websocket", backend_model=model)
+        allowance = _backend_allowance(model)
+        saved = CloudSettings(self.folder.name)
+        self.assertAlmostEqual(saved.pending["reserved_usd"], .05 + 3 * allowance)
+        self.settings.observe_backend_response(attempt, "completed")
+        usage = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 200}, "output_tokens": 50}
+        self.settings.observe_backend_response(attempt, "completed", usage=usage, model=model)
+        self.settings.observe_backend_response(attempt, "completed", usage=usage, model=model)
+        self.settings.observe_backend_response(attempt, "missing")
+        self.settings.finalize(attempt, 24)
+        estimated = 1.1 * (800 * .25 + 200 * .01 + 50 * .5) / 1_000_000
+        self.assertAlmostEqual(self.settings.spent_usd, .02 + allowance + estimated)
+
+    def test_delegation_rejects_insufficient_headroom_and_bills_uncertain_usage(self):
+        with self.assertRaises(CloudBudgetError):
+            self.settings.reserve_attempt(transport="websocket", backend_model="gpt-6-sol")
+        attempt = self.settings.reserve_attempt(transport="websocket", backend_model="gpt-6-luna")
+        reserved = self.settings.pending["reserved_usd"]
+        with self.assertRaises(CloudBudgetError):
+            self.settings.observe_backend_response(attempt, "bad", usage={"input_tokens": -1})
+        self.settings.mark_backend_unconfirmed(attempt)
+        self.settings.finalize(attempt, 60)
+        self.assertAlmostEqual(self.settings.spent_usd, reserved)
 
     def test_legacy_file_and_missing_key(self):
         path = Path(self.folder.name) / "openai-private.json"
