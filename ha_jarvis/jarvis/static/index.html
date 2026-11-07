@@ -96,6 +96,17 @@
         <button class="button subtle" id="verify-ack" type="button" hidden disabled>I heard only Yes sir</button>
         <button class="button subtle" id="generate-ack" type="button" hidden>Generate clip (paid API test)</button>
       </section>
+      <section class="panel" aria-labelledby="assist-title">
+        <h2 id="assist-title">Home Assistant device control</h2>
+        <p>Check whether Home Assistant exposes tools to Jarvis through Assist. This check stays local and runs no device actions.</p>
+        <form id="assist-form">
+          <label for="assist-token">Home Assistant access token</label>
+          <input id="assist-token" type="password" autocomplete="off" maxlength="2048" required>
+          <p class="field-help">Use a non-admin Home Assistant account. The token is used once for this check.</p>
+          <button class="button subtle" id="assist-check" type="submit">Check Assist connection</button>
+          <p class="field-help" id="assist-result" role="status"></p>
+        </form>
+      </section>
     </main>
     <footer><span>JARVIS <span class="footer-divider">/</span> Audio bench</span><span id="version">Local-first development milestone</span></footer>
   </div>

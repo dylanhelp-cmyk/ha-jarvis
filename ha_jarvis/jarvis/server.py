@@ -25,6 +25,7 @@ import numpy as np
 from . import __version__
 from .acknowledgment import (approval_path, cache_path, candidate_identity, candidate_wav,
                              generate_acknowledgment, read_candidate, verified_render)
+from .assist import AssistDiscoveryError, discover_tools
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device
 from .opening_audio import OpeningAudio
@@ -740,6 +741,23 @@ def create_ui(bench):
     async def index(request):
         return web.FileResponse(ROOT / "jarvis/static/index.html")
     async def status(request): return web.json_response(bench.status())
+
+    async def check_assist(request):
+        data = await request.json()
+        if not isinstance(data, dict) or set(data) != {"token"}:
+            raise ValueError("Enter a Home Assistant access token")
+        token = data["token"]
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{1,2048}", token):
+            raise ValueError("Enter a valid Home Assistant access token")
+        # This App uses host networking. Keep the destination out of the
+        # request so the ingress route cannot send credentials to other hosts.
+        origin = os.environ.get("JARVIS_ASSIST_ORIGIN", "http://127.0.0.1:8123")
+        try:
+            tools = await discover_tools(origin, token)
+        except AssistDiscoveryError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response({"tool_count": len(tools)})
+
     async def cloud_settings(request):
         if request.method == "PUT":
             data = await request.json()
@@ -952,6 +970,7 @@ def create_ui(bench):
     app.router.add_get("/", index)
     app.router.add_static("/static/", ROOT / "jarvis/static")
     app.router.add_get("/api/status", status)
+    app.router.add_post("/api/assist/check", check_assist)
     app.router.add_get("/api/cloud", cloud_settings)
     app.router.add_put("/api/cloud", cloud_settings)
     app.router.add_put("/api/cloud/fixture", cloud_fixture)

@@ -256,6 +256,25 @@ $('cloud-form').addEventListener('submit', (event) => {
   });
 });
 
+$('assist-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = $('assist-token');
+  const result = $('assist-result');
+  const button = $('assist-check');
+  const token = input.value.trim();
+  input.value = '';
+  button.disabled = true;
+  result.textContent = 'Checking Assist connection…';
+  try {
+    const {tool_count} = await api('api/assist/check', 'POST', {token});
+    result.textContent = `Connected to Assist. ${tool_count} tool${tool_count === 1 ? '' : 's'} available.`;
+  } catch (error) {
+    result.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 async function initialize() {
   const config = await api('api/config');
   $('ha-lan-url').value = config.ha_lan_url;

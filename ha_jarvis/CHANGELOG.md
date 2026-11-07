@@ -1,3 +1,10 @@
+# 0.2.18
+
+- Start the Voice PE speaker while the App fills the reply reserve. Record the reserve fill and remaining handshake wait separately. The playback reserves and sample pacing are unchanged.
+- Give warm follow-ups 10 seconds of inactivity. Detected speech resets that timer within the paid preview's 18-second input limit.
+- Add a read-only Assist connection check. It reports the discovered tool count and uses the access token once.
+- App-only update. Run Echo reference alignment, then try Voice preview with a warm follow-up at normal volume and preconnection off.
+
 # 0.2.17
 
 - Keep echo processing through the confirmed wake clip and a 180 ms acoustic tail guard. Preserve microphone levels when the jack is quiet.

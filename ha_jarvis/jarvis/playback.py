@@ -105,6 +105,8 @@ class JackPlayback:
         self.max_in_flight = 0
         self.max_send_lag_ms = 0.0
         self.max_source_wait_ms = 0.0
+        self.source_prime_wait_ms = None
+        self.play_start_wait_ms = None
 
     def receive(self, message):
         if message.get("generation") != self.generation:
@@ -183,17 +185,31 @@ class JackPlayback:
             raise ValueError("Playback source prime exceeds 200 ms")
         source = packets()
         prime = deque()
+        first_packet_at = None
+        start_requested = False
         for _ in range(source_prime):
             packet = await anext(source, None)
             if packet is None:
                 break
             prime.append(packet)
+            if first_packet_at is None:
+                first_packet_at = time.monotonic()
+                if source_prime > prime_packets:
+                    # Let the Voice PE start its speaker while the App fills
+                    # the source reserve. No PCM is sent until both are ready.
+                    await self.command("play_start")
+                    start_requested = True
+            self.ensure_playing()
         if not prime:
             raise ValueError("Playback stream is empty")
-        await self.command("play_start")
+        prime_ready_at = time.monotonic()
+        self.source_prime_wait_ms = (prime_ready_at - first_packet_at) * 1000
+        if not start_requested:
+            await self.command("play_start")
         await asyncio.wait_for(self.started.wait(), 2)
         self.ensure_playing()
         anchor = time.monotonic()
+        self.play_start_wait_ms = (anchor - prime_ready_at) * 1000
         sequence = 0
         payload = prime.popleft()
         advance_frames = (prime_packets - 1) * PACKET_FRAMES
@@ -260,6 +276,10 @@ class JackPlayback:
                 "max_send_lag_ms": round(self.max_send_lag_ms, 1),
                 "max_source_wait_ms": round(self.max_source_wait_ms, 1), "reason": self.reason,
                 "clock_scope": "speaker acceptance and firmware output counters, not acoustic output"}
+        if self.source_prime_wait_ms is not None:
+            result["source_prime_wait_ms"] = round(self.source_prime_wait_ms, 1)
+        if self.play_start_wait_ms is not None:
+            result["play_start_wait_after_prime_ms"] = round(self.play_start_wait_ms, 1)
         if self.first_render_report is not None:
             first, stamp = self.first_render_report
             if self.frames_rendered > first:

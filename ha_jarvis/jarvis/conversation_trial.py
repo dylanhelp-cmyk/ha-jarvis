@@ -11,6 +11,7 @@ import time
 import numpy as np
 
 from .audio import RATE
+from .lifecycle import ConversationPolicy
 from .live_bench import BenchReply
 from .live_session import LiveSession
 from .streaming_aec import StreamingEcho
@@ -108,10 +109,12 @@ class SpeechEndpoint:
             if self.active or sum(self.recent) >= 3:
                 self.active = True
                 self.last_voice = captured_at, sent_at
+                return True
         else:
             self.quiet_frames += 1
             if self.quiet_frames >= 8:
                 self.active = False
+        return False
 
     def timing(self, first_voice_at):
         scope = "local WebRTC VAD estimate on transmitted echo-processed audio"
@@ -135,7 +138,8 @@ def gain_packet(pcm, gain_db):
     return output.tobytes(), int(np.max(np.abs(samples))), int(np.max(np.abs(output.astype(np.int32)))), clipped
 
 
-async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms):
+async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
+                       warm_follow_up=False):
     reply = BenchReply(device, result["id"])
     sender = None
     endpoint = SpeechEndpoint()
@@ -151,9 +155,15 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         phase(listening_phase)
         set_output(reply)
         origin = listening_started = time.monotonic()
+        inactivity = ConversationPolicy(last_activity=listening_started)
+        # Bound the paid preview separately from the conversational idle timer.
+        deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
-            if time.monotonic() - listening_started >= 10:
-                raise TimeoutError("No spoken reply within this input window")
+            now = time.monotonic()
+            if warm_follow_up and inactivity.should_close(now):
+                raise TimeoutError("No spoken reply after 10 seconds without detected speech")
+            if now >= deadline:
+                raise TimeoutError("No spoken reply before the preview time limit")
             if device.errors or session.metrics.error or sender.done() or not device.info.get("jack_plugged"):
                 raise RuntimeError("The microphone, cloud session or jack playback failed")
             packet, captured_at = await stream.packet()
@@ -175,7 +185,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 peak_before = max(peak_before, before)
                 peak_after = max(peak_after, after)
                 clipped += overload
-                endpoint.observe(packet, captured_at, sent_at)
+                if endpoint.observe(packet, captured_at, sent_at):
+                    inactivity.user_speech(sent_at)
                 sent += 320
         device.pcm_consumer = None
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
@@ -280,7 +291,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             try:
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up",
-                                                  gain_db=gain_db, max_age_ms=250))
+                                                  gain_db=gain_db, max_age_ms=250, warm_follow_up=True))
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 warm.update(status="unavailable", error=str(exc) or type(exc).__name__)
         return replies

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import CleanInput, SpeechEndpoint, gain_packet, run_voice_turn
+from jarvis.conversation_trial import CleanInput, SpeechEndpoint, gain_packet, run_voice_turn, stream_reply
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -72,6 +72,48 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_warm_speech_near_idle_deadline_keeps_listening(self):
+        for speaking in (False, True):
+            with self.subTest(speaking=speaking):
+                now = 100.0
+                sent = 0
+                output = None
+
+                def set_output(reply):
+                    nonlocal output
+                    output = reply
+
+                async def packet():
+                    nonlocal now
+                    now = 100 + sent * .02
+                    pcm = bytes([1, 0]) * 320 if speaking and 495 <= sent < 499 else bytes(640)
+                    return pcm, now
+
+                async def send_audio(_):
+                    nonlocal sent
+                    sent += 1
+                    if sent == 503:
+                        output.first_voice_at = now
+                        output.last_voice_at = now - 1
+
+                device = SimpleNamespace(errors=[], info={"jack_plugged": True})
+                session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio)
+                stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0)
+                detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
+                result = {"id": "warm"}
+                with patch("jarvis.conversation_trial.BenchReply", SimulatedReply), \
+                     patch("jarvis.conversation_trial.SpeechEndpoint", lambda: SpeechEndpoint(detector)), \
+                     patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: now)):
+                    run = stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
+                                       gain_db=0, max_age_ms=250, warm_follow_up=True)
+                    if speaking:
+                        self.assertIsNotNone(await run)
+                        self.assertEqual(sent, 503)
+                    else:
+                        with self.assertRaisesRegex(TimeoutError, "without detected speech"):
+                            await run
+                        self.assertLess(sent, 503)
+
     def test_echo_guard_keeps_sample_order_across_partial_aec_blocks(self):
         buffered = 0
         def aec_capture(frame, _offset):

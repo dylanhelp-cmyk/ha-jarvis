@@ -55,6 +55,24 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(self.bench.cloud_settings.api_key, key)
 
+    async def test_assist_check_uses_a_fixed_origin_and_discards_the_token(self):
+        token = 'test.home-assistant.token'
+        origin = 'https://home-assistant.test:8123'
+        with patch.dict('os.environ', {'JARVIS_ASSIST_ORIGIN': origin}), \
+             patch('jarvis.server.discover_tools', return_value=[{'name': 'HassTurnOn'}]) as discover:
+            response = await self.ui.post('/api/assist/check', json={'token': token})
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), {'tool_count': 1})
+            discover.assert_awaited_once_with(origin, token)
+            discover.reset_mock()
+            response = await self.ui.post('/api/assist/check', json={'token': token, 'origin': 'http://other'})
+            self.assertEqual(response.status, 400)
+            discover.assert_not_awaited()
+        diagnostics = await self.ui.get('/api/diagnostics')
+        self.assertNotIn(token, await diagnostics.text())
+        for path in Path(self.folder.name).glob('*.json'):
+            self.assertNotIn(token, path.read_text())
+
     async def test_synthetic_fixture_is_memory_only_and_paid_start_is_gated(self):
         import base64
         response = await self.ui.put('/api/cloud/fixture', json={'pcm_b64':base64.b64encode(bytes(RATE * 2)).decode()})

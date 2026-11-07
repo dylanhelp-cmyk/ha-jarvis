@@ -72,13 +72,18 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "source-reserve")
 
         async def chunks():
-            for _ in range(5):
-                self.assertFalse(ws.commands)
+            self.assertFalse(ws.commands)
+            yield bytes(480 * 4)
+            for _ in range(4):
+                self.assertEqual(ws.commands, ["play_start"])
+                self.assertEqual(ws.packets, [])
                 yield bytes(480 * 4)
 
         await player.send_stream(chunks(), prime_packets=2, source_prime_packets=5)
         self.assertEqual([packet[6] for packet in ws.packets], [0, 480, 960, 1440, 1920])
         self.assertEqual(ws.commands, ["play_start", "play_drain"])
+        self.assertIn("source_prime_wait_ms", player.snapshot())
+        self.assertIn("play_start_wait_after_prime_ms", player.snapshot())
 
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
