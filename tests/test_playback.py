@@ -67,6 +67,19 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await player.send_stream(chunks(), prime_packets=2)
         self.assertEqual([packet[6] for packet in ws.packets], [0, 480, 960])
 
+    async def test_host_source_reserve_is_independent_of_wire_prime(self):
+        ws = FakeSocket()
+        ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "source-reserve")
+
+        async def chunks():
+            for _ in range(5):
+                self.assertFalse(ws.commands)
+                yield bytes(480 * 4)
+
+        await player.send_stream(chunks(), prime_packets=2, source_prime_packets=5)
+        self.assertEqual([packet[6] for packet in ws.packets], [0, 480, 960, 1440, 1920])
+        self.assertEqual(ws.commands, ["play_start", "play_drain"])
+
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
         device = SimpleNamespace(ws=old)

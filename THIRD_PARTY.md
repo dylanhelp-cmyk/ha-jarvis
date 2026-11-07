@@ -11,3 +11,5 @@ The App installs aiohttp (Apache-2.0) and NumPy (BSD-3-Clause), with their depen
 The cloud transport installs [aiortc 1.15.0](https://pypi.org/project/aiortc/1.15.0/) and [PyAV 17.1.0](https://pypi.org/project/av/17.1.0/), both BSD-3-Clause. Their installed distributions retain their license files and dependency notices. PyAV binary wheels bundle FFmpeg libraries and their associated license notices. aiortc also uses installed SRTP, OpenSSL and ICE dependencies with their distribution metadata/notices retained. No library source is copied into Jarvis.
 
 The App runs Debian's [eSpeak NG package](https://packages.debian.org/bookworm/espeak-ng) as a separate process for fixed synthetic test prompts. Its installed license notices remain under `/usr/share/doc/espeak-ng/copyright`.
+
+[webrtcvad-wheels 2.0.14.post1](https://pypi.org/project/webrtcvad-wheels/2.0.14.post1/) provides the local speech activity estimate. Its wheel retains the Python wrapper and bundled WebRTC notices.

@@ -133,6 +133,14 @@ function showResults(results) {
     if (result.kind === 'voice_turn' && result.digital_first_voice_ms != null) {
       add(card, 'p', 'First returned speech ' + result.digital_first_voice_ms + ' ms after input streaming began.');
     }
+    if (result.speech_endpoint?.status === 'estimated') {
+      const timing = result.speech_endpoint;
+      add(card, 'p', 'Estimated speech end to audible reply: ' +
+        (timing.speech_end_to_audible_ms == null ? 'unavailable' : timing.speech_end_to_audible_ms + ' ms') +
+        ' · Input queue at estimated speech end: ' + timing.speech_end_to_send_ms + ' ms.');
+    } else if (result.speech_endpoint) {
+      add(card, 'p', 'Speech-end estimate unavailable: ' + result.speech_endpoint.reason);
+    }
     if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {

@@ -4,3 +4,4 @@ numpy==2.5.4
 aiortc==1.15.0
 av==17.1.0
 pywebrtc-audio==0.2.0
+webrtcvad-wheels==2.0.14.post1

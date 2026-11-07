@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import suppress
 import time
 
@@ -27,12 +28,16 @@ class CleanInput:
         self.pending = bytearray()
         self.changed = asyncio.Event()
         self.error = None
+        self.capture_start = None
+        self.released_samples = 0
 
     def offer(self, frame, clock_offset_ms):
         if self.error:
             return
         try:
             clean = self.echo.capture(frame, clock_offset_ms)
+            if self.capture_start is None:
+                self.capture_start = (frame.capture_ms + clock_offset_ms) / 1000
             if len(self.pending) + len(clean) > 3 * RATE * 2:
                 raise RuntimeError("clean_opening_queue_overflow")
             self.pending.extend(clean)
@@ -49,7 +54,47 @@ class CleanInput:
             await asyncio.wait_for(self.changed.wait(), .35)
         packet = bytes(self.pending[:640])
         del self.pending[:640]
-        return packet
+        self.released_samples += 320
+        return packet, self.capture_start + self.released_samples / RATE
+
+
+class SpeechEndpoint:
+    """Estimate a local speech boundary from consecutive cleaned 20 ms packets."""
+
+    def __init__(self, detector=None):
+        if detector is None:
+            import webrtcvad
+            detector = webrtcvad.Vad(2)
+        self.detector = detector
+        self.recent = deque(maxlen=5)
+        self.quiet_frames = 0
+        self.active = False
+        self.last_voice = None
+
+    def observe(self, pcm, captured_at, sent_at):
+        voiced = self.detector.is_speech(pcm, RATE)
+        self.recent.append(voiced)
+        if voiced:
+            self.quiet_frames = 0
+            if self.active or sum(self.recent) >= 3:
+                self.active = True
+                self.last_voice = captured_at, sent_at
+        else:
+            self.quiet_frames += 1
+            if self.quiet_frames >= 8:
+                self.active = False
+
+    def timing(self, first_voice_at):
+        scope = "local WebRTC VAD estimate on transmitted echo-processed audio"
+        if self.last_voice is None or self.quiet_frames < 8:
+            return {"status": "unavailable", "scope": scope, "reason": "No qualified speech followed by 160 ms of quiet"}
+        captured_at, sent_at = self.last_voice
+        if not 0 <= first_voice_at - sent_at <= 2:
+            return {"status": "unavailable", "scope": scope, "reason": "The speech estimate could not be paired with this reply"}
+        return {"status": "estimated", "scope": scope,
+                "speech_end_to_send_ms": round((sent_at - captured_at) * 1000, 1),
+                "speech_end_send_to_cloud_voice_ms": round((first_voice_at - sent_at) * 1000, 1),
+                "speech_end_to_cloud_voice_ms": round((first_voice_at - captured_at) * 1000, 1)}
 
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase):
@@ -58,6 +103,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
     ws = device.ws
     sender = startup = None
     accept_output = False
+    endpoint = SpeechEndpoint()
 
     async def on_audio(audio, rate):
         if accept_output:
@@ -86,26 +132,40 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             stream.offer(frame, device.clock_offset_ms)
         device.pcm_consumer = stream.offer
         device.playback = reply.player
-        sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5))
+        # The extra source reserve remains on the App. The device window is
+        # still 50 ms and playback keeps the original sample clock.
+        result["reply_source_reserve_ms"] = 120
+        sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5, source_prime_packets=12))
         phase("streaming the cleaned opening speech")
         accept_output = True
         origin = time.monotonic()
         sent = 0
+        first_age = max_age = None
         while reply.first_voice_at is None:
             if time.monotonic() - origin >= 10:
                 raise TimeoutError("No spoken reply within the one-turn input window")
             if device.errors or session.metrics.error or sender.done() or not device.info.get("jack_plugged"):
                 raise RuntimeError("The microphone, cloud session or jack playback failed")
-            packet = await stream.packet()
+            packet, captured_at = await stream.packet()
             due = origin + sent / RATE
             await asyncio.sleep(max(0, due - time.monotonic()))
             if time.monotonic() - due > .1:
                 raise RuntimeError("Microphone input pacing exceeded 100 ms")
             if reply.first_voice_at is None:
+                sent_at = time.monotonic()
+                age = (sent_at - captured_at) * 1000
+                if not -100 <= age <= opening.max_ms:
+                    raise RuntimeError("Microphone input exceeded its capture-age bound; retry the turn")
+                first_age = age if first_age is None else first_age
+                max_age = age if max_age is None else max(max_age, age)
                 await session.send_audio(packet)
+                endpoint.observe(packet, captured_at, sent_at)
                 sent += 320
         device.pcm_consumer = None
         result["input_samples_sent"] = sent
+        result["input_queue"] = {"first_packet_age_ms": round(first_age, 1) if first_age is not None else None,
+                                 "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
+        result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
         result["digital_first_voice_ms"] = round((reply.first_voice_at - origin) * 1000, 1)
         phase("playing the GPT-Live reply through the jack")
         async with asyncio.timeout(8):
@@ -134,6 +194,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             await asyncio.gather(sender, return_exceptions=True)
             with suppress(RuntimeError, OSError, TimeoutError):
                 await reply.player.stop()
+            result["playback"] = reply.player.snapshot()
         device.playback = None
         wake = device.wake_details
         if (device.ws is ws and ws is not None and not ws.closed and wake.get("ack_playback_id")

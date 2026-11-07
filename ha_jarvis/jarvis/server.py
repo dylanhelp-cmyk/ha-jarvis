@@ -420,6 +420,11 @@ class Bench:
             match.pop("fixture_end_to_audible_ms", None)
         result["trials"] = [{"trial": 1, **match}]
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
+        result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
+        endpoint = result["speech_endpoint"]
+        if endpoint["status"] == "estimated" and match["status"] == "detected":
+            endpoint["speech_end_to_audible_ms"] = round(
+                endpoint["speech_end_to_cloud_voice_ms"] + match["latency_ms"], 1)
 
     async def measure_render_alignment(self, result):
         from .live_bench import match_response, render_reference, voiced_bounds

@@ -1,3 +1,8 @@
+# 0.2.12
+
+- Allow a 120 ms host-side source reserve for live preview replies and retain playback diagnostics if they stall.
+- Estimate the end of speech locally and measure microphone queue age independently from the provider and wired playback. The estimate is diagnostic and does not change turn-taking. App-only update.
+
 # 0.2.11
 
 - Add a one-turn voice preview after a successful Echo reference alignment. It requires per-run consent to send cleaned microphone audio to OpenAI GPT-Live. Say Hey Jarvis, then ask a short question. Firmware 0.2.3 is sufficient.

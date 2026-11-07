@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import run_voice_turn
+from jarvis.conversation_trial import SpeechEndpoint, run_voice_turn
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -55,7 +55,7 @@ class SimulatedReply:
         self.first_voice_at = time.monotonic()
         self.last_voice_at = self.first_voice_at - .7
 
-    async def send_stream(self, unused, *, prime_packets):
+    async def send_stream(self, unused, *, prime_packets, source_prime_packets):
         await self.draining.wait()
 
     def chunks(self):
@@ -72,6 +72,20 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    def test_speech_timing_requires_a_burst_then_quiet(self):
+        detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
+        endpoint = SpeechEndpoint(detector)
+        for i, voiced in enumerate([True, False, False, False, True, True, True] + [False] * 7):
+            endpoint.observe(bytes([voiced]), 1 + i * .02, 1.3 + i * .02)
+        self.assertEqual(endpoint.timing(1.8)["status"], "unavailable")
+        endpoint.observe(bytes(1), 1.28, 1.58)
+        timing = endpoint.timing(1.8)
+        self.assertEqual(timing["status"], "estimated")
+        self.assertEqual(timing["speech_end_to_send_ms"], 300)
+        self.assertEqual(timing["speech_end_send_to_cloud_voice_ms"], 380)
+        self.assertEqual(timing["speech_end_to_cloud_voice_ms"], 680)
+        self.assertEqual(endpoint.timing(4)["status"], "unavailable")
+
     async def test_confirmed_wake_sends_ordered_opening_then_drains_and_closes(self):
         with patch("jarvis.conversation_trial.LiveSession", SimulatedSession),              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
             event = asyncio.Event()
@@ -89,6 +103,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, lambda phase: None)
             self.assertEqual(messages, ["ready", samples[:320].tobytes(), samples[320:640].tobytes(), "closed"])
             self.assertEqual(result["input_samples_sent"], 640)
+            self.assertIsNotNone(result["input_queue"]["first_packet_age_ms"])
             self.assertEqual(result["playback"]["frames_rendered"], 480)
             self.assertIsNone(device.pcm_consumer)
             self.assertIsNone(device.playback)
