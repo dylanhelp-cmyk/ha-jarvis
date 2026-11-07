@@ -148,12 +148,43 @@ class JackPlayback:
             raise RuntimeError(f"Voice PE playback ended early ({self.reason})")
 
     async def send(self, pcm):
+        async def chunks():
+            size = RATE * CHANNELS * 2
+            for offset in range(0, len(pcm), size):
+                yield pcm[offset:offset + size]
+        await self.send_stream(chunks())
+
+    async def send_stream(self, chunks):
+        """Start once PCM exists and preserve sample timing across arriving chunks."""
+        frame_bytes = CHANNELS * 2
+        packet_bytes = PACKET_FRAMES * frame_bytes
+
+        async def packets():
+            partial = bytearray()
+            async for chunk in chunks:
+                if len(chunk) % frame_bytes:
+                    raise ValueError("Playback stream contains a partial stereo frame")
+                if len(chunk) > RATE * frame_bytes:
+                    raise ValueError("Playback chunk exceeds the one-second bound")
+                partial.extend(chunk)
+                for offset in range(0, len(partial) - packet_bytes + 1, packet_bytes):
+                    yield bytes(partial[offset:offset + packet_bytes])
+                consumed = len(partial) // packet_bytes * packet_bytes
+                del partial[:consumed]
+            if partial:
+                yield bytes(partial)
+
+        source = packets()
+        first = await anext(source, None)
+        if first is None:
+            raise ValueError("Playback stream is empty")
         await self.command("play_start")
         await asyncio.wait_for(self.started.wait(), 2)
         self.ensure_playing()
         anchor = time.monotonic()
-        frame_bytes = CHANNELS * 2
-        for sequence, offset in enumerate(range(0, len(pcm), PACKET_FRAMES * frame_bytes)):
+        sequence = 0
+        payload = first
+        while payload is not None:
             while self.frames_sent - self.frames_accepted >= MAX_IN_FLIGHT:
                 self.progress.clear()
                 self.ensure_playing()
@@ -161,16 +192,19 @@ class JackPlayback:
             due = anchor + self.frames_sent / RATE
             await asyncio.sleep(max(0.0, due - time.monotonic()))
             self.ensure_playing()
+            if self.ws is not self.device.ws or self.ws.closed:
+                raise RuntimeError("Voice PE disconnected")
             lag = max(0.0, (time.monotonic() - due) * 1000)
             self.max_send_lag_ms = max(self.max_send_lag_ms, lag)
             if lag > 100:
                 raise RuntimeError("Voice PE sender fell behind; playback stopped without acceleration")
-            payload = pcm[offset:offset + PACKET_FRAMES * frame_bytes]
             count = len(payload) // frame_bytes
             header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, self.frames_sent)
             self.frames_sent += count
+            sequence += 1
             self.max_in_flight = max(self.max_in_flight, self.frames_sent - self.frames_accepted)
             await asyncio.wait_for(self.ws.send_bytes(header + payload), .15)
+            payload = await anext(source, None)
         await self.command("play_drain")
         await asyncio.wait_for(self.finished.wait(), 3)
         if self.reason != "drained" or self.frames_accepted != self.frames_sent:

@@ -212,7 +212,7 @@ class Bench:
         return {"version": __version__, "milestone": "wired_audio_bench", "device": self.device.snapshot(),
                 "test": self.test, "acknowledgment": self.acknowledgment_status(), "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
-                          "reason": "Cloud playback trials are gated on wired bench verification"}}
+                          "reason": "Paid reply tests use only built-in synthetic prompts"}}
 
     async def cancel(self, reason="user_stop", details=None):
         if self.task and not self.task.done():
@@ -334,6 +334,47 @@ class Bench:
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
+    async def measure_synthetic_replies(self, result, transport):
+        from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
+                                 render_reference, synthesize_fixture, voiced_bounds)
+
+        self.test["phase"] = "synthesizing fixed test prompts locally"
+        fixtures = [await synthesize_fixture(prompt) for prompt in SYNTHETIC_PROMPTS]
+        timings = []
+        def stage(phase):
+            self.test["phase"] = phase
+        result["metric"] = "synthetic_digital_speech_end_to_audible_reply"
+        result["cloud"] = await benchmark_replies(self.device, self.cloud_settings, transport,
+                                                   result["id"], fixtures, timings, stage)
+        await asyncio.sleep(.35)
+        await self.device.end()
+        captured, capture_start = self.device.recording()
+        result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
+        offset = self.device.clock_offset_ms
+        for index, (endpoint, reply) in enumerate(timings, 1):
+            reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
+            bounds = voiced_bounds(reference)
+            if bounds is None:
+                match = {"status": "unavailable", "reason": "Reply reference has no usable speech", "latency_ms": None}
+            else:
+                def handoff(sample):
+                    return reply.player.accepted_at(sample * 3, offset) or reply.first_voice_at
+                match = await asyncio.to_thread(
+                    match_response, captured, capture_start, reference, bounds[0],
+                    endpoint, reply.first_voice_at, handoff_at=handoff,
+                    acoustic_delay_range=(-.04, .45), window_seconds=.2)
+            match.update(trial=index, turn="first" if index == 1 else "warm_followup",
+                         digital_end_to_cloud_voice_ms=round((reply.first_voice_at - endpoint) * 1000, 1),
+                         playback=reply.player.snapshot())
+            result["trials"].append(match)
+        if result["cloud"]["failure"]:
+            result["error"] = result["cloud"]["failure"]
+        for index in range(len(timings) + 1, len(fixtures) + 1):
+            result["trials"].append({"trial": index, "turn": "first" if index == 1 else "warm_followup",
+                                     "status": "unavailable", "latency_ms": None,
+                                     "reason": "The synthetic turn did not complete"})
+        result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
+
     async def run(self, kind, repetitions, startup_transport=None):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
@@ -353,6 +394,9 @@ class Bench:
                 await self.device.end()
                 self.device.recording()
                 result.update(status="passed", metric="microphone_connection")
+                return
+            if kind == "synthetic_replies":
+                await self.measure_synthetic_replies(result, startup_transport)
                 return
             if kind == "wake_ack":
                 await self.measure_wake_ack(result, startup_transport)
@@ -506,8 +550,8 @@ def create_ui(bench):
                 raise ValueError("Only local API key entry is supported")
             bench.cloud_settings.set_key(data["api_key"])
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
-                                  "benchmark_available": False,
-                                  "reason": "Cloud playback trials are gated on wired bench verification"})
+                                  "benchmark_available": True,
+                                  "reason": "Paid reply tests use only built-in synthetic prompts"})
     async def cloud_acknowledgment(request):
         if request.method == "POST":
             data = await request.json()
@@ -577,7 +621,27 @@ def create_ui(bench):
         except Exception as exc:
             return web.json_response({"native_aec3_usable": False, "reason": type(exc).__name__})
     async def cloud_start(request):
-        raise web.HTTPServiceUnavailable(text="Paid trials will resume after wired playback is verified")
+        data = await request.json()
+        if not isinstance(data, dict) or set(data) != {"transport", "confirm_paid", "comfortable_volume_confirmed"}:
+            raise web.HTTPServiceUnavailable(text="Choose the built-in synthetic reply benchmark")
+        transport = data["transport"]
+        if transport not in ("websocket", "webrtc") or data["confirm_paid"] is not True:
+            raise ValueError("Explicitly confirm a paid synthetic reply test and choose the transport")
+        if data["comfortable_volume_confirmed"] is not True:
+            raise ValueError("Confirm comfortable speaker volume")
+        if bench.test["running"]:
+            raise web.HTTPConflict(text="A test is already running")
+        device = bench.device.snapshot()
+        if (not device["connected"] or device.get("muted") or device.get("raw_ready") is not True
+                or device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True):
+            raise ValueError("Connect the paired Voice PE and speakers before starting")
+        settings = bench.cloud_settings.public()
+        if not settings["api_key_configured"] or settings["paid_retry_blocked"]:
+            raise ValueError("A configured key and a settled budget ledger are required")
+        ident = uuid.uuid4().hex
+        bench.test = {"running": True, "id": ident, "phase": "preparing synthetic reply benchmark"}
+        bench.task = asyncio.create_task(bench.run("synthetic_replies", 2, transport))
+        return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):
         if request.method == "PUT":

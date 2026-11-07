@@ -72,6 +72,11 @@
       <section class="panel results" aria-labelledby="results-title"><div class="results-heading"><div class="section-heading"><span class="step">03</span><div><h2 id="results-title">Evidence, at a glance</h2><p>Missing detections stay missing. They never become zero latency.</p></div></div><a class="button subtle" href="api/diagnostics" download>Export diagnostics <span aria-hidden="true">↓</span></a></div><div id="results-list"><div class="empty-state"><span aria-hidden="true">∿</span><h3>Your first measurement goes here.</h3><p>Save the connection, pair the microphone, then run a local audio test.</p></div></div></section>
       <section class="future" aria-labelledby="future-title"><span class="future-symbol" aria-hidden="true">◇</span><div><p class="eyebrow">NEXT / AFTER THE HARDWARE GATE</p><h2 id="future-title">Conversation can wait for a sound foundation.</h2><p>Wake word, voice, and model settings are unavailable in this milestone. First verify jack playback, reliable stopping, and simultaneous capture.</p></div><span class="tag">Not enabled</span></section>
       <section class="panel" aria-labelledby="cloud-title"><h2 id="cloud-title">OpenAI test preparation</h2><p>Initial API test cap: US$5. Saving a key does not start a paid session. Enter it here, never in chat.</p><form id="cloud-form"><label for="openai-key">OpenAI API key</label><input id="openai-key" type="password" autocomplete="off" maxlength="512"><button class="button subtle" type="submit">Save key locally</button><p id="cloud-state" class="field-help" aria-live="polite">Checking credential status.</p></form>
+        <h3>Synthetic reply timing</h3>
+        <p class="field-help">Compare a first reply and a warm follow-up through the jack. The two prompts are generated on the App. Room microphone audio stays local.</p>
+        <label for="reply-transport">Transport</label>
+        <select id="reply-transport"><option value="websocket">WebSocket</option><option value="webrtc">WebRTC</option></select>
+        <button class="button subtle" id="run-synthetic-replies" type="button" disabled>Run synthetic replies (paid test)</button>
         <h3>Wake acknowledgment</h3>
         <p id="ack-state" class="field-help" aria-live="polite"></p>
         <audio id="ack-preview" controls preload="none" aria-label="Preview generated wake acknowledgment" hidden></audio>

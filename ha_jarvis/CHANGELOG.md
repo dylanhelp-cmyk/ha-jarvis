@@ -1,3 +1,7 @@
+# 0.2.5
+
+- Add the synthetic reply timing bench. Select WebSocket or WebRTC and run one session with two digital prompts to measure first and warm audible replies through the jack. App-only update.
+
 # 0.2.4
 
 - Optionally measure GPT-Live startup during the local wake acknowledgment test. Run one local or budgeted startup trial using the existing 0.2.2 firmware. Room microphone audio stays local.

@@ -39,6 +39,20 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player.snapshot()["frames_accepted"], 960)
         self.assertAlmostEqual(player.accepted_at(481, 5), 1.005 + 1 / 48000)
 
+    async def test_incremental_playback_does_not_wait_for_later_audio(self):
+        ws = FakeSocket()
+        ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "incremental")
+
+        async def chunks():
+            yield bytes(480 * 4)
+            self.assertEqual(len(ws.packets), 1)
+            self.assertEqual(ws.commands, ["play_start"])
+            yield bytes(721 * 4)
+
+        await player.send_stream(chunks())
+        self.assertEqual([packet[3] for packet in ws.packets], [480, 480, 241])
+        self.assertEqual(ws.commands, ["play_start", "play_drain"])
+
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
         device = SimpleNamespace(ws=old)

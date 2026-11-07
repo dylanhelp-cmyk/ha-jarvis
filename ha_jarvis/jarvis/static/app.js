@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  wake_ack: 'Wake acknowledgment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -49,6 +49,10 @@ function readiness() {
   $('save-config').disabled = running || busy;
   const ack = state?.acknowledgment;
   $('verify-ack').disabled = running || busy || !ack?.candidate_id || listenedClip !== ack.candidate_id;
+  $('run-synthetic-replies').disabled = running || busy || !device?.connected || device.muted ||
+    !device.raw_ready || device.playback_protocol !== 1 || !device.jack_plugged ||
+    !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked ||
+    !$('volume-confirmed').checked || !$('idle-confirmed').checked;
   $('generate-ack').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
 }
 
@@ -63,7 +67,7 @@ function showStatus(data) {
   $('test-status').textContent = data.test.running ? 'Running' : 'Standby';
   $('test-detail').textContent = data.test.phase;
   $('version').textContent = 'App ' + data.version;
-  $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Paid playback is gated on wired verification.';
+  $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Synthetic reply timing uses the local jack.';
   const ack = data.acknowledgment;
   const preview = $('ack-preview');
   if (preview.dataset.clip !== (ack.candidate_id || '')) {
@@ -112,9 +116,11 @@ function showResults(results) {
       }
     }
     if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
+    if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' startup: ' +
+      (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {
       const cold = trial.cold_startup_ms;
-      add(card, 'p', 'Trial ' + trial.trial + ' / ' +
+      add(card, 'p', (trial.turn === 'warm_followup' ? 'Warm follow-up' : trial.turn === 'first' ? 'First reply' : 'Trial ' + trial.trial) + ' / ' +
         (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') : trial.latency_ms + ' ms') +
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
@@ -216,4 +222,10 @@ $('generate-ack').addEventListener('click', () => {
   if (window.confirm('Start one budgeted GPT-Live greeting test using digital silence?')) {
     action(() => api('api/cloud/acknowledgment', 'POST', {confirm_paid: true}));
   }
+});
+
+$('run-synthetic-replies').addEventListener('click', () => {
+  if (!window.confirm('Start one budgeted GPT-Live session with two built-in synthetic prompts? Room audio stays local.')) return;
+  action(() => api('api/cloud/tests', 'POST', {transport: $('reply-transport').value,
+    comfortable_volume_confirmed: $('volume-confirmed').checked, confirm_paid: true}));
 });

@@ -1,11 +1,18 @@
 """Reusable digital voice and acoustic matching helpers."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+import io
+import time
+import wave
+
 import av
 import numpy as np
 
 from .audio import RATE, detect_probe
-from .playback import RATE as RENDER_RATE
+from .playback import JackPlayback, RATE as RENDER_RATE
+from .live_session import LiveSession
 
 
 POST_INPUT_SECONDS = 15.0
@@ -83,3 +90,150 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
             "fixture_end_to_audible_ms": round(latency, 1), "audible_onset_at": onset,
             "window_spread_ms": round(spread, 2), "resolution_ms": 4.0,
             "method": "multiple generated-reply spectral windows with reference-offset compensation"}
+
+
+SYNTHETIC_PROMPTS = (
+    "What is the capital of France?",
+    "And which river flows through that city?",
+)
+
+
+async def synthesize_fixture(prompt):
+    """Build a digital test asset on the App. No recording or upload endpoint is used."""
+    if prompt not in SYNTHETIC_PROMPTS:
+        raise ValueError("Unknown built-in synthetic prompt")
+    process = await asyncio.create_subprocess_exec(
+        "espeak-ng", "--stdout", "-v", "en-gb", "--stdin",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL)
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(prompt.encode("ascii")), 5)
+    finally:
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+    if process.returncode or len(output) > 512000:
+        raise RuntimeError("Local synthetic speech generation failed")
+    with wave.open(io.BytesIO(output)) as source:
+        if source.getnchannels() != 1 or source.getsampwidth() != 2:
+            raise ValueError("Unexpected synthetic speech format")
+        samples = np.frombuffer(source.readframes(512000), dtype="<i2")
+        frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
+        frame.sample_rate = source.getframerate()
+    converter = av.AudioResampler(format="s16", layout="mono", rate=RATE)
+    blocks = converter.resample(frame) + converter.resample(None)
+    pcm = np.concatenate([block.to_ndarray().ravel() for block in blocks])
+    bounds = voiced_bounds(pcm)
+    if bounds is None or not RATE // 2 <= len(pcm) <= 6 * RATE:
+        raise ValueError("Synthetic speech has no usable endpoint or exceeds six seconds")
+    return pcm.astype("<i2", copy=False).tobytes(), bounds[1]
+
+
+class BenchReply:
+    def __init__(self, device, identity):
+        self.player = JackPlayback(device, identity)
+        self.queue = asyncio.Queue(maxsize=65)
+        self.pending_bytes = 0
+        self.pcm = bytearray()
+        self.first_voice_at = self.last_voice_at = None
+        self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
+
+    def _render(self, frame):
+        for block in self.converter.resample(frame):
+            stereo = np.repeat(block.to_ndarray().ravel(), 2).astype("<i2").tobytes()
+            if self.pending_bytes + len(stereo) > RENDER_RATE * 4 or len(self.pcm) + len(stereo) > 8 * RENDER_RATE * 4:
+                raise RuntimeError("Synthetic reply exceeded its playback queue or duration bound")
+            self.queue.put_nowait(stereo)
+            self.pending_bytes += len(stereo)
+            self.pcm.extend(stereo)
+
+    async def receive(self, pcm, rate):
+        samples = np.frombuffer(pcm, dtype="<i2")
+        bounds = voiced_bounds(samples)
+        if bounds is not None:
+            self.last_voice_at = time.monotonic()
+            if self.first_voice_at is None:
+                self.first_voice_at = self.last_voice_at
+                samples = samples[max(0, bounds[0] - RATE // 100):]
+        elif self.first_voice_at is None:
+            return
+        frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
+        frame.sample_rate = rate
+        self._render(frame)
+
+    async def chunks(self):
+        while (chunk := await self.queue.get()) is not None:
+            self.pending_bytes -= len(chunk)
+            yield chunk
+
+    async def finish(self):
+        self._render(None)
+        await self.queue.put(None)
+
+
+async def benchmark_replies(device, settings, transport, identity, fixtures, timings, stage):
+    """Stream two digital fixtures and two incremental replies on one Live session."""
+    current = None
+
+    async def on_audio(pcm, rate):
+        if current is not None:
+            await current.receive(pcm, rate)
+
+    session = LiveSession(settings, on_audio=on_audio, transport=transport)
+    failure = None
+    try:
+        stage("connecting to GPT-Live")
+        await session.start()
+        for index, (fixture, endpoint) in enumerate(fixtures, 1):
+            reply = BenchReply(device, f"{identity}-{index}")
+            current = reply
+            device.playback = reply.player
+            sender = asyncio.create_task(reply.player.send_stream(reply.chunks()))
+            stage(f"streaming synthetic turn {index}")
+            origin = time.monotonic()
+            input_samples = 0
+            fixture_end_at = None
+            try:
+                while time.monotonic() < origin + len(fixture) / (2 * RATE) + 9:
+                    if sender.done():
+                        sender.result()
+                        raise RuntimeError("Reply playback ended before the turn finished")
+                    if session.metrics.error:
+                        raise RuntimeError("GPT-Live failed during the synthetic turn")
+                    due = origin + input_samples / RATE
+                    await asyncio.sleep(max(0, due - time.monotonic()))
+                    if time.monotonic() - due > .1:
+                        raise RuntimeError("Synthetic input pacing exceeded 100 ms")
+                    pcm = fixture[input_samples * 2:(input_samples + 320) * 2].ljust(640, b"\0")
+                    sent_at = time.monotonic()
+                    await session.send_audio(pcm)
+                    if input_samples < endpoint <= input_samples + 320:
+                        fixture_end_at = sent_at + (endpoint - input_samples) / RATE
+                    input_samples += 320
+                    if fixture_end_at and reply.last_voice_at and time.monotonic() - reply.last_voice_at >= .6:
+                        break
+                else:
+                    raise TimeoutError("No complete spoken reply arrived within the trial window")
+                current = None
+                async with asyncio.timeout(3):
+                    await reply.finish()
+                    await sender
+                if reply.player.frames_rendered != reply.player.frames_sent:
+                    raise RuntimeError("Voice PE did not confirm rendering the complete synthetic reply")
+                timings.append((fixture_end_at, reply))
+            finally:
+                current = None
+                if not sender.done():
+                    sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+                with suppress(OSError, RuntimeError, TimeoutError):
+                    await reply.player.stop()
+                device.playback = None
+    except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        failure = str(exc) or type(exc).__name__
+    finally:
+        metrics = await session.close()
+    return {"transport": transport, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+            "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
+            "failure": failure}
