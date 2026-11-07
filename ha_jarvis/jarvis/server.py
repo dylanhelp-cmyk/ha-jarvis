@@ -196,15 +196,27 @@ class Bench:
         self.test = {"running": False, "phase": "idle"}
 
     async def preload_wake_cache(self):
-        upload = WakeCacheUpload(self.device)
-        self.device.wake_cache_upload = upload
+        ws = self.device.ws
         try:
             cached = await asyncio.to_thread(verified_render, self.data_dir)
             if cached is None:
                 return
             ident, pcm = cached
             if self.device.info.get("ack_cache_id") != ident:
-                await upload.send(ident, pcm)
+                for attempt in range(2):
+                    if self.device.ws is not ws or ws is None or ws.closed:
+                        raise RuntimeError("Voice PE disconnected during wake cache transfer")
+                    upload = WakeCacheUpload(self.device)
+                    self.device.wake_cache_upload = upload
+                    try:
+                        await upload.send(ident, pcm)
+                    except TimeoutError:
+                        if attempt:
+                            raise
+                    else:
+                        break
+                if self.device.ws is not ws or ws.closed:
+                    raise RuntimeError("Voice PE disconnected during wake cache transfer")
                 self.device.info["ack_cache_id"] = ident
             self.acknowledgment = {"phase": "preloaded"}
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
@@ -533,7 +545,7 @@ class Bench:
 
     async def measure_synthetic_replies(self, result, transport, profile):
         from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
-                                 render_reference, synthesize_fixture, voiced_bounds)
+                                 render_reference, synthesize_fixture)
 
         self.test["phase"] = "synthesizing fixed test prompts locally"
         fixtures = [await synthesize_fixture(prompt) for prompt in SYNTHETIC_PROMPTS]
@@ -550,18 +562,20 @@ class Bench:
         offset = self.device.clock_offset_ms
         for index, (endpoint, reply, answer_check) in enumerate(timings, 1):
             reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
-            bounds = voiced_bounds(reference)
-            if bounds is None:
+            if reply.first_voice_sample is None or reply.first_voice_sample >= len(reference):
                 match = {"status": "unavailable", "reason": "Reply reference has no usable speech", "latency_ms": None}
             else:
                 def handoff(sample):
-                    return reply.player.accepted_at(sample * 3, offset) or reply.first_voice_at
+                    return reply.player.accepted_at(sample * 3, offset)
                 match = await asyncio.to_thread(
-                    match_response, captured, capture_start, reference, bounds[0],
+                    match_response, captured, capture_start, reference, reply.first_voice_sample,
                     endpoint, reply.first_voice_at, handoff_at=handoff,
-                    acoustic_delay_range=(-.04, .45), window_seconds=.2)
+                    acoustic_delay_range=(-.04, .45), window_seconds=.14, onset_horizon_seconds=.28)
+            audible_at = match.get("audible_onset_at")
             match.update(trial=index, turn="first" if index == 1 else "warm_followup",
                          digital_end_to_cloud_voice_ms=round((reply.first_voice_at - endpoint) * 1000, 1),
+                         cloud_voice_to_audible_ms=round((audible_at - reply.first_voice_at) * 1000, 1)
+                         if audible_at is not None else None,
                          expected_answer_mentioned=answer_check, playback=reply.player.snapshot())
             result["trials"].append(match)
         if result["cloud"]["failure"]:

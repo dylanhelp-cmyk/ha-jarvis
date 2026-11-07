@@ -1,2 +1,2 @@
 """HA Jarvis wired audio bench and wake clip preparation."""
-__version__ = "0.2.22"
+__version__ = "0.2.23"

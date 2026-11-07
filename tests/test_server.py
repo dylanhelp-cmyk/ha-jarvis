@@ -238,7 +238,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await ws.close()
 
-    async def test_verified_greeting_is_preloaded_without_streaming_it_as_playback(self):
+    async def test_verified_greeting_retries_a_timed_out_transfer_without_playing_it(self):
         from jarvis.acknowledgment import cache_path, candidate_identity
         pcm = np.full(RATE // 4, 900, dtype="<i2").tobytes()
         cache_path(self.bench.data_dir).write_bytes(pcm)
@@ -257,10 +257,17 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
                                 "sample_rate": RATE, "channels": 1, "ack_cache_protocol": 1})
             self.assertEqual((await ws.receive_json(timeout=2))["type"], "hello_ok")
+            first_start = await ws.receive_json(timeout=2)
+            self.assertEqual(first_start["type"], "ack_cache_start")
+            abort = await ws.receive_json(timeout=4)
+            self.assertEqual(abort, {"type": "ack_cache_abort", "generation": first_start["generation"]})
+            self.assertFalse(self.bench.acknowledgment_status()["cached_on_device"])
             start = await ws.receive_json(timeout=2)
             self.assertEqual(start["type"], "ack_cache_start")
             self.assertEqual(start["cache_id"], identity)
             generation = start["generation"]
+            self.assertNotEqual(generation, first_start["generation"])
+            await ws.send_json({"type": "ack_cache_ready", "generation": first_start["generation"]})
             await ws.send_json({"type": "ack_cache_ready", "generation": generation})
             sent = sequence = 0
             while sent < start["samples"]:

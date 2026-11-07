@@ -1,3 +1,9 @@
+# 0.2.23
+
+- Retry a timed-out wake clip transfer once on the same paired connection. Ignore late confirmations from the failed transfer.
+- Measure synthetic reply onset from the streaming speech boundary. Report the provider and speaker intervals separately, and use the same reply level and reserve on both transports.
+- App-only update. Compare the synthetic WebSocket and WebRTC benchmarks using the same reply profile.
+
 # 0.2.22
 
 - In the preconnected voice preview, begin sending cleaned microphone audio as the Voice PE confirms the corresponding wake clip samples. Hold reply playback until the complete wake clip is confirmed.

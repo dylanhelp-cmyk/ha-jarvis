@@ -226,10 +226,11 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         stage("connecting to GPT-Live")
         await session.start()
         for index, (fixture, endpoint) in enumerate(fixtures, 1):
-            reply = BenchReply(device, f"{identity}-{index}")
+            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=-6)
             current = reply
             device.playback = reply.player
-            sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5))
+            sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
+                                                                   source_prime_packets=12))
             stage(f"streaming synthetic turn {index}")
             origin = time.monotonic()
             input_samples = 0
@@ -278,6 +279,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         failure = str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
-    return {"transport": transport, "profile": profile, "playback_prime_ms": 50, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+    return {"transport": transport, "profile": profile, "playback_prime_ms": 50, "source_reserve_ms": 120,
+            "output_gain_db": -6, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}
