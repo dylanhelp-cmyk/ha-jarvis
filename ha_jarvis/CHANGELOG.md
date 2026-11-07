@@ -1,3 +1,7 @@
+# 0.2.14
+
+- Add an optional warm follow-up to the consent-gated Voice preview. After the first answer, wait for the listening status before speaking again. The test keeps the same connection and measures a fresh microphone queue. App-only update.
+
 # 0.2.13
 
 - Add selectable preview microphone gain after echo cancellation, preserve input diagnostics even when no reply arrives, and estimate acoustic onset independently of later reply gaps. App-only update.

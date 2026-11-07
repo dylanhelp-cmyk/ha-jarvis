@@ -36,7 +36,7 @@ class SimulatedSession:
 
     async def send_audio(self, pcm):
         self.sent.append(pcm)
-        if len(self.sent) == 3:
+        if len(self.sent) in (3, 5):
             await self.on_audio(bytes(640), 16000)
 
     async def close(self):
@@ -114,3 +114,36 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["playback"]["frames_rendered"], 480)
             self.assertIsNone(device.pcm_consumer)
             self.assertIsNone(device.playback)
+
+    async def test_warm_reply_reuses_session_with_fresh_capture_and_no_cold_queue(self):
+        with patch("jarvis.conversation_trial.LiveSession", SimulatedSession),              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            event = asyncio.Event()
+            event.set()
+            device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=event,
+                                     wake_playback_terminal={"drained": True, "rendered_samples": 480,
+                                                             "first_rendered_ms": 10, "last_rendered_ms": 20},
+                                     clock_offset_ms=0, errors=[], info={"jack_plugged": True})
+            opening = OpeningAudio()
+            cold = np.arange(768, dtype="<i2")
+            warm = np.arange(768, dtype="<i2") + 1000
+            stamp = int(time.monotonic() * 1000)
+            for index in range(3):
+                opening.offer(PCMFrame(index, index * 256, stamp + index * 16,
+                                       cold[index * 256:(index + 1) * 256]), 0)
+
+            def phase(label):
+                if label == "listening for your warm follow-up":
+                    stamp = int(time.monotonic() * 1000) + 1
+                    # A late frame from the previous reply must not enter warm input.
+                    device.pcm_consumer(PCMFrame(100, 25600, stamp - 100, cold[:256]), 0)
+                    for index in range(3):
+                        device.pcm_consumer(PCMFrame(101 + index, 25856 + index * 256, stamp + index * 16,
+                                                       warm[index * 256:(index + 1) * 256]), 0)
+
+            messages, result = [], {"id": "test"}
+            replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, phase,
+                                           follow_up=True)
+            self.assertEqual(len(replies), 2)
+            self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
+                                        warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
+            self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)

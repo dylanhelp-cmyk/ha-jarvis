@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'One-turn voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -46,7 +46,7 @@ function readiness() {
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for this turn.';
-  $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for one authorized cloud voice turn.' : 'Ready for a local test.');
+  $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for an authorized cloud voice preview.' : 'Ready for a local test.');
   $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
@@ -148,6 +148,16 @@ function showResults(results) {
     } else if (result.speech_endpoint) {
       add(card, 'p', 'Speech-end estimate unavailable: ' + result.speech_endpoint.reason);
     }
+    if (result.warm_reply) {
+      const warm = result.warm_reply;
+      const timing = warm.speech_endpoint;
+      add(card, 'p', 'Warm speech end to audible reply: ' +
+        (timing?.speech_end_to_audible_ms == null ? 'unavailable' : timing.speech_end_to_audible_ms + ' ms') +
+        (warm.error ? ' · ' + warm.error : ''));
+      if (warm.input_queue?.max_packet_age_ms != null) {
+        add(card, 'p', 'Warm input maximum queue age: ' + warm.input_queue.max_packet_age_ms + ' ms.');
+      }
+    }
     if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {
@@ -226,7 +236,7 @@ $('run-test').addEventListener('click', () => {
     if (!$('voice-turn-confirmed').checked) return;
     $('voice-turn-confirmed').checked = false;
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true,
-      input_gain_db: Number($('voice-input-gain').value)});
+      input_gain_db: Number($('voice-input-gain').value), follow_up: $('voice-follow-up').checked});
   }
   action(() => api('api/tests', 'POST', body));
 });

@@ -389,7 +389,7 @@ class Bench:
                 terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
                 match.get("audible_onset_at"), bounds[0])
 
-    async def measure_voice_turn(self, result, gain_db):
+    async def measure_voice_turn(self, result, gain_db, follow_up):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_response, render_reference, voiced_bounds
 
@@ -406,27 +406,39 @@ class Bench:
         def stage(phase):
             self.test["phase"] = phase
         result["metric"] = "returned_voice_to_audible_reply"
-        reply = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
-                                     gain_db=gain_db)
+        replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
+                                       gain_db=gain_db, follow_up=follow_up)
         await asyncio.sleep(.25)
         await device.end()
         captured, capture_start = device.recording()
-        reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
-        bounds = voiced_bounds(reference)
-        if bounds is None:
-            match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
-        else:
-            match = await asyncio.to_thread(match_response, captured, capture_start, reference, bounds[0],
-                                            reply.first_voice_at, reply.first_voice_at, window_seconds=.14,
-                                            onset_horizon_seconds=.28)
-            match.pop("fixture_end_to_audible_ms", None)
-        result["trials"] = [{"trial": 1, **match}]
-        result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
-        endpoint = result["speech_endpoint"]
-        if endpoint["status"] == "estimated" and match["status"] == "detected":
-            endpoint["speech_end_to_audible_ms"] = round(
-                endpoint["speech_end_to_cloud_voice_ms"] + match["latency_ms"], 1)
+        for index, reply in enumerate(replies):
+            turn = result if index == 0 else result["warm_reply"]
+            reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
+            bounds = voiced_bounds(reference)
+            if bounds is None:
+                match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
+            else:
+                # Limit matching to this reply's immediate onset. An identical
+                # phrase spoken on the other turn cannot become a candidate.
+                lo = max(0, round((reply.first_voice_at - .04 - capture_start) * RATE))
+                hi = min(len(captured), round((reply.first_voice_at + 1.2 - capture_start) * RATE))
+                match = await asyncio.to_thread(match_response, captured[lo:hi], capture_start + lo / RATE,
+                                                reference, bounds[0], reply.first_voice_at, reply.first_voice_at,
+                                                window_seconds=.14, onset_horizon_seconds=.28)
+                match.pop("fixture_end_to_audible_ms", None)
+            trial = {"trial": index + 1, "turn": "warm_followup" if index else "first", **match}
+            result["trials"].append(trial)
+            turn["status"] = "measured" if match["status"] == "detected" else "unavailable"
+            endpoint = turn["speech_endpoint"]
+            if endpoint["status"] == "estimated" and match["status"] == "detected":
+                endpoint["speech_end_to_audible_ms"] = round(
+                    endpoint["speech_end_to_cloud_voice_ms"] + match["latency_ms"], 1)
+        if follow_up and len(replies) == 1:
+            result["trials"].append({"trial": 2, "turn": "warm_followup", "status": "unavailable",
+                                     "reason": result["warm_reply"]["error"]})
+        if follow_up and any(t["status"] == "detected" for t in result["trials"]):
+            result["status"] = "measured"
 
     async def measure_render_alignment(self, result):
         from .live_bench import match_response, render_reference, voiced_bounds
@@ -529,7 +541,7 @@ class Bench:
                                      "reason": "The synthetic turn did not complete"})
         result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
 
-    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0):
+    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0, follow_up=False):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -551,7 +563,8 @@ class Bench:
             if armed:
                 self.opening_audio = OpeningAudio()
                 self.device.pcm_consumer = self.opening_audio.offer
-                await self.device.begin(result["id"], 30000 if kind == "voice_turn" else 5000, arm_timeout_ms=32000)
+                await self.device.begin(result["id"], (55000 if follow_up else 30000) if kind == "voice_turn" else 5000,
+                                        arm_timeout_ms=32000)
             else:
                 await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
             result["device_session"] = dict(self.device.capture_session)
@@ -563,7 +576,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "voice_turn":
-                await self.measure_voice_turn(result, gain_db)
+                await self.measure_voice_turn(result, gain_db, follow_up)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -850,6 +863,9 @@ def create_ui(bench):
                 raise ValueError("Confirm comfortable speaker volume before starting")
             if device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True:
                 raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
+        follow_up = data.get("follow_up", False)
+        if type(follow_up) is not bool or (follow_up and kind != "voice_turn"):
+            raise ValueError("A warm follow-up is available only in the voice preview")
         gain_db = data.get("input_gain_db", 0)
         if type(gain_db) is not int or gain_db not in (0, 12, 24):
             raise ValueError("Choose 0, 12 or 24 dB of preview microphone gain")
@@ -875,7 +891,7 @@ def create_ui(bench):
                 raise ValueError("A configured key and a settled budget ledger are required")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db, follow_up=follow_up))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):
