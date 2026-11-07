@@ -30,12 +30,17 @@ function readiness() {
   const device = state?.device;
   const running = Boolean(state?.test.running);
   const speaker = kind !== 'connection';
+  const wakeTest = kind === 'wake_ack';
+  const startup = $('wake-startup-transport');
+  $('wake-startup-options').hidden = !wakeTest;
+  startup.disabled = running || busy;
   let reason = '';
   if (!device?.connected) reason = 'Connect the paired Voice PE.';
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
   else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
+  else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   $('readiness').textContent = running ? state.test.phase : reason || 'Ready for a local test.';
   $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
   $('run-test').disabled = Boolean(reason || running || busy);
@@ -95,7 +100,17 @@ function showResults(results) {
     card.className = 'result-card';
     list.append(card);
     add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
-    if (result.error) add(card, 'p', result.error);
+    if (result.error || result.reason) add(card, 'p', result.error || result.reason);
+    if (result.cloud_readiness) {
+      const ready = result.cloud_readiness;
+      add(card, 'p', ready.wake_to_ready_ms == null ? 'GPT-Live readiness unavailable.' :
+        ready.transport + ' GPT-Live ready ' + ready.wake_to_ready_ms + ' ms after wake detection.');
+      if (ready.ready_minus_audible_ack_ms != null) {
+        const lead = ready.ready_minus_audible_ack_ms;
+        add(card, 'p', 'Audible acknowledgment ' + Math.abs(lead) + ' ms ' +
+          (lead >= 0 ? 'before' : 'after') + ' cloud readiness.');
+      }
+    }
     if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
     for (const trial of result.trials) {
       const cold = trial.cold_startup_ms;
@@ -141,7 +156,7 @@ for (const button of document.querySelectorAll('.test-option')) {
     readiness();
   });
 }
-for (const id of ['volume-confirmed', 'idle-confirmed']) $(id).addEventListener('change', readiness);
+for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport']) $(id).addEventListener('change', readiness);
 
 $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -162,9 +177,13 @@ $('reveal-token').addEventListener('click', () => {
 $('copy-token').addEventListener('click', () => {
   navigator.clipboard.writeText($('device-token').value).catch(() => notice('Clipboard access unavailable.'));
 });
-$('run-test').addEventListener('click', () => action(() => api('api/tests', 'POST', {
-  kind, comfortable_volume_confirmed: $('volume-confirmed').checked
-})));
+$('run-test').addEventListener('click', () => {
+  const startup = kind === 'wake_ack' && $('wake-startup-transport').value;
+  if (startup && !window.confirm('Start one budgeted GPT-Live startup test on the next wake? Room microphone audio stays local.')) return;
+  const body = {kind, comfortable_volume_confirmed: $('volume-confirmed').checked};
+  if (startup) Object.assign(body, {startup_transport: startup, confirm_paid: true});
+  action(() => api('api/tests', 'POST', body));
+});
 $('cancel-test').addEventListener('click', () => action(() => api('api/tests/current', 'DELETE')));
 $('cloud-form').addEventListener('submit', (event) => {
   event.preventDefault();

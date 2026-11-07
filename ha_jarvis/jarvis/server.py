@@ -234,9 +234,7 @@ class Bench:
         except Exception as exc:
             self.acknowledgment = {"phase": "failed", "error_type": type(exc).__name__}
 
-    async def measure_wake_ack(self, result):
-        from .live_bench import match_response, render_reference, voiced_bounds
-
+    async def measure_wake_ack(self, result, startup_transport):
         device = self.device
         cached = await asyncio.to_thread(verified_render, self.data_dir)
         if cached is None or device.info.get("ack_cache_id") != cached[0]:
@@ -253,6 +251,50 @@ class Bench:
             return
         self.test["phase"] = "capturing the acknowledgment"
         wake = dict(device.wake_details)
+        startup = None
+        stamp = wake.get("device_time_ms")
+        if startup_transport and wake.get("ack_cache_id") == ident and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF:
+            detected_at = (stamp + device.clock_offset_ms) / 1000
+            startup = asyncio.create_task(self.measure_cloud_startup(startup_transport, detected_at))
+        try:
+            await self.measure_wake_audio(result, wake, ident, pcm)
+            if startup is not None:
+                self.test["phase"] = "finalizing the GPT-Live startup test"
+                result["cloud_readiness"] = await startup
+                trials = result["trials"]
+                audible = trials[0].get("latency_ms") if trials else None
+                ready = result["cloud_readiness"].get("wake_to_ready_ms")
+                if audible is not None and ready is not None:
+                    result["cloud_readiness"]["ready_minus_audible_ack_ms"] = round(ready - audible, 1)
+        finally:
+            if startup is not None and not startup.done():
+                startup.cancel()
+                await asyncio.gather(startup, return_exceptions=True)
+
+    async def measure_cloud_startup(self, transport, detected_at):
+        from .live_session import LiveSession
+
+        async def discard_audio(pcm, rate):
+            pass
+
+        session = LiveSession(self.cloud_settings, on_audio=discard_audio, transport=transport, max_seconds=30)
+        ready = None
+        try:
+            await session.start()
+            ready = round((time.monotonic() - detected_at) * 1000, 1)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        finally:
+            metrics = await session.close()
+        return {"transport": transport, "wake_to_ready_ms": ready,
+                "provider_startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+                "finalization_confirmed": metrics.finalization_confirmed,
+                "scope": "startup only; no room microphone samples connected to GPT-Live"}
+
+    async def measure_wake_audio(self, result, wake, ident, pcm):
+        from .live_bench import match_response, render_reference, voiced_bounds
+
+        device = self.device
         ws = device.ws
         try:
             await asyncio.sleep(1.35)
@@ -292,7 +334,7 @@ class Bench:
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
-    async def run(self, kind, repetitions):
+    async def run(self, kind, repetitions, startup_transport=None):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -313,7 +355,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "wake_ack":
-                await self.measure_wake_ack(result)
+                await self.measure_wake_ack(result, startup_transport)
                 return
             signal_pcm, probes = bench_signal(kind, repetitions)
             pcm = await asyncio.to_thread(stereo_pcm, signal_pcm)
@@ -566,9 +608,17 @@ def create_ui(bench):
                 raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
         if kind == "wake_ack" and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
+        startup_transport = data.get("startup_transport")
+        if startup_transport is not None:
+            if (kind != "wake_ack" or startup_transport not in ("websocket", "webrtc")
+                    or data.get("confirm_paid") is not True):
+                raise ValueError("Explicitly confirm the paid wake startup test and choose a valid transport")
+            settings = bench.cloud_settings.public()
+            if not settings["api_key_configured"] or settings["paid_retry_blocked"]:
+                raise ValueError("A configured key and a settled budget ledger are required")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

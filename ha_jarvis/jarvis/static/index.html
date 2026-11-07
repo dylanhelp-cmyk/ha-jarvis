@@ -55,6 +55,15 @@
             <button class="test-option" data-kind="connection" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">·</span><span><strong>Microphone connection</strong><small>60-second silent capture. No speaker playback or cloud calls.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
           </div>
           <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>I have set the speakers connected to the 3.5 mm jack to a comfortable volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The speaker is idle. I understand a test can interrupt music and previous playback is not restored automatically.</span></label></div>
+          <div id="wake-startup-options" hidden>
+            <label for="wake-startup-transport">GPT-Live startup measurement</label>
+            <select id="wake-startup-transport">
+              <option value="">Local acoustic test only</option>
+              <option value="websocket">WebSocket startup (paid test)</option>
+              <option value="webrtc">WebRTC startup (paid test)</option>
+            </select>
+            <p class="field-help">The cloud connection starts at wake. Room audio stays on this App.</p>
+          </div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
           <p class="local-note"><span aria-hidden="true">◇</span> Local signals, local measurements. No AI or paid cloud calls.</p>

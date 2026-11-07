@@ -1,3 +1,7 @@
+# 0.2.4
+
+- Optionally measure GPT-Live startup during the local wake acknowledgment test. Run one local or budgeted startup trial using the existing 0.2.2 firmware. Room microphone audio stays local.
+
 # 0.2.3
 
 - Preview the generated wake clip and approve the exact phrase before it can play on the device.
