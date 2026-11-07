@@ -866,7 +866,7 @@ def create_ui(bench):
         follow_up = data.get("follow_up", False)
         if type(follow_up) is not bool or (follow_up and kind != "voice_turn"):
             raise ValueError("A warm follow-up is available only in the voice preview")
-        gain_db = data.get("input_gain_db", 0)
+        gain_db = data.get("input_gain_db", 24 if kind == "voice_turn" else 0)
         if type(gain_db) is not int or gain_db not in (0, 12, 24):
             raise ValueError("Choose 0, 12 or 24 dB of preview microphone gain")
         if kind == "voice_turn":
@@ -891,6 +891,8 @@ def create_ui(bench):
                 raise ValueError("A configured key and a settled budget ledger are required")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
+        if kind == "voice_turn":
+            bench.test["input_gain_db"] = gain_db
         bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db, follow_up=follow_up))
         return web.json_response({"test_id": ident}, status=202)
 
@@ -976,7 +978,7 @@ def create_audio(bench):
             accepted = True
             bench.device.info = {k: message[k] for k in ("device_id", "sample_rate", "muted", "raw_ready",
                                 "firmware", "xmos_version", "playback_protocol", "jack_plugged",
-                                "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol") if k in message}
+                                "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol", "capture_gain") if k in message}
             bench.device.receive_json(message)
             bench.observe_firmware()
             await ws.send_json({"type": "hello_ok", "protocol": 1})

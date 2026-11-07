@@ -26,6 +26,7 @@ struct FaultLock {
 };
 class JarvisStream : public Component, public i2c::I2CDevice {
  public:
+  void set_capture_gain(uint8_t gain) { capture_gain_ = gain; }
   void set_microphone(microphone::MicrophoneSource *mic) { mic_ = mic; }
   void set_speaker(speaker::Speaker *speaker) { speaker_ = speaker; }
   void set_jack_plugged(bool plugged) { jack_plugged_ = plugged; }
@@ -83,6 +84,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
                         const esp_websocket_event_data_t *data = nullptr);
   void diagnostics_json_(JsonObject out);
   static uint32_t now_ms_();
+  uint8_t capture_gain_{1};
   microphone::MicrophoneSource *mic_{nullptr};
   speaker::Speaker *speaker_{nullptr};
   esp_websocket_client_handle_t client_{nullptr};

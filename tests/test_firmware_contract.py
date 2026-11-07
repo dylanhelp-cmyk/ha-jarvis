@@ -129,7 +129,7 @@ int main() {
         self.assertIn('version: "1.3.1"', hardware)
         self.assertIn("964635c5bf125529dab14a2472a15401", hardware)
         self.assertIn("d4e6fa43d6a1a7d342b7d4d403567e06516719de", package)
-        self.assertIn("gain_factor: 1", package)
+        self.assertEqual(package.count("gain_factor: 4"), 2)
         self.assertIn("!secret jarvis_pairing_token", main)
         self.assertIn("pin: GPIO3", package)
         self.assertIn("microphone.mute: i2s_mics", package)
@@ -161,7 +161,9 @@ int main() {
                 component.server_url(url)
         raw = component.raw_microphone({"microphone": "i2s_mics", "channels": [0], "gain_factor": 1})
         self.assertEqual(raw["bits_per_sample"], 16)
-        for override in ({"channels": [1]}, {"gain_factor": 4}, {"bits_per_sample": 32}):
+        amplified = component.raw_microphone({"microphone": "i2s_mics", "channels": [0], "gain_factor": 4})
+        self.assertEqual(amplified["gain_factor"], 4)
+        for override in ({"channels": [1]}, {"gain_factor": 8}, {"bits_per_sample": 32}):
             with self.subTest(override=override), self.assertRaises(Exception):
                 component.raw_microphone({"microphone": "i2s_mics", "channels": [0], "gain_factor": 1, **override})
 

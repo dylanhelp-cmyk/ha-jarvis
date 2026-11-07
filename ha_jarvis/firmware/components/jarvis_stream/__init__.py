@@ -20,8 +20,8 @@ def server_url(value):
 
 def raw_microphone(value):
     value = microphone.microphone_source_schema()(value)
-    if value["channels"] != [0] or value["bits_per_sample"] != 16 or value["gain_factor"] != 1:
-        raise cv.Invalid("Acoustic PCM requires channel 0, 16-bit output and unity gain")
+    if value["channels"] != [0] or value["bits_per_sample"] != 16 or value["gain_factor"] not in (1, 4):
+        raise cv.Invalid("Acoustic PCM requires channel 0, 16-bit output and fixed 1x or 4x input gain")
     return value
 
 def hello_identity_budget(value):
@@ -59,6 +59,7 @@ async def to_code(config):
     # Passive: microWakeWord owns the microphone lifecycle. Idle PCM stays local.
     source = await microphone.microphone_source_to_code(config[CONF_MICROPHONE], passive=True)
     cg.add(var.set_microphone(source))
+    cg.add(var.set_capture_gain(config[CONF_MICROPHONE].get("gain_factor", 1)))
     cg.add(var.set_speaker(await cg.get_variable(config["speaker"])))
     for key in ("server_url", "device_id", "token"):
         cg.add(getattr(var, "set_" + key)(config[key]))

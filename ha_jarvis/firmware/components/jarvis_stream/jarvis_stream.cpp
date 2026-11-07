@@ -324,6 +324,7 @@ void JarvisStream::send_state_() {
     root["jack_plugged"] = jack_plugged_;
     root["playback_protocol"] = 1;
     root["wake_capture_protocol"] = 1;
+    root["capture_gain"] = capture_gain_;
     ack_cache_state_(root);
     root["xmos_version"] = xmos_version_;
     diagnostics_json_(root["diagnostics"].to<JsonObject>());
@@ -850,6 +851,7 @@ void JarvisStream::loop() {
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
         out["playback_protocol"] = 1; out["jack_plugged"] = jack_plugged_;
         out["wake_capture_protocol"] = 1;
+        out["capture_gain"] = capture_gain_;
         ack_cache_state_(out);
         diagnostics_json_(out["diagnostics"].to<JsonObject>());
       }));

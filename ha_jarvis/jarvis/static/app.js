@@ -70,7 +70,10 @@ function showStatus(data) {
   $('route-status').textContent = 'Voice PE 3.5 mm';
   $('route-detail').textContent = !device.connected ? 'Waiting for device' : device.playback_protocol !== 1 ? 'Playback firmware needed' : device.jack_plugged ? 'Jack connected' : 'Jack unplugged';
   $('test-status').textContent = data.test.running ? 'Running' : 'Standby';
-  $('test-detail').textContent = data.test.phase;
+  const activeGain = data.test.input_gain_db;
+  $('test-detail').textContent = data.test.phase + (activeGain == null ? '' :
+    ' · ' + activeGain + ' dB App mic gain' +
+    (device.capture_gain ? ' · ' + device.capture_gain + '× firmware mic gain' : ''));
   $('version').textContent = 'App ' + data.version;
   $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Synthetic reply timing uses the local jack.';
   const ack = data.acknowledgment;

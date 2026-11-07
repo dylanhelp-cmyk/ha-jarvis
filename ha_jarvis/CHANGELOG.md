@@ -1,3 +1,7 @@
+# 0.2.16
+
+- Default the opt-in voice preview to +24 dB App input gain and show active gain while testing. Pair firmware 0.2.4 to add fixed 4x capture gain before the 16-bit conversion.
+
 # 0.2.15
 
 - Allow the known-clip alignment to identify a later acoustic outlier when three strong early windows agree within 12 ms. Report the outlier. Ordinary reply timing still requires its windows to agree. App-only update.

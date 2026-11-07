@@ -1,3 +1,7 @@
+# 0.2.4
+
+- Raise channel 0 capture gain to 4x before conversion to PCM16 and report it to the App. Wake detection still uses its own channel.
+
 # 0.2.3
 
 - Let the paired App arm one bounded local microphone capture for the next Hey Jarvis. Capture starts on the Voice PE before the cached acknowledgment plays. The App receives the existing timestamped PCM format and capture counters.
