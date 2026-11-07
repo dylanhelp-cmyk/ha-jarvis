@@ -5,7 +5,8 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.streaming_aec import ConfirmedRenderInput, StreamingEcho, check_opening_reference, compare_opening_prefix
+from jarvis.streaming_aec import (ConfirmedRenderInput, StreamingEcho, check_opening_reference,
+                                 compare_opening_prefix, residual_echo_similarity)
 
 
 class ReferenceRecorder:
@@ -18,6 +19,15 @@ class ReferenceRecorder:
 
 
 class StreamingEchoTests(unittest.TestCase):
+    def test_residual_echo_similarity_distinguishes_delayed_echo_from_independent_input(self):
+        rng = np.random.default_rng(11)
+        reference = rng.integers(-700, 700, size=3000, dtype=np.int16)
+        echo = (reference[570:2170] // 5 + 35).astype("<i2")
+        independent = rng.integers(-1500, 1500, size=len(echo), dtype=np.int16)
+        self.assertGreater(residual_echo_similarity(echo.tobytes(), reference), .99)
+        self.assertLess(residual_echo_similarity((echo + independent).tobytes(), reference), .3)
+        self.assertIsNone(residual_echo_similarity(echo.tobytes(), reference[:800]))
+
     def test_live_dma_prefix_holds_capture_and_stops_on_a_discontinuity(self):
         player = SimpleNamespace(first_rendered_ms=None, last_rendered_ms=None, frames_rendered=None,
                                  render_clock_invalid=False, schedule_rebases=0,

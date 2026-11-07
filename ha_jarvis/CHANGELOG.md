@@ -1,3 +1,7 @@
+# 0.2.37
+
+- Compare suspected speech to the confirmed playback waveform during the local Interruption check. Ignore candidates that still resemble the speaker output.
+
 # 0.2.36
 
 - Add a local Interruption check. It uses generated speech as input to the live echo filter and measures the time until the jack falls silent. Run Echo reference alignment first.

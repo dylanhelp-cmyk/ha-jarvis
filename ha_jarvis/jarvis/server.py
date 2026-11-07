@@ -538,8 +538,8 @@ class Bench:
 
     async def measure_interrupt(self, result):
         from .conversation_trial import SpeechEndpoint, gain_packet
-        from .live_bench import SYNTHETIC_PROMPTS, synthesize_fixture, voiced_bounds
-        from .streaming_aec import ConfirmedRenderInput
+        from .live_bench import SYNTHETIC_PROMPTS, render_reference, synthesize_fixture, voiced_bounds
+        from .streaming_aec import ConfirmedRenderInput, residual_echo_similarity
 
         alignment = self.alignment_delay()
         if alignment is None:
@@ -551,11 +551,14 @@ class Bench:
         speech = speech[first:end].astype(np.float64)
         speech = np.rint(speech * (400 / np.max(np.abs(speech)))).astype("<i2")
         pilot_pcm = await asyncio.to_thread(stereo_pcm, pilot(np.arange(4 * RATE) / RATE))
+        reference = await asyncio.to_thread(render_reference, pilot_pcm)
         player = JackPlayback(device, result["id"])
         echo = ConfirmedRenderInput(player, pilot_pcm, alignment)
         detector = SpeechEndpoint()
         trigger = asyncio.get_running_loop().create_future()
         cleaned = bytearray()
+        recent = deque(maxlen=5)
+        rejected = 0
         monitor_start_ms, inject_at_ms = 500, 1400
 
         await asyncio.sleep(.5)
@@ -565,7 +568,7 @@ class Bench:
         processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
 
         def observe(frame, offset):
-            nonlocal processed
+            nonlocal processed, rejected
             first_ms = player.first_rendered_ms
             if first_ms is not None:
                 # Inject only into the AEC input. Leave the original microphone
@@ -583,9 +586,20 @@ class Bench:
                 del cleaned[:640]
                 processed += 320
                 end_ms = capture_start_ms + processed * 1000 / RATE
+                recent.append(packet)
                 if first_ms is not None and end_ms >= first_ms + monitor_start_ms:
-                    if detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic()):
-                        trigger.set_result(end_ms - first_ms)
+                    voiced = detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic())
+                    if not voiced or len(recent) < recent.maxlen:
+                        continue
+                    expected_end = round((end_ms - first_ms - alignment) * RATE / 1000)
+                    search_margin = RATE * 45 // 1000
+                    lo = max(0, expected_end - 1600 - search_margin)
+                    hi = min(echo.rendered_frames // 3, expected_end + search_margin)
+                    similarity = residual_echo_similarity(b"".join(recent), reference[lo:hi])
+                    if similarity is None or similarity >= .65:
+                        rejected += 1
+                    else:
+                        trigger.set_result((end_ms - first_ms, similarity))
 
         self.test["phase"] = "testing a local speech-triggered stop"
         device.pcm_consumer = observe
@@ -595,6 +609,9 @@ class Bench:
         try:
             await asyncio.wait((sender, trigger), return_when=asyncio.FIRST_COMPLETED)
             if trigger.done():
+                # Stop observing before issuing the intentional abort. Its
+                # terminal report is not an echo-reference failure.
+                device.pcm_consumer = None
                 stop_at = time.monotonic()
                 sender.cancel()
                 with suppress(asyncio.CancelledError):
@@ -614,12 +631,15 @@ class Bench:
             result["playback"] = player.snapshot()
 
         report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
-                                                "injection_after_render_ms": inject_at_ms}
+                                                "injection_after_render_ms": inject_at_ms,
+                                                "echo_like_candidates_rejected": rejected}
         if stop_at is None or not trigger.done() or trigger.cancelled():
             result.update(status="unavailable", reason=echo.error or "No speech-triggered stop was detected")
             return
-        report["trigger_relative_to_injection_ms"] = round(trigger.result() - inject_at_ms, 1)
-        if trigger.result() < inject_at_ms or echo.error or player.reason != "requested":
+        trigger_ms, similarity = trigger.result()
+        report["trigger_relative_to_injection_ms"] = round(trigger_ms - inject_at_ms, 1)
+        report["trigger_render_similarity"] = round(similarity, 3)
+        if trigger_ms < inject_at_ms or echo.error or player.reason != "requested":
             result.update(status="unavailable", reason=echo.error or "Stop could not be attributed to the injected speech")
             return
         report["injection_to_stop_request_ms"] = round(

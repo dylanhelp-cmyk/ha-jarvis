@@ -144,6 +144,28 @@ class StreamingEcho:
         return b"".join(cleaned)
 
 
+def residual_echo_similarity(clean_pcm, render):
+    """Peak normalized correlation over the caller's bounded render window."""
+    mic = np.frombuffer(clean_pcm, dtype="<i2").astype(float)
+    reference = np.asarray(render, dtype=float)
+    if not len(mic) or len(reference) < len(mic):
+        return None
+    mic -= mic.mean()
+    power = np.dot(mic, mic)
+    if power <= 0:
+        return None
+    count = len(mic)
+    total = np.concatenate(([0.0], np.cumsum(reference)))
+    square = np.concatenate(([0.0], np.cumsum(reference ** 2)))
+    variance = square[count:] - square[:-count] - (total[count:] - total[:-count]) ** 2 / count
+    if not np.any(variance > 0):
+        return None
+    correlation = np.correlate(reference, mic, mode="valid")
+    denominator = np.sqrt(power * np.maximum(variance, 0))
+    scores = np.divide(np.abs(correlation), denominator, out=np.zeros_like(correlation), where=denominator > 0)
+    return float(np.clip(np.max(scores), 0, 1))
+
+
 class ConfirmedRenderInput:
     """Release microphone samples only when the matching DMA reference is known."""
 
