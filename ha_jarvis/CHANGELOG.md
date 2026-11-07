@@ -1,3 +1,9 @@
+# 0.2.19
+
+- Match audible onset from the same speech boundary detected during streaming. Use Voice PE sample acceptance times to constrain the acoustic search.
+- Cap local speech timing gain at +24 dB when +36 dB is selected for microphone transmission. Report both gains in diagnostics.
+- App-only update. Re-run Echo reference alignment, then compare normal-volume two-turn previews with and without preconnection at +36 dB.
+
 # 0.2.18
 
 - Add a +36 dB microphone option with peak protection for quiet capture.

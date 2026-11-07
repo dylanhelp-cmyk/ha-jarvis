@@ -1,5 +1,5 @@
 name: HA Jarvis Audio Bench
-version: "0.2.18"
+version: "0.2.19"
 slug: ha_jarvis
 description: Local acoustic tests through the Voice PE speaker jack.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis

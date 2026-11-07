@@ -392,7 +392,7 @@ class Bench:
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect):
         from .conversation_trial import run_voice_turn
-        from .live_bench import match_response, render_reference, voiced_bounds
+        from .live_bench import match_response, render_reference
 
         device = self.device
         cached = await asyncio.to_thread(verified_render, self.data_dir)
@@ -429,16 +429,19 @@ class Bench:
                 "full_scale_samples": int(np.count_nonzero((output == -32768) | (output == 32767))),
             }
             reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
-            bounds = voiced_bounds(reference)
-            if bounds is None:
+            if reply.first_voice_sample is None or reply.first_voice_sample >= len(reference):
                 match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
             else:
-                # Limit matching to this reply's immediate onset. An identical
-                # phrase spoken on the other turn cannot become a candidate.
+                # Limit each match to the time its samples could have reached
+                # the jack. A later copy elsewhere in the recording can win
+                # an unrestricted spectral search.
                 lo = max(0, round((reply.first_voice_at - .04 - capture_start) * RATE))
                 hi = min(len(captured), round((reply.first_voice_at + 1.2 - capture_start) * RATE))
+                def handoff(sample):
+                    return reply.player.accepted_at(sample * 3, device.clock_offset_ms)
                 match = await asyncio.to_thread(match_response, captured[lo:hi], capture_start + lo / RATE,
-                                                reference, bounds[0], reply.first_voice_at, reply.first_voice_at,
+                                                reference, reply.first_voice_sample, reply.first_voice_at, reply.first_voice_at,
+                                                handoff_at=handoff, acoustic_delay_range=(-.04, .45),
                                                 window_seconds=.14, onset_horizon_seconds=.28)
                 match.pop("fixture_end_to_audible_ms", None)
             trial = {"trial": index + 1, "turn": "warm_followup" if index else "first", **match}

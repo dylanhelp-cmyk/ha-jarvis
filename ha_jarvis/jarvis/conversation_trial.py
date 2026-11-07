@@ -117,7 +117,7 @@ class SpeechEndpoint:
         return False
 
     def timing(self, first_voice_at):
-        scope = "local WebRTC VAD estimate on transmitted echo-processed audio"
+        scope = "local WebRTC VAD estimate on echo-processed capture"
         if self.last_voice is None or self.quiet_frames < 8:
             return {"status": "unavailable", "scope": scope, "reason": "No qualified speech followed by 160 ms of quiet"}
         captured_at, sent_at = self.last_voice
@@ -152,6 +152,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
     reply = BenchReply(device, result["id"])
     sender = None
     endpoint = SpeechEndpoint()
+    vad_gain_db = min(gain_db, 24)
     sent = peak_before = peak_after = clipped = 0
     first_age = max_age = None
     try:
@@ -189,12 +190,13 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                     raise RuntimeError("Microphone input exceeded its capture-age bound; retry the turn")
                 first_age = age if first_age is None else first_age
                 max_age = age if max_age is None else max(max_age, age)
-                packet, before, after, overload = gain_packet(packet, gain_db)
-                await session.send_audio(packet)
+                transmitted, before, after, overload = gain_packet(packet, gain_db)
+                await session.send_audio(transmitted)
                 peak_before = max(peak_before, before)
                 peak_after = max(peak_after, after)
                 clipped += overload
-                if endpoint.observe(packet, captured_at, sent_at):
+                vad_pcm = transmitted if vad_gain_db == gain_db else gain_packet(packet, vad_gain_db)[0]
+                if endpoint.observe(vad_pcm, captured_at, sent_at):
                     inactivity.user_speech(sent_at)
                 sent += 320
         device.pcm_consumer = None
@@ -223,6 +225,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         result["input_signal"] = {"gain_db": gain_db, "peak_before_gain_pcm": peak_before,
                                   "peak_transmitted_pcm": peak_after, "clipped_samples": clipped,
                                   "vad_voice_packets": endpoint.voice_packets,
+                                  "vad_gain_db": vad_gain_db,
                                   "capture_samples_after_echo_guard": stream.passthrough_samples}
         device.pcm_consumer = None
         if sender is not None:

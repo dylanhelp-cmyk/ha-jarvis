@@ -65,6 +65,10 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
         end_at = fixture_end_at + POST_INPUT_SECONDS + 4
         if handoff_at is not None:
             handoff = handoff_at(offset)
+            if handoff is None:
+                windows.append({"reference_offset_ms": round(offset * 1000 / RATE, 2),
+                                "status": "unavailable", "reason": "No speaker acceptance timestamp"})
+                continue
             start_at = max(start_at, handoff + acoustic_delay_range[0])
             end_at = min(end_at, handoff + acoustic_delay_range[1] + width / RATE)
         search_start = max(0, int((start_at - capture_start) * RATE))
@@ -146,6 +150,7 @@ class BenchReply:
         self.pcm = bytearray()
         self.transcript = ""
         self.first_voice_at = self.last_voice_at = None
+        self.first_voice_sample = None
         self.leading_pcm = b""
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
 
@@ -168,6 +173,7 @@ class BenchReply:
                 # Preserve quiet consonants that precede the first strong
                 # block, including when they arrived in an earlier packet.
                 prefix = (self.leading_pcm + pcm[:2 * bounds[0]])[-2 * (rate // 25):]
+                self.first_voice_sample = len(prefix) // 2
                 samples = np.frombuffer(prefix + pcm[2 * bounds[0]:], dtype="<i2")
                 self.leading_pcm = b""
         elif self.first_voice_at is None:

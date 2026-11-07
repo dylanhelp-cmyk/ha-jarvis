@@ -20,6 +20,7 @@ class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
             await reply.receive(strong.tobytes(), RATE)
             frame, = render.call_args.args
         np.testing.assert_array_equal(frame.to_ndarray().ravel(), np.concatenate((quiet[-640:], strong)))
+        self.assertEqual(reply.first_voice_sample, 640)
 
 
 class ReplyMatchingTests(unittest.TestCase):
@@ -61,6 +62,18 @@ class ReplyMatchingTests(unittest.TestCase):
             result = match_response(np.zeros(8 * RATE), 100, reply, 0, 101, 101.1)
         self.assertEqual(result["status"], "unavailable")
         self.assertIn("contradict", result["reason"])
+
+    def test_voice_onset_ignores_louder_late_copy_in_the_same_capture(self):
+        reply = make_probe(513)[:int(.6 * RATE)]
+        capture = np.zeros(2 * RATE, dtype="<i2")
+        first, late = int(.22 * RATE), int(.91 * RATE)
+        capture[first:first + len(reply)] = (reply * .3).astype("<i2")
+        capture[late:late + len(reply)] = reply
+        result = match_response(capture, 100, reply, 0, 100, 100,
+                                handoff_at=lambda offset: 100.1 + offset / RATE,
+                                acoustic_delay_range=(-.04, .45), window_seconds=.14, onset_horizon_seconds=.28)
+        self.assertEqual(result["status"], "detected", result)
+        self.assertAlmostEqual(result["latency_ms"], 220, delta=12)
 
     def test_known_clip_alignment_can_flag_one_late_window_without_relaxing_reply_timing(self):
         reply = np.full(RATE, 1200, dtype="<i2")

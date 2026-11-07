@@ -163,7 +163,12 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(endpoint.timing(4)["status"], "unavailable")
 
     async def test_confirmed_wake_sends_ordered_opening_then_drains_and_closes(self):
-        with patch("jarvis.conversation_trial.LiveSession", SimulatedSession),              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+        endpoint = SpeechEndpoint(SimpleNamespace(is_speech=lambda *_: False))
+        with (patch("jarvis.conversation_trial.LiveSession", SimulatedSession),
+              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),
+              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+              patch("jarvis.conversation_trial.SpeechEndpoint", return_value=endpoint),
+              patch.object(endpoint, "observe", wraps=endpoint.observe) as observe):
             event = asyncio.Event()
             event.set()
             device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=event,
@@ -176,8 +181,13 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             for i in range(3):
                 opening.offer(PCMFrame(i, i * 256, stamp + i * 16, samples[i * 256:(i + 1) * 256]), 0)
             messages, result = [], {"id": "test"}
-            await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, lambda phase: None)
-            self.assertEqual(messages, ["ready", samples[:320].tobytes(), samples[320:640].tobytes(), "closed"])
+            await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, lambda phase: None,
+                                 gain_db=36)
+            packets = [samples[:320].tobytes(), samples[320:640].tobytes()]
+            self.assertEqual(messages, ["ready", *(gain_packet(pcm, 36)[0] for pcm in packets), "closed"])
+            self.assertEqual([call.args[0] for call in observe.call_args_list],
+                             [gain_packet(pcm, 24)[0] for pcm in packets])
+            self.assertEqual(result["input_signal"]["vad_gain_db"], 24)
             self.assertEqual(result["input_samples_sent"], 640)
             self.assertIsNotNone(result["input_queue"]["first_packet_age_ms"])
             self.assertEqual(result["playback"]["frames_rendered"], 480)
