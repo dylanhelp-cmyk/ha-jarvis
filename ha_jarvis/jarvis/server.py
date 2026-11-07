@@ -391,7 +391,7 @@ class Bench:
             player = JackPlayback(device, f'{result["id"]}-{index + 1}')
             device.playback = player
             try:
-                await player.send(pcm)
+                await player.send(pcm, prime_packets=5)
                 plays.append(player)
             finally:
                 with suppress(RuntimeError, OSError, TimeoutError):
@@ -403,6 +403,7 @@ class Bench:
         offset = device.clock_offset_ms
         renders, delays = [], []
         result["metric"] = "dma_start_to_acoustic_reference"
+        result["playback_prime_ms"] = 50
         for index, player in enumerate(plays, 1):
             span = player.confirmed_span()
             match = {"status": "unavailable", "reason": "Voice PE did not confirm a DMA span"}

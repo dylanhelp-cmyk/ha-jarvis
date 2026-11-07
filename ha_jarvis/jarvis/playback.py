@@ -148,12 +148,12 @@ class JackPlayback:
         if self.finished.is_set():
             raise RuntimeError(f"Voice PE playback ended early ({self.reason})")
 
-    async def send(self, pcm):
+    async def send(self, pcm, *, prime_packets=1):
         async def chunks():
             size = RATE * CHANNELS * 2
             for offset in range(0, len(pcm), size):
                 yield pcm[offset:offset + size]
-        await self.send_stream(chunks())
+        await self.send_stream(chunks(), prime_packets=prime_packets)
 
     async def send_stream(self, chunks, *, prime_packets=1):
         """Start once PCM exists and preserve sample timing across arriving chunks."""
