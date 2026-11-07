@@ -143,7 +143,7 @@ async def synthesize_fixture(prompt):
 
 
 class BenchReply:
-    def __init__(self, device, identity):
+    def __init__(self, device, identity, *, output_gain_db=0):
         self.player = JackPlayback(device, identity)
         self.queue = asyncio.Queue(maxsize=65)
         self.pending_bytes = 0
@@ -152,11 +152,15 @@ class BenchReply:
         self.first_voice_at = self.last_voice_at = None
         self.first_voice_sample = None
         self.leading_pcm = b""
+        self.output_scale = 10 ** (output_gain_db / 20)
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
 
     def _render(self, frame):
         for block in self.converter.resample(frame):
-            stereo = np.repeat(block.to_ndarray().ravel(), 2).astype("<i2").tobytes()
+            mono = block.to_ndarray().ravel()
+            if self.output_scale != 1:
+                mono = np.rint(mono * self.output_scale)
+            stereo = np.repeat(mono, 2).astype("<i2").tobytes()
             if self.pending_bytes + len(stereo) > RENDER_RATE * 4 or len(self.pcm) + len(stereo) > 8 * RENDER_RATE * 4:
                 raise RuntimeError("Synthetic reply exceeded its playback queue or duration bound")
             self.queue.put_nowait(stereo)

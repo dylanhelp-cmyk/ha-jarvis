@@ -1,3 +1,9 @@
+# 0.2.20
+
+- Lower live preview reply output by 6 dB before sending audio to the jack.
+- Increase the first preconnected reply's source reserve from 120 to 200 ms. Warm replies and wake-start previews keep 120 ms.
+- App-only update. Run Echo reference alignment, then try one normal-volume preconnected preview at +36 dB. Listen for harshness and interruptions.
+
 # 0.2.19
 
 - Match audible onset from the same speech boundary detected during streaming. Use Voice PE sample acceptance times to constrain the acoustic search.

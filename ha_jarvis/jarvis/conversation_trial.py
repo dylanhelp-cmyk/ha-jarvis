@@ -148,8 +148,9 @@ def gain_packet(pcm, gain_db):
 
 
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
-                       warm_follow_up=False):
-    reply = BenchReply(device, result["id"])
+                       warm_follow_up=False, source_prime_packets=12):
+    output_gain_db = -6
+    reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     sender = None
     endpoint = SpeechEndpoint()
     vad_gain_db = min(gain_db, 24)
@@ -160,8 +161,10 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         device.playback = reply.player
         # The extra source reserve remains on the App. The device window is
         # still 50 ms and playback keeps the original sample clock.
-        result["reply_source_reserve_ms"] = 120
-        sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5, source_prime_packets=12))
+        result["reply_output_gain_db"] = output_gain_db
+        result["reply_source_reserve_ms"] = source_prime_packets * 10
+        sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
+                                                               source_prime_packets=source_prime_packets))
         phase(listening_phase)
         set_output(reply)
         origin = listening_started = time.monotonic()
@@ -291,7 +294,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             stream.offer(frame, offset)
         replies = [await stream_reply(device, session, result, stream, set_output, phase,
                                       "streaming the cleaned opening speech",
-                                      gain_db=gain_db, max_age_ms=opening.max_ms)]
+                                      gain_db=gain_db, max_age_ms=opening.max_ms,
+                                      source_prime_packets=20 if preconnect else 12)]
         if follow_up:
             # This explicitly selected measurement uses new input after the first
             # reply has drained. It does not carry the cold input queue forward.

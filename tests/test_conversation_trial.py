@@ -45,7 +45,7 @@ class SimulatedSession:
 
 
 class SimulatedReply:
-    def __init__(self, device, identity):
+    def __init__(self, device, identity, *, output_gain_db=0):
         self.first_voice_at = self.last_voice_at = None
         self.player = self
         self.frames_sent = self.frames_rendered = 480

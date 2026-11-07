@@ -9,6 +9,18 @@ from jarvis.live_bench import BenchReply, match_response, render_reference, voic
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_reply_attenuation_reaches_the_render_reference(self):
+        source = (3000 * np.sin(2 * np.pi * 440 * np.arange(1600) / RATE)).astype("<i2").tobytes()
+        pcm = []
+        for gain in (0, -6):
+            reply = BenchReply(SimpleNamespace(ws=None), "test", output_gain_db=gain)
+            await reply.receive(source, RATE)
+            await reply.finish()
+            pcm.append(np.frombuffer(reply.pcm, dtype="<i2"))
+        self.assertEqual(len(pcm[0]), len(pcm[1]))
+        expected = np.rint(pcm[0] * 10 ** (-6 / 20))
+        np.testing.assert_array_equal(pcm[1], expected)
+
     async def test_retains_quiet_lead_across_packet_boundary(self):
         reply = BenchReply(SimpleNamespace(ws=None), "test")
         quiet = np.arange(960, dtype="<i2") % 40 + 20
