@@ -5,6 +5,7 @@ import asyncio
 import base64
 from contextlib import suppress
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timezone
 import io
 import ipaddress
@@ -535,6 +536,101 @@ class Bench:
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
+    async def measure_interrupt(self, result):
+        from .conversation_trial import SpeechEndpoint, gain_packet
+        from .live_bench import SYNTHETIC_PROMPTS, synthesize_fixture, voiced_bounds
+        from .streaming_aec import ConfirmedRenderInput
+
+        alignment = self.alignment_delay()
+        if alignment is None:
+            raise ValueError("Run Echo reference alignment before the interruption check")
+        device = self.device
+        pcm, _ = await synthesize_fixture(SYNTHETIC_PROMPTS[0])
+        speech = np.frombuffer(pcm, dtype="<i2")
+        first, end = voiced_bounds(speech)
+        speech = speech[first:end].astype(np.float64)
+        speech = np.rint(speech * (400 / np.max(np.abs(speech)))).astype("<i2")
+        pilot_pcm = await asyncio.to_thread(stereo_pcm, pilot(np.arange(4 * RATE) / RATE))
+        player = JackPlayback(device, result["id"])
+        echo = ConfirmedRenderInput(player, pilot_pcm, alignment)
+        detector = SpeechEndpoint()
+        trigger = asyncio.get_running_loop().create_future()
+        cleaned = bytearray()
+        monitor_start_ms, inject_at_ms = 500, 1400
+
+        await asyncio.sleep(.5)
+        capture_start_ms = device.frames[0].capture_ms if device.frames else None
+        if capture_start_ms is None:
+            raise RuntimeError("No microphone pre-roll for the interruption check")
+        processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
+
+        def observe(frame, offset):
+            nonlocal processed
+            first_ms = player.first_rendered_ms
+            if first_ms is not None:
+                # Inject only into the AEC input. Leave the original microphone
+                # recording untouched for independent acoustic stop detection.
+                start = (frame.capture_ms - first_ms - inject_at_ms) * (RATE // 1000)
+                lo, hi = max(0, -start), min(len(frame.samples), len(speech) - start)
+                if hi > lo:
+                    samples = frame.samples.copy()
+                    mixed = samples[lo:hi].astype(np.int32) + speech[start + lo:start + hi]
+                    samples[lo:hi] = np.clip(mixed, -32768, 32767)
+                    frame = replace(frame, samples=samples)
+            cleaned.extend(echo.offer(frame, offset))
+            while len(cleaned) >= 640 and not trigger.done():
+                packet = bytes(cleaned[:640])
+                del cleaned[:640]
+                processed += 320
+                end_ms = capture_start_ms + processed * 1000 / RATE
+                if first_ms is not None and end_ms >= first_ms + monitor_start_ms:
+                    if detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic()):
+                        trigger.set_result(end_ms - first_ms)
+
+        self.test["phase"] = "testing a local speech-triggered stop"
+        device.pcm_consumer = observe
+        device.playback = player
+        sender = asyncio.create_task(player.send(pilot_pcm, prime_packets=5))
+        stop_at = None
+        try:
+            await asyncio.wait((sender, trigger), return_when=asyncio.FIRST_COMPLETED)
+            if trigger.done():
+                stop_at = time.monotonic()
+                sender.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sender
+                await player.stop()
+            else:
+                await sender
+        finally:
+            device.pcm_consumer = None
+            trigger.cancel()
+            if not sender.done():
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            with suppress(RuntimeError, OSError, TimeoutError):
+                await player.stop()
+            device.playback = None
+            result["playback"] = player.snapshot()
+
+        report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
+                                                "injection_after_render_ms": inject_at_ms}
+        if stop_at is None or not trigger.done() or trigger.cancelled():
+            result.update(status="unavailable", reason=echo.error or "No speech-triggered stop was detected")
+            return
+        report["trigger_relative_to_injection_ms"] = round(trigger.result() - inject_at_ms, 1)
+        if trigger.result() < inject_at_ms or echo.error or player.reason != "requested":
+            result.update(status="unavailable", reason=echo.error or "Stop could not be attributed to the injected speech")
+            return
+        report["injection_to_stop_request_ms"] = round(
+            (stop_at - (player.first_rendered_ms + inject_at_ms + device.clock_offset_ms) / 1000) * 1000, 1)
+        await asyncio.sleep(.75)
+        await device.end()
+        captured, capture_start = device.recording()
+        acoustic = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
+        result["trials"].append({"trial": 1, **acoustic})
+        result["status"] = "measured" if acoustic["status"] == "detected" else "unavailable"
+
     async def measure_reply_stall(self, result):
         from .live_bench import SYNTHETIC_PROMPTS, match_response, render_reference, synthesize_fixture
 
@@ -706,6 +802,9 @@ class Bench:
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
+                return
+            if kind == "interrupt":
+                await self.measure_interrupt(result)
                 return
             if kind == "reply_stall":
                 await self.measure_reply_stall(result)
@@ -1030,7 +1129,7 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "reply_stall", "voice_turn"):
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "reply_stall", "interrupt", "voice_turn"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
@@ -1066,6 +1165,8 @@ def create_ui(bench):
                 raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
         if kind in ("wake_ack", "voice_turn") and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
+        if kind == "interrupt" and bench.alignment_delay() is None:
+            raise ValueError("Run Echo reference alignment before the interruption check")
         if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
             raise ValueError("Verify the wake clip before testing its render alignment")
         startup_transport = data.get("startup_transport")

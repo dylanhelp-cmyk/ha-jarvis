@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
+const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: 'Interruption check', stability: 'Stream stability',
   reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
@@ -43,6 +43,7 @@ function readiness() {
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
   else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
+  else if (kind === 'interrupt' && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
   else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
@@ -201,6 +202,9 @@ function showResults(results) {
     }
     if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
       'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
+    if (result.interruption_probe?.injection_to_stop_request_ms != null) {
+      add(card, 'p', result.interruption_probe.injection_to_stop_request_ms + ' ms from generated speech to requesting a stop.');
+    }
     if (result.live_echo) add(card, 'p', result.live_echo.status === 'measured' ?
       'Live DMA-reference pilot suppression ' + result.live_echo.pilot_band_reduction_db + ' dB' :
       'Live echo measurement unavailable. ' + result.live_echo.reason);

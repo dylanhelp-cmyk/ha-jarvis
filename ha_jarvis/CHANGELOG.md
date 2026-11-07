@@ -1,3 +1,7 @@
+# 0.2.36
+
+- Add a local Interruption check. It uses generated speech as input to the live echo filter and measures the time until the jack falls silent. Run Echo reference alignment first.
+
 # 0.2.35
 
 - Process the quiet pre-roll before waiting for DMA timing so it cannot fill the live echo queue.
