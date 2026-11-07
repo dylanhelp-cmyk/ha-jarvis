@@ -368,7 +368,63 @@ class Bench:
 
             result["opening_echo"] = await asyncio.to_thread(
                 check_opening_reference, tuple(device.frames), pcm, device.clock_offset_ms,
-                terminal.get("first_rendered_ms"), match.get("audible_onset_at"), bounds[0])
+                terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
+                match.get("audible_onset_at"), bounds[0])
+
+    async def measure_render_alignment(self, result):
+        from .live_bench import match_response, render_reference, voiced_bounds
+        from .streaming_aec import check_confirmed_references
+
+        device = self.device
+        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        if cached is None:
+            raise ValueError("Verify the wake acknowledgment before checking render alignment")
+        _, pcm = cached
+        reference = await asyncio.to_thread(render_reference, pcm)
+        bounds = voiced_bounds(reference)
+        if bounds is None:
+            raise ValueError("The approved clip contains no usable reference")
+        plays = []
+        await asyncio.sleep(.4)
+        for index in range(2):
+            self.test["phase"] = f"playing reference clip {index + 1} of 2"
+            player = JackPlayback(device, f'{result["id"]}-{index + 1}')
+            device.playback = player
+            try:
+                await player.send(pcm)
+                plays.append(player)
+            finally:
+                with suppress(RuntimeError, OSError, TimeoutError):
+                    await player.stop()
+                device.playback = None
+            await asyncio.sleep(.55)
+        await device.end()
+        captured, capture_start = device.recording()
+        offset = device.clock_offset_ms
+        renders, delays = [], []
+        result["metric"] = "dma_start_to_acoustic_reference"
+        for index, player in enumerate(plays, 1):
+            span = player.confirmed_span()
+            match = {"status": "unavailable", "reason": "Voice PE did not confirm a DMA span"}
+            if span is not None:
+                started = (span[0] + offset) / 1000
+                lo = max(0, round((started - .06 - capture_start) * RATE))
+                hi = min(len(captured), round((started + .9 - capture_start) * RATE))
+                match = await asyncio.to_thread(
+                    match_response, captured[lo:hi], capture_start + lo / RATE, reference,
+                    bounds[0], started, started, window_seconds=.14)
+                if match["status"] == "detected":
+                    delays.append((match["audible_onset_at"] - started - bounds[0] / RATE) * 1000)
+                    renders.append((pcm, *span))
+            result["trials"].append({"trial": index, **match, "playback": player.snapshot()})
+        if len(delays) != 2 or min(delays) < 0 or abs(delays[1] - delays[0]) > 35:
+            outcome = {"status": "unavailable", "reason": "The two acoustic alignments did not agree"}
+        else:
+            outcome = await asyncio.to_thread(check_confirmed_references, tuple(device.frames),
+                                                renders, offset, sum(delays) / 2)
+        result["render_alignment"] = outcome
+        result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
+        result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
     async def measure_synthetic_replies(self, result, transport, profile):
         from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
@@ -441,6 +497,9 @@ class Bench:
                 await self.device.end()
                 self.device.recording()
                 result.update(status="passed", metric="microphone_connection")
+                return
+            if kind == "render_alignment":
+                await self.measure_render_alignment(result)
                 return
             if kind == "synthetic_replies":
                 await self.measure_synthetic_replies(result, startup_transport, reply_profile)
@@ -712,7 +771,7 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack"):
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
@@ -726,6 +785,8 @@ def create_ui(bench):
                 raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
         if kind == "wake_ack" and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
+        if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
+            raise ValueError("Verify the wake clip before testing its render alignment")
         startup_transport = data.get("startup_transport")
         if startup_transport is not None:
             if (kind != "wake_ack" or startup_transport not in ("websocket", "webrtc")

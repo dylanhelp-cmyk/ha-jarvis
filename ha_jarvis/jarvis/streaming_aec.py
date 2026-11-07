@@ -1,12 +1,63 @@
 """Align microphone samples to a bounded Voice PE render history."""
 from __future__ import annotations
 
+from collections import deque
 import math
 
 import av
 import numpy as np
 
 from .aec import FRAME_SAMPLES, HostAEC3, SAMPLE_RATE
+
+
+class RenderBurst:
+    """One continuous I2S render generation with an explicit terminal report."""
+
+    def __init__(self, start):
+        self.start = start
+        self.converter = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+        self.history = np.zeros(4 * SAMPLE_RATE, dtype="<i2")
+        self.end = self.frames = 0
+        self.ended_at = None
+
+    def store(self, output):
+        samples = output.to_ndarray().reshape(-1)
+        indices = np.arange(self.end, self.end + len(samples))
+        self.history[indices % len(self.history)] = samples
+        self.end += len(samples)
+
+    def append(self, pcm):
+        stereo = np.frombuffer(pcm, dtype="<i2").reshape(-1, 2)
+        self.frames += len(stereo)
+        mono = (stereo.astype(np.int32).sum(axis=1) // 2).astype(np.int16).reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(mono, format="s16", layout="mono")
+        frame.sample_rate = 48000
+        for output in self.converter.resample(frame):
+            self.store(output)
+
+    def finish(self, ended_at):
+        for output in self.converter.resample(None):
+            self.store(output)
+        self.ended_at = ended_at
+
+    def read(self, times, values):
+        selected = times >= self.start
+        if self.ended_at is not None:
+            selected &= times < self.ended_at
+        if not np.any(selected):
+            return
+        duration = (self.ended_at - self.start if self.ended_at is not None else None)
+        rate = self.end / duration if duration else SAMPLE_RATE
+        positions = (times[selected] - self.start) * rate
+        indices = np.floor(positions).astype(np.int64)
+        if (indices[0] < max(0, self.end - len(self.history))
+                or (self.ended_at is None and indices[-1] + 1 >= self.end)):
+            raise RuntimeError("Live echo reference is outside the retained render timeline")
+        fraction = positions - indices
+        left = self.history[indices % len(self.history)]
+        right = self.history[(indices + 1) % len(self.history)]
+        right = np.where(indices + 1 < self.end, right, 0)
+        values[selected] = np.rint(left * (1 - fraction) + right * fraction).astype("<i2")
 
 
 class StreamingEcho:
@@ -20,53 +71,48 @@ class StreamingEcho:
         self.residual_delay_ms = min(40, int(delay_ms))
         self.delay_seconds = (delay_ms - self.residual_delay_ms) / 1000
         self.processor = processor if processor is not None else HostAEC3(stream_delay_ms=self.residual_delay_ms)
-        self._converter = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
-        self._history = np.zeros(4 * SAMPLE_RATE, dtype="<i2")
-        self._render_start = None
-        self._render_end = 0
-        self._next_render_frame = 0
+        self._bursts = deque()
+        self._render_floor = None
         self._capture_start = self._capture_stamp = None
         self._next_capture = self._processed = 0
         self._pending = np.empty(0, dtype="<i2")
         self.capture_drift_ppm = 0.0
 
     def render(self, pcm, rendered_at, *, first_frame):
-        """Accept device-confirmed 48 kHz stereo PCM16LE in order."""
+        """Accept ordered device-confirmed 48 kHz stereo PCM16LE."""
         if not pcm or len(pcm) % 4 or not math.isfinite(rendered_at):
             raise ValueError("Invalid wired render frame")
-        if first_frame != self._next_render_frame:
+        burst = self._bursts[-1] if self._bursts else None
+        if burst is None or burst.ended_at is not None:
+            if first_frame or (burst is not None and rendered_at < burst.ended_at):
+                raise RuntimeError("Speaker discontinuity invalidated live echo alignment")
+            while self._bursts and (len(self._bursts) >= 8
+                    or rendered_at - self._bursts[0].ended_at >= 4):
+                self._render_floor = self._bursts.popleft().ended_at
+            burst = RenderBurst(rendered_at)
+            self._bursts.append(burst)
+        if first_frame != burst.frames:
             raise RuntimeError("Speaker discontinuity invalidated live echo alignment")
-        stereo = np.frombuffer(pcm, dtype="<i2").reshape(-1, 2)
-        self._next_render_frame += len(stereo)
-        if self._render_start is None:
-            self._render_start = rendered_at
-        mono = (stereo.astype(np.int32).sum(axis=1) // 2).astype(np.int16).reshape(1, -1)
-        frame = av.AudioFrame.from_ndarray(mono, format="s16", layout="mono")
-        frame.sample_rate = 48000
-        for output in self._converter.resample(frame):
-            samples = output.to_ndarray().reshape(-1)
-            indices = np.arange(self._render_end, self._render_end + len(samples))
-            self._history[indices % len(self._history)] = samples
-            self._render_end += len(samples)
+        burst.append(pcm)
+
+    def finish_render(self, rendered_frames, ended_at):
+        """Confirm the boundary between this rendered generation and known silence."""
+        burst = self._bursts[-1] if self._bursts else None
+        if (burst is None or burst.ended_at is not None or rendered_frames != burst.frames
+                or not math.isfinite(ended_at) or ended_at <= burst.start):
+            raise RuntimeError("Incomplete speaker render cannot establish an echo boundary")
+        if abs((ended_at - burst.start) - rendered_frames / 48000) > .015:
+            raise RuntimeError("Speaker render clock span cannot establish an echo boundary")
+        burst.finish(ended_at)
 
     def _reference(self, capture_at, period):
-        if self._render_start is None:
-            return bytes(FRAME_SAMPLES * 2)
-        start = (capture_at - self.delay_seconds - self._render_start) * SAMPLE_RATE
-        positions = start + np.arange(FRAME_SAMPLES) * period * SAMPLE_RATE
-        left = np.floor(positions).astype(np.int64)
-        audible = left >= 0
-        if not np.any(audible):
-            return bytes(FRAME_SAMPLES * 2)
-        indices = left[audible]
-        if indices[0] < max(0, self._render_end - len(self._history)) or indices[-1] + 1 >= self._render_end:
+        start = capture_at - self.delay_seconds
+        if self._render_floor is not None and start < self._render_floor:
             raise RuntimeError("Live echo reference is outside the retained render timeline")
-        fraction = positions[audible] - indices
+        times = start + np.arange(FRAME_SAMPLES) * period
         values = np.zeros(FRAME_SAMPLES, dtype="<i2")
-        values[audible] = np.rint(
-            self._history[indices % len(self._history)] * (1 - fraction)
-            + self._history[(indices + 1) % len(self._history)] * fraction
-        ).astype("<i2")
+        for burst in self._bursts:
+            burst.read(times, values)
         return values.tobytes()
 
     def capture(self, frame, clock_offset_ms):
@@ -98,24 +144,32 @@ class StreamingEcho:
         return b"".join(cleaned)
 
 
-def check_opening_reference(frames, pcm, clock_offset_ms, first_rendered_ms, acoustic_onset, voiced_start):
-    """Exercise the acknowledged clip as an AEC3 reference on an actual wake capture."""
-    scope = "offline wake clip alignment and sample accounting"
-    if type(first_rendered_ms) is not int or acoustic_onset is None or not frames:
-        return {"status": "unavailable", "scope": scope, "reason": "Missing rendered or acoustic onset"}
-    rendered_at = (first_rendered_ms + clock_offset_ms) / 1000
-    delay_ms = (acoustic_onset - rendered_at - voiced_start / SAMPLE_RATE) * 1000
-    if not 0 <= delay_ms <= 300:
+def check_confirmed_references(frames, renders, clock_offset_ms, delay_ms):
+    """Process a short local capture using confirmed render bursts and known gaps."""
+    scope = "offline render alignment and sample accounting"
+    if not frames or not renders or not 0 <= delay_ms <= 300:
         return {"status": "unavailable", "scope": scope, "reason": "Unreliable render-to-microphone alignment"}
     try:
         echo = StreamingEcho(delay_ms)
-        # This single verified render drained. Digital silence after it is
-        # known for this bench window, which does not start any other playback.
-        echo.render(pcm + bytes(4 * 48000 * 3), rendered_at, first_frame=0)
+        for pcm, first_ms, last_ms in renders:
+            echo.render(pcm, (first_ms + clock_offset_ms) / 1000, first_frame=0)
+            echo.finish_render(len(pcm) // 4, (last_ms + clock_offset_ms) / 1000)
         processed = sum(len(echo.capture(frame, clock_offset_ms)) // 2 for frame in frames)
     except (ImportError, RuntimeError, ValueError) as exc:
-        return {"status": "unavailable", "scope": scope, "reason": type(exc).__name__}
+        return {"status": "unavailable", "scope": scope, "reason": str(exc) or type(exc).__name__}
     total = sum(len(frame.samples) for frame in frames)
     return {"status": "processed", "scope": scope, "estimated_delay_ms": round(delay_ms, 1),
             "processed_samples": processed, "partial_final_block_samples": total - processed,
-            "near_end_preservation_verified": False}
+            "confirmed_bursts": len(renders), "near_end_preservation_verified": False}
+
+
+def check_opening_reference(frames, pcm, clock_offset_ms, first_rendered_ms, last_rendered_ms,
+                            acoustic_onset, voiced_start):
+    """Exercise the acknowledged clip as an AEC3 reference on an actual wake capture."""
+    if (type(first_rendered_ms) is not int or type(last_rendered_ms) is not int
+            or acoustic_onset is None):
+        return {"status": "unavailable", "reason": "Missing rendered or acoustic onset"}
+    rendered_at = (first_rendered_ms + clock_offset_ms) / 1000
+    delay_ms = (acoustic_onset - rendered_at - voiced_start / SAMPLE_RATE) * 1000
+    return check_confirmed_references(frames, [(pcm, first_rendered_ms, last_rendered_ms)],
+                                      clock_offset_ms, delay_ms)

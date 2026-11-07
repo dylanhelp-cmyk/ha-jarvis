@@ -1,3 +1,7 @@
+# 0.2.9
+
+- Keep the echo reference aligned across confirmed playback bursts and known gaps. Run Echo reference alignment to check two copies of the approved clip with firmware 0.2.3. App-only update.
+
 # 0.2.8
 
 - With firmware 0.2.3, arm the wake bench without capturing audio until the Voice PE detects Hey Jarvis. Report the first capture timestamp, bounded opening buffer and offline wake-clip echo alignment. Room audio stays local.

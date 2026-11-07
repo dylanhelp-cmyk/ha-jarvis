@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -39,6 +39,7 @@ function readiness() {
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
   else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
+  else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   $('readiness').textContent = running ? state.test.phase : reason || 'Ready for a local test.';
@@ -136,6 +137,8 @@ function showResults(results) {
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
     if (result.stability) add(card, 'p', result.stability.status === 'measured' ?
       'Pilot gaps ' + result.stability.dropout_count : result.stability.reason);
+    if (result.render_alignment) add(card, 'p', result.render_alignment.status === 'processed' ?
+      'AEC3 processed both confirmed render bursts and the gap between them.' : result.render_alignment.reason);
     if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
       'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
     for (const warning of result.warnings || []) add(card, 'p', warning);

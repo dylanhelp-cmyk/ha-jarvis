@@ -34,9 +34,26 @@ class StreamingEchoTests(unittest.TestCase):
         frames = [PCMFrame(i, i * 256, 1000 + i * 16, np.zeros(256, dtype="<i2"))
                   for i in range(80)]
         with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
-            result = check_opening_reference(frames, bytes(22080 * 4), 0, 1040, 1.08, 0)
+            result = check_opening_reference(frames, bytes(22080 * 4), 0, 1040, 1500, 1.08, 0)
         self.assertEqual(result["status"], "processed", result)
         self.assertEqual(result["processed_samples"], 80 * 256)
+
+    def test_confirmed_render_bursts_keep_silence_and_capture_order_between_replies(self):
+        recorder = ReferenceRecorder()
+        echo = StreamingEcho(0, processor=recorder)
+        first = np.full((960, 2), 1000, dtype="<i2").tobytes()
+        second = np.full((960, 2), 2000, dtype="<i2").tobytes()
+        echo.render(first, 1, first_frame=0)
+        echo.finish_render(960, 1.02)
+        echo.render(second, 1.05, first_frame=0)
+        echo.finish_render(960, 1.07)
+        for index in range(8):
+            pcm = np.full(160, index, dtype="<i2")
+            self.assertEqual(echo.capture(PCMFrame(index, index * 160, 1000 + index * 10, pcm), 0),
+                             pcm.tobytes())
+        self.assertEqual(int(np.median(recorder.references[0])), 1000)
+        self.assertFalse(any(np.any(ref) for ref in recorder.references[2:5]))
+        self.assertEqual(int(np.median(recorder.references[5])), 2000)
 
     def test_missing_render_frames_invalidate_the_reference(self):
         echo = StreamingEcho(100, processor=ReferenceRecorder())

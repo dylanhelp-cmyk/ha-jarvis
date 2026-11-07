@@ -232,6 +232,17 @@ class JackPlayback:
                 return (stamp + clock_offset_ms) / 1000 + (frame - first) / RATE
         return None
 
+    def confirmed_span(self):
+        """Return inferred DMA start and reported end for fully drained audio."""
+        if (self.reason != "drained" or self.frames_rendered != self.frames_sent
+                or self.first_render_report is None or self.last_rendered_ms is None):
+            return None
+        first_count, first_end = self.first_render_report
+        first_ms = (first_end - round(first_count * 1000 / RATE)) & 0xFFFFFFFF
+        if first_ms >= self.last_rendered_ms:
+            return None
+        return first_ms, self.last_rendered_ms
+
     def snapshot(self):
         result = {"frames_sent": self.frames_sent, "frames_accepted": self.frames_accepted,
                 "frames_rendered": self.frames_rendered, "last_rendered_device_ms": self.last_rendered_ms,
