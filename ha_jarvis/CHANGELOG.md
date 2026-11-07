@@ -1,3 +1,7 @@
+# 0.2.39
+
+- Start sending cleaned opening speech as soon as the connection and a verified portion of the cached wake playback are ready. Hold the spoken reply until “Yes sir” finishes.
+
 # 0.2.38
 
 - Add an optional Assist voice preview for one on or off command to a named light or switch. The token stays local and the App checks the resulting state through Assist.

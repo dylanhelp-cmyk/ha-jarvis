@@ -424,11 +424,11 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             return []
         wake_received_at = getattr(device, "last_wake_at", None) or started
         result["wake_receipt_to_ready_ms"] = round((ready_at - wake_received_at) * 1000, 1)
-        if preconnect:
+        if not device.wake_terminal_event.is_set():
             async with asyncio.timeout(3):
                 await device.wake_render_changed.wait()
         progress = getattr(device, "wake_render_progress", None)
-        if preconnect and progress and opening.frames and not device.wake_terminal_event.is_set():
+        if progress and opening.frames and not device.wake_terminal_event.is_set():
             stream = OpeningEchoInput(device, pcm, delay_ms, progress[1])
             result["opening_reference_mode"] = "confirmed_prefix"
         else:

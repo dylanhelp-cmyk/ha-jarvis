@@ -301,10 +301,21 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
 
     async def test_preconnected_input_can_start_before_ack_drain_but_speaker_cannot(self):
+        await self.assert_opening_before_ack_drain(preconnect=True)
+
+    async def test_on_wake_input_can_start_before_ack_drain_but_speaker_cannot(self):
+        await self.assert_opening_before_ack_drain(preconnect=False)
+
+    async def assert_opening_before_ack_drain(self, *, preconnect):
         input_sent = asyncio.Event()
         output_started = asyncio.Event()
+        connection_ready = asyncio.Event()
 
         class EarlySession(SimulatedSession):
+            async def start(self):
+                await super().start()
+                connection_ready.set()
+
             async def send_audio(self, pcm):
                 await super().send_audio(pcm)
                 input_sent.set()
@@ -321,8 +332,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         stamp = int(time.monotonic() * 1000) - 50
         report = (4800, stamp, time.monotonic())
         device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=asyncio.Event(),
-                                 wake_render_changed=asyncio.Event(), wake_render_progress=report,
-                                 wake_render_latest=report, clock_offset_ms=0, errors=[],
+                                 wake_render_changed=asyncio.Event(), wake_render_progress=None,
+                                 wake_render_latest=None, clock_offset_ms=0, errors=[],
                                  info={"jack_plugged": True})
         opening = OpeningAudio()
         samples = np.arange(768, dtype="<i2")
@@ -330,6 +341,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         async def wake():
             for i in range(3):
                 opening.offer(PCMFrame(i, i * 256, stamp + i * 16, samples[i * 256:(i + 1) * 256]), 0)
+            device.wake_render_progress = device.wake_render_latest = report
             device.wake_render_changed.set()
             return True
 
@@ -338,8 +350,13 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.conversation_trial.BenchReply", GatedReply),
               patch("jarvis.conversation_trial.StreamingEcho", LocalEcho)):
             task = asyncio.create_task(run_voice_turn(device, messages, result, opening, bytes(22080 * 4), 31,
-                                                       lambda _: None, wait_for_preconnected_wake=wake))
+                                                       lambda _: None,
+                                                       wait_for_preconnected_wake=wake if preconnect else None))
             try:
+                if not preconnect:
+                    await asyncio.wait_for(connection_ready.wait(), 1)
+                    self.assertFalse(input_sent.is_set())
+                    await wake()
                 await asyncio.wait_for(input_sent.wait(), 1)
                 self.assertFalse(output_started.is_set())
                 self.assertFalse(device.wake_terminal_event.is_set())
