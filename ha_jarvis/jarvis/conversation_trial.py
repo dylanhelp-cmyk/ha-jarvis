@@ -86,6 +86,78 @@ class CleanInput:
         return packet, self.capture_start + self.released_samples / RATE
 
 
+class OpeningEchoInput(CleanInput):
+    """Hold capture until the matching speaker report covers its echo reference."""
+
+    def __init__(self, device, pcm, delay_ms, first_ms):
+        offset = device.clock_offset_ms
+        super().__init__(delay_ms, passthrough_after=(first_ms + offset) / 1000 + 3)
+        self.device = device
+        self.delay_ms = delay_ms
+        self.first_ms = first_ms
+        self.render_frames = len(pcm) // 4
+        self.echo.render(pcm, (first_ms + offset) / 1000, first_frame=0)
+        self.changed = device.wake_render_changed
+        self.waiting_frames = deque()
+        self.waiting_samples = 0
+        self.confirmed = False
+        self.terminal_deadline = time.monotonic() + 3
+
+    def offer(self, frame, clock_offset_ms):
+        if self.error:
+            return
+        if self.waiting_samples + len(frame.samples) + len(self.pending) // 2 > 3 * RATE:
+            self.error = "clean_opening_queue_overflow"
+        else:
+            self.waiting_frames.append((frame, clock_offset_ms))
+            self.waiting_samples += len(frame.samples)
+        self.changed.set()
+
+    def confirm(self):
+        if self.confirmed:
+            return
+        terminal = self.device.wake_playback_terminal
+        last_ms = terminal.get("last_rendered_ms")
+        if (terminal.get("drained") is not True or terminal.get("first_rendered_ms") != self.first_ms
+                or terminal.get("rendered_samples") != self.render_frames or type(last_ms) is not int):
+            raise RuntimeError("wake_echo_reference_incomplete")
+        offset = self.device.clock_offset_ms
+        self.echo.finish_render(self.render_frames, (last_ms + offset) / 1000)
+        self.passthrough_after = (last_ms + offset + self.delay_ms) / 1000 + .18
+        self.confirmed = True
+
+    async def packet(self):
+        while True:
+            if self.error:
+                raise RuntimeError(self.error)
+            if self.device.wake_terminal_event.is_set():
+                self.confirm()
+            elif time.monotonic() >= self.terminal_deadline or self.device.errors:
+                raise RuntimeError("wake_echo_reference_incomplete")
+            report = self.device.wake_render_latest
+            horizon = math.inf if self.confirmed else self.first_ms + report[0] / 48 - 20
+            while self.waiting_frames and len(self.pending) < 640:
+                frame, offset = self.waiting_frames[0]
+                if frame.capture_ms + len(frame.samples) * 1000 / RATE > horizon:
+                    break
+                self.waiting_frames.popleft()
+                self.waiting_samples -= len(frame.samples)
+                super().offer(frame, offset)
+                if self.error:
+                    raise RuntimeError(self.error)
+            if len(self.pending) >= 640:
+                return await super().packet()
+            self.changed.clear()
+            await asyncio.wait_for(self.changed.wait(), .35)
+
+    async def reply_chunks(self, reply):
+        async with asyncio.timeout(3):
+            await self.device.wake_terminal_event.wait()
+        self.confirm()
+        async for chunk in reply.chunks():
+            yield chunk
+
+
 class SpeechEndpoint:
     """Estimate a local speech boundary from consecutive cleaned 20 ms packets."""
 
@@ -151,10 +223,12 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                        warm_follow_up=False, source_prime_packets=12):
     output_gain_db = -6
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
+    early_echo = isinstance(stream, OpeningEchoInput)
     sender = None
     endpoint = SpeechEndpoint()
     vad_gain_db = min(gain_db, 24)
     sent = peak_before = peak_after = clipped = 0
+    first_sent_at = None
     first_age = max_age = None
     try:
         device.pcm_consumer = stream.offer
@@ -163,7 +237,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         # still 50 ms and playback keeps the original sample clock.
         result["reply_output_gain_db"] = output_gain_db
         result["reply_source_reserve_ms"] = source_prime_packets * 10
-        sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
+        chunks = stream.reply_chunks(reply) if early_echo else reply.chunks()
+        sender = asyncio.create_task(reply.player.send_stream(chunks, prime_packets=5,
                                                                source_prime_packets=source_prime_packets))
         phase(listening_phase)
         set_output(reply)
@@ -180,8 +255,13 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
             if device.errors or session.metrics.error or sender.done() or not device.info.get("jack_plugged"):
                 raise RuntimeError("The microphone, cloud session or jack playback failed")
             packet, captured_at = await stream.packet()
+            now = time.monotonic()
             if sent == 0:
-                origin = time.monotonic()
+                origin = now
+            elif early_echo and now > origin + sent / RATE:
+                # Continue at the original sample rate after waiting for a
+                # speaker report instead of trying to send the queue faster.
+                origin = now - sent / RATE
             due = origin + sent / RATE
             await asyncio.sleep(max(0, due - time.monotonic()))
             if time.monotonic() - due > .1:
@@ -195,6 +275,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 max_age = age if max_age is None else max(max_age, age)
                 transmitted, before, after, overload = gain_packet(packet, gain_db)
                 await session.send_audio(transmitted)
+                if first_sent_at is None:
+                    first_sent_at = sent_at
                 peak_before = max(peak_before, before)
                 peak_after = max(peak_after, after)
                 clipped += overload
@@ -204,7 +286,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 sent += 320
         device.pcm_consumer = None
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
-        result["digital_first_voice_ms"] = round((reply.first_voice_at - origin) * 1000, 1)
+        result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
         phase("playing the GPT-Live reply through the jack")
         async with asyncio.timeout(8):
             while time.monotonic() - reply.last_voice_at < .6:
@@ -222,6 +304,9 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         return reply
     finally:
         set_output(None)
+        terminal_at = getattr(device, "wake_render_terminal_at", None)
+        if early_echo and first_sent_at is not None and terminal_at is not None:
+            result["first_input_before_ack_terminal_ms"] = round((terminal_at - first_sent_at) * 1000, 1)
         result["input_samples_sent"] = sent
         result["input_queue"] = {"first_packet_age_ms": round(first_age, 1) if first_age is not None else None,
                                  "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
@@ -273,37 +358,45 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             return []
         wake_received_at = getattr(device, "last_wake_at", None) or started
         result["wake_receipt_to_ready_ms"] = round((ready_at - wake_received_at) * 1000, 1)
-        async with asyncio.timeout(3):
-            await device.wake_terminal_event.wait()
-        terminal = device.wake_playback_terminal
-        first, last = terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms")
-        if (not terminal.get("drained") or terminal.get("rendered_samples") != len(pcm) // 4
-                or type(first) is not int or type(last) is not int):
-            raise RuntimeError("wake_echo_reference_incomplete")
+        if preconnect:
+            async with asyncio.timeout(3):
+                await device.wake_render_changed.wait()
         progress = getattr(device, "wake_render_progress", None)
-        terminal_at = getattr(device, "wake_render_terminal_at", None)
-        if progress and terminal_at is not None and progress[1] == first:
-            samples, _, received_at = progress
-            result["wake_render_report"] = {
-                "first_report_rendered_samples": samples,
-                "first_report_to_terminal_ms": round((terminal_at - received_at) * 1000, 1),
-            }
+        if preconnect and progress and opening.frames and not device.wake_terminal_event.is_set():
+            stream = OpeningEchoInput(device, pcm, delay_ms, progress[1])
+            result["opening_reference_mode"] = "confirmed_prefix"
+        else:
+            async with asyncio.timeout(3):
+                await device.wake_terminal_event.wait()
+            terminal = device.wake_playback_terminal
+            first, last = terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms")
+            if (terminal.get("drained") is not True or terminal.get("rendered_samples") != len(pcm) // 4
+                    or type(first) is not int or type(last) is not int):
+                raise RuntimeError("wake_echo_reference_incomplete")
+            offset = device.clock_offset_ms
+            tail_cleared_at = (last + offset + delay_ms) / 1000 + .18
+            stream = CleanInput(delay_ms, passthrough_after=tail_cleared_at)
+            stream.echo.render(pcm, (first + offset) / 1000, first_frame=0)
+            stream.echo.finish_render(len(pcm) // 4, (last + offset) / 1000)
+            result["opening_reference_mode"] = "terminal"
         buffered, result["opening_audio"] = opening.release(time.monotonic())
         if not buffered or device.errors:
             raise RuntimeError(result["opening_audio"]["reason"] or "opening_capture_failed")
         offset = device.clock_offset_ms
-        # The jack has drained, but leave room for the measured acoustic
-        # delay and a conservative tail before bypassing the echo processor.
-        tail_cleared_at = (last + offset + delay_ms) / 1000 + .18
-        stream = CleanInput(delay_ms, passthrough_after=tail_cleared_at)
-        stream.echo.render(pcm, (first + offset) / 1000, first_frame=0)
-        stream.echo.finish_render(len(pcm) // 4, (last + offset) / 1000)
         for frame in buffered:
             stream.offer(frame, offset)
         replies = [await stream_reply(device, session, result, stream, set_output, phase,
                                       "streaming the cleaned opening speech",
                                       gain_db=gain_db, max_age_ms=opening.max_ms,
                                       source_prime_packets=20 if preconnect else 12)]
+        terminal = device.wake_playback_terminal
+        terminal_at = getattr(device, "wake_render_terminal_at", None)
+        if progress and terminal_at is not None and progress[1] == terminal.get("first_rendered_ms"):
+            samples, _, received_at = progress
+            result["wake_render_report"] = {
+                "first_report_rendered_samples": samples,
+                "first_report_to_terminal_ms": round((terminal_at - received_at) * 1000, 1),
+            }
         if follow_up:
             # This explicitly selected measurement uses new input after the first
             # reply has drained. It does not carry the cold input queue forward.

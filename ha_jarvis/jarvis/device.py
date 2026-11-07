@@ -105,6 +105,8 @@ class Device:
         self.wake_details = {}
         self.wake_playback_terminal = {}
         self.wake_render_progress = None
+        self.wake_render_latest = None
+        self.wake_render_changed = asyncio.Event()
         self.wake_render_terminal_at = None
         self.wake_terminal_event = asyncio.Event()
 
@@ -141,7 +143,7 @@ class Device:
             if (message.get("source") == "wake_ack" and self.wake_details.get("ack_playback_id")
                     and message.get("playback_id") == self.wake_details.get("ack_playback_id")
                     and message.get("generation") == self.wake_details.get("ack_generation")):
-                if kind == "play_clock" and self.wake_render_progress is None and not self.wake_terminal_event.is_set():
+                if kind == "play_clock" and not self.wake_terminal_event.is_set():
                     samples, first, last = (message.get(key) for key in
                                             ("rendered_samples", "first_rendered_ms", "last_rendered_ms"))
                     expected = self.wake_details.get("ack_samples")
@@ -152,13 +154,20 @@ class Device:
                             and all(type(value) is int for value in (samples, first, last, expected))
                             and 3840 <= samples < expected and 0 <= first < last <= 0xFFFFFFFF
                             and abs(last - first - samples / 48) <= 15):
-                        self.wake_render_progress = (samples, first, time.monotonic())
+                        previous = self.wake_render_latest
+                        if previous is None or (samples > previous[0] and first == previous[1]):
+                            report = (samples, first, time.monotonic())
+                            if self.wake_render_progress is None:
+                                self.wake_render_progress = report
+                            self.wake_render_latest = report
+                            self.wake_render_changed.set()
                 elif kind in ("play_stopped", "play_drained"):
                     self.wake_playback_terminal = {key: message[key] for key in
                         ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
                     self.wake_playback_terminal["drained"] = kind == "play_drained"
                     self.wake_render_terminal_at = time.monotonic()
                     self.wake_terminal_event.set()
+                    self.wake_render_changed.set()
         elif kind in ("ack_cache_ready", "ack_cache_progress", "ack_cache_committed", "ack_cache_error"):
             if self.wake_cache_upload is not None:
                 self.wake_cache_upload.receive(message)
@@ -200,6 +209,8 @@ class Device:
                          "ack_samples", "ack_reason") if key in message}
                     self.wake_playback_terminal = {}
                     self.wake_render_progress = None
+                    self.wake_render_latest = None
+                    self.wake_render_changed.clear()
                     self.wake_render_terminal_at = None
                     self.wake_event.set()
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:

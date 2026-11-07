@@ -7,7 +7,8 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import CleanInput, SpeechEndpoint, gain_packet, run_voice_turn, stream_reply
+from jarvis.conversation_trial import (CleanInput, OpeningEchoInput, SpeechEndpoint, gain_packet,
+                                       run_voice_turn, stream_reply)
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -226,6 +227,88 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
                                         warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
             self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)
+
+    async def test_preconnected_input_can_start_before_ack_drain_but_speaker_cannot(self):
+        input_sent = asyncio.Event()
+        output_started = asyncio.Event()
+
+        class EarlySession(SimulatedSession):
+            async def send_audio(self, pcm):
+                await super().send_audio(pcm)
+                input_sent.set()
+
+        class GatedReply(SimulatedReply):
+            async def chunks(self):
+                yield bytes(640)
+
+            async def send_stream(self, chunks, **_):
+                async for _ in chunks:
+                    output_started.set()
+                await self.draining.wait()
+
+        stamp = int(time.monotonic() * 1000) - 50
+        report = (4800, stamp, time.monotonic())
+        device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=asyncio.Event(),
+                                 wake_render_changed=asyncio.Event(), wake_render_progress=report,
+                                 wake_render_latest=report, clock_offset_ms=0, errors=[],
+                                 info={"jack_plugged": True})
+        opening = OpeningAudio()
+        samples = np.arange(768, dtype="<i2")
+
+        async def wake():
+            for i in range(3):
+                opening.offer(PCMFrame(i, i * 256, stamp + i * 16, samples[i * 256:(i + 1) * 256]), 0)
+            device.wake_render_changed.set()
+            return True
+
+        messages, result = [], {"id": "early"}
+        with (patch("jarvis.conversation_trial.LiveSession", EarlySession),
+              patch("jarvis.conversation_trial.BenchReply", GatedReply),
+              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho)):
+            task = asyncio.create_task(run_voice_turn(device, messages, result, opening, bytes(22080 * 4), 31,
+                                                       lambda _: None, wait_for_preconnected_wake=wake))
+            try:
+                await asyncio.wait_for(input_sent.wait(), 1)
+                self.assertFalse(output_started.is_set())
+                self.assertFalse(device.wake_terminal_event.is_set())
+                device.wake_playback_terminal = {"drained": True, "first_rendered_ms": stamp,
+                                                 "last_rendered_ms": stamp + 460, "rendered_samples": 22080}
+                device.wake_render_terminal_at = time.monotonic()
+                device.wake_terminal_event.set()
+                device.wake_render_changed.set()
+                await asyncio.wait_for(task, 1)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(output_started.is_set())
+        self.assertEqual(messages, ["ready", samples[:320].tobytes(), samples[320:640].tobytes(), "closed"])
+        self.assertEqual(result["opening_reference_mode"], "confirmed_prefix")
+        self.assertGreaterEqual(result["first_input_before_ack_terminal_ms"], 0)
+
+    async def test_live_opening_holds_capture_past_confirmed_render(self):
+        device = SimpleNamespace(clock_offset_ms=0, errors=[], wake_render_changed=asyncio.Event(),
+                                 wake_terminal_event=asyncio.Event(), wake_render_latest=(4800, 1000, 0))
+        with patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            stream = OpeningEchoInput(device, bytes(22080 * 4), 31, 1000)
+        samples = np.arange(7 * 256, dtype="<i2")
+        for i in range(7):
+            stream.offer(PCMFrame(i, i * 256, 1000 + i * 16, samples[i * 256:(i + 1) * 256]), 0)
+        for i in range(4):
+            pcm, _ = await stream.packet()
+            self.assertEqual(pcm, samples[i * 320:(i + 1) * 320].tobytes())
+        next_packet = asyncio.create_task(stream.packet())
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(next_packet.done())
+            device.wake_render_latest = (7200, 1000, 0)
+            device.wake_render_changed.set()
+            pcm, _ = await asyncio.wait_for(next_packet, 1)
+            self.assertEqual(pcm, samples[1280:1600].tobytes())
+        finally:
+            if not next_packet.done():
+                next_packet.cancel()
+                await asyncio.gather(next_packet, return_exceptions=True)
 
     async def test_preconnection_timeout_finalizes_without_sending_room_audio(self):
         messages, result = [], {"id": "preconnected"}

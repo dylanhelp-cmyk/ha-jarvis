@@ -1,3 +1,9 @@
+# 0.2.22
+
+- In the preconnected voice preview, begin sending cleaned microphone audio as the Voice PE confirms the corresponding wake clip samples. Hold reply playback until the complete wake clip is confirmed.
+- Show the timing of the local echo comparison and label the provider and playback intervals separately.
+- App-only update. Re-run Echo reference alignment and try one normal-volume preconnected voice preview with warm follow-up at +36 dB.
+
 # 0.2.21
 
 - Compare echo cancellation using the first confirmed portion of the cached wake clip with the full playback reference in the local Wake acknowledgment test. Keep this comparison on the App.

@@ -591,6 +591,8 @@ class Bench:
                 self.device.wake_details = {}
                 self.device.wake_playback_terminal = {}
                 self.device.wake_render_progress = None
+                self.device.wake_render_latest = None
+                self.device.wake_render_changed.clear()
                 self.device.wake_render_terminal_at = None
                 self.device.wake_terminal_event.clear()
                 result["wake_capture_mode"] = "device_armed" if armed else "prestarted_bench_capture"

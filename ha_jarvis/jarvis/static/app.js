@@ -160,6 +160,10 @@ function showResults(results) {
       if (warm.input_queue?.max_packet_age_ms != null) {
         add(card, 'p', 'Warm input maximum queue age: ' + warm.input_queue.max_packet_age_ms + ' ms.');
       }
+      if (timing?.speech_end_send_to_cloud_voice_ms != null) {
+        add(card, 'p', 'Warm reply: ' + timing.speech_end_send_to_cloud_voice_ms +
+          ' ms from sending the estimated speech end to receiving voice audio.');
+      }
     }
     if (result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;
@@ -170,7 +174,8 @@ function showResults(results) {
     for (const trial of result.trials) {
       const cold = trial.cold_startup_ms;
       add(card, 'p', (trial.turn === 'warm_followup' ? 'Warm follow-up' : trial.turn === 'first' ? 'First reply' : 'Trial ' + trial.trial) + ' / ' +
-        (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') : trial.latency_ms + ' ms') +
+        (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') :
+          trial.latency_ms + (result.kind === 'voice_turn' ? ' ms from returned voice to audible output' : ' ms')) +
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
@@ -178,6 +183,13 @@ function showResults(results) {
       'Pilot gaps ' + result.stability.dropout_count : result.stability.reason);
     if (result.render_alignment) add(card, 'p', result.render_alignment.status === 'processed' ?
       'AEC3 processed both confirmed render bursts and the gap between them.' : result.render_alignment.reason);
+    if (result.opening_prefix_echo) {
+      const prefix = result.opening_prefix_echo;
+      add(card, 'p', prefix.status === 'compared' ?
+        'The early speaker report arrived ' + prefix.first_report_to_terminal_ms + ' ms before the final report and covered ' +
+          prefix.overlapping_capture_ms + ' ms of microphone audio during playback.' :
+        'Early echo comparison unavailable. ' + prefix.reason);
+    }
     if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
       'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
     for (const warning of result.warnings || []) add(card, 'p', warning);
