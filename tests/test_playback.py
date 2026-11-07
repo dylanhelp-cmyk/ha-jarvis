@@ -53,6 +53,20 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([packet[3] for packet in ws.packets], [480, 480, 241])
         self.assertEqual(ws.commands, ["play_start", "play_drain"])
 
+    async def test_playback_prime_waits_for_a_bounded_jitter_reserve(self):
+        ws = FakeSocket()
+        ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "primed")
+
+        async def chunks():
+            yield bytes(480 * 4)
+            self.assertEqual(ws.commands, [])
+            yield bytes(480 * 4)
+            self.assertEqual(len(ws.packets), 2)
+            yield bytes(480 * 4)
+
+        await player.send_stream(chunks(), prime_packets=2)
+        self.assertEqual([packet[6] for packet in ws.packets], [0, 480, 960])
+
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
         device = SimpleNamespace(ws=old)

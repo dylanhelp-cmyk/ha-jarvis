@@ -1,3 +1,7 @@
+# 0.2.7
+
+- Prime streamed synthetic replies with up to 50 ms of PCM to absorb uneven cloud packet delivery. Compare one WebSocket reply session with the previous timing windows. App-only update.
+
 # 0.2.6
 
 - Compare direct-answer prompting with the baseline using the same synthetic audio. The diagnostics record whether a returned transcript mentions the expected answer. App-only update.

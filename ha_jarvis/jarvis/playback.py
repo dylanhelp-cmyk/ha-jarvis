@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import secrets
 import struct
 import time
@@ -154,7 +155,7 @@ class JackPlayback:
                 yield pcm[offset:offset + size]
         await self.send_stream(chunks())
 
-    async def send_stream(self, chunks):
+    async def send_stream(self, chunks, *, prime_packets=1):
         """Start once PCM exists and preserve sample timing across arriving chunks."""
         frame_bytes = CHANNELS * 2
         packet_bytes = PACKET_FRAMES * frame_bytes
@@ -174,22 +175,30 @@ class JackPlayback:
             if partial:
                 yield bytes(partial)
 
+        if not 1 <= prime_packets <= MAX_IN_FLIGHT // PACKET_FRAMES:
+            raise ValueError("Playback prime exceeds the bounded device window")
         source = packets()
-        first = await anext(source, None)
-        if first is None:
+        prime = deque()
+        for _ in range(prime_packets):
+            packet = await anext(source, None)
+            if packet is None:
+                break
+            prime.append(packet)
+        if not prime:
             raise ValueError("Playback stream is empty")
         await self.command("play_start")
         await asyncio.wait_for(self.started.wait(), 2)
         self.ensure_playing()
         anchor = time.monotonic()
         sequence = 0
-        payload = first
+        payload = prime.popleft()
+        advance_frames = (prime_packets - 1) * PACKET_FRAMES
         while payload is not None:
             while self.frames_sent - self.frames_accepted >= MAX_IN_FLIGHT:
                 self.progress.clear()
                 self.ensure_playing()
                 await asyncio.wait_for(self.progress.wait(), .15)
-            due = anchor + self.frames_sent / RATE
+            due = anchor + max(0, self.frames_sent - advance_frames) / RATE
             await asyncio.sleep(max(0.0, due - time.monotonic()))
             self.ensure_playing()
             if self.ws is not self.device.ws or self.ws.closed:
@@ -204,7 +213,7 @@ class JackPlayback:
             sequence += 1
             self.max_in_flight = max(self.max_in_flight, self.frames_sent - self.frames_accepted)
             await asyncio.wait_for(self.ws.send_bytes(header + payload), .15)
-            payload = await anext(source, None)
+            payload = prime.popleft() if prime else await anext(source, None)
         await self.command("play_drain")
         await asyncio.wait_for(self.finished.wait(), 3)
         if self.reason != "drained" or self.frames_accepted != self.frames_sent:

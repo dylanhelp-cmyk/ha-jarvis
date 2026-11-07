@@ -206,7 +206,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
             reply = BenchReply(device, f"{identity}-{index}")
             current = reply
             device.playback = reply.player
-            sender = asyncio.create_task(reply.player.send_stream(reply.chunks()))
+            sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5))
             stage(f"streaming synthetic turn {index}")
             origin = time.monotonic()
             input_samples = 0
@@ -255,6 +255,6 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         failure = str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
-    return {"transport": transport, "profile": profile, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+    return {"transport": transport, "profile": profile, "playback_prime_ms": 50, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}
