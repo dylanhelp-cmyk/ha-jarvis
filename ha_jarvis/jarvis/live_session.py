@@ -320,8 +320,11 @@ class LiveSession:
         await self._ws.send_json({"type": "session.commentary.append", "event_id": "cached_ack",
                                   "delegation_id": None, "content": self.greeting})
 
+    def media_deadline(self):
+        return self._started_at + self.max_seconds - self.close_timeout
+
     async def _watchdog(self):
-        await asyncio.sleep(max(0, self.max_seconds - self.close_timeout - (time.monotonic() - self._started_at)))
+        await asyncio.sleep(max(0, self.media_deadline() - time.monotonic()))
         await self.close()
 
     async def close(self):

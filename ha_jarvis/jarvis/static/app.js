@@ -155,8 +155,8 @@ function showResults(results) {
     } else if (result.speech_endpoint) {
       add(card, 'p', 'Speech-end estimate unavailable: ' + result.speech_endpoint.reason);
     }
-    if (result.warm_reply) {
-      const warm = result.warm_reply;
+    const warmTurns = result.warm_reply ? [result.warm_reply, ...(result.additional_warm_replies || [])] : [];
+    for (const warm of warmTurns) {
       const timing = warm.speech_endpoint;
       add(card, 'p', 'Warm speech end to audible reply: ' +
         (timing?.speech_end_to_audible_ms == null ? 'unavailable' : timing.speech_end_to_audible_ms + ' ms') +
@@ -169,6 +169,8 @@ function showResults(results) {
           ' ms from sending the estimated speech end to receiving voice audio.');
       }
     }
+    if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after 10 seconds without detected speech.');
+    if (result.conversation_end === 'session_limit') add(card, 'p', 'Conversation reached the preview session limit.');
     if (result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;
       add(card, 'p', 'GPT-Live ready ' + Math.abs(lead) + ' ms ' + (lead <= 0 ? 'before' : 'after') + ' wake receipt.');

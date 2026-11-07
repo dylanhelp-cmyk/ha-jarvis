@@ -219,8 +219,19 @@ def gain_packet(pcm, gain_db):
     return output.tobytes(), int(np.max(np.abs(samples))), int(np.max(np.abs(output.astype(np.int32)))), clipped
 
 
+REPLY_DRAIN_SECONDS = 8
+
+
+class FollowUpEnded(TimeoutError):
+    """The local policy ended the follow-up window."""
+
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
+
+
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
-                       warm_follow_up=False, source_prime_packets=12):
+                       warm_follow_up=False, source_prime_packets=12, input_deadline=None):
     output_gain_db = -6
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput)
@@ -249,12 +260,14 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
             now = time.monotonic()
-            if warm_follow_up and inactivity.should_close(now):
-                raise TimeoutError("No spoken reply after 10 seconds without detected speech")
-            if now >= deadline:
-                raise TimeoutError("No spoken reply before the preview time limit")
             if device.errors or session.metrics.error or sender.done() or not device.info.get("jack_plugged"):
                 raise RuntimeError("The microphone, cloud session or jack playback failed")
+            if input_deadline is not None and now >= input_deadline:
+                raise FollowUpEnded("session_limit", "The conversation reached the preview session limit")
+            if warm_follow_up and inactivity.should_close(now):
+                raise FollowUpEnded("inactivity", "No spoken reply after 10 seconds without detected speech")
+            if input_deadline is None and now >= deadline:
+                raise TimeoutError("No spoken reply before the preview time limit")
             packet, captured_at = await stream.packet()
             now = time.monotonic()
             if sent == 0:
@@ -289,7 +302,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
         result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
         phase("playing the GPT-Live reply through the jack")
-        async with asyncio.timeout(8):
+        async with asyncio.timeout(REPLY_DRAIN_SECONDS):
             while not reply.ready_to_drain(time.monotonic()):
                 if sender.done():
                     sender.result()
@@ -328,8 +341,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
-                         follow_up=False, wait_for_preconnected_wake=None):
-    """Open once on wake and optionally measure a fresh-input warm follow-up."""
+                         follow_up=False, wait_for_preconnected_wake=None, standby=False):
+    """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
     startup = None
@@ -398,20 +411,34 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 "first_report_rendered_samples": samples,
                 "first_report_to_terminal_ms": round((terminal_at - received_at) * 1000, 1),
             }
-        if follow_up:
-            # This explicitly selected measurement uses new input after the first
-            # reply has drained. It does not carry the cold input queue forward.
+        input_deadline = session.media_deadline() - REPLY_DRAIN_SECONDS if standby else None
+        while follow_up:
             phase("clearing the speaker echo tail")
             await asyncio.sleep(.18)
-            warm = result["warm_reply"] = {"id": result["id"] + "-warm"}
             fresh_at = time.monotonic()
+            if input_deadline is not None and fresh_at >= input_deadline:
+                result["conversation_end"] = "session_limit"
+                break
+            turn_number = len(replies) + 1
+            warm = {"id": f'{result["id"]}-warm-{turn_number}'}
             stream = CleanInput(delay_ms, fresh_after=fresh_at, passthrough_after=fresh_at)
             try:
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
-                                                  "listening for your warm follow-up",
-                                                  gain_db=gain_db, max_age_ms=250, warm_follow_up=True))
+                                                  "listening for your warm follow-up", gain_db=gain_db,
+                                                  max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline))
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+                if standby and isinstance(exc, FollowUpEnded):
+                    result["conversation_end"] = exc.reason
+                    break
                 warm.update(status="unavailable", error=str(exc) or type(exc).__name__)
+                if standby:
+                    result["conversation_end"] = "error"
+            if turn_number == 2:
+                result["warm_reply"] = warm
+            else:
+                result.setdefault("additional_warm_replies", []).append(warm)
+            if not standby or "error" in warm:
+                break
         return replies
     finally:
         device.pcm_consumer = None
@@ -425,7 +452,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 await asyncio.wait_for(ws.send_json({"type": "play_stop",
                     "playback_id": wake["ack_playback_id"], "generation": wake["ack_generation"]}), 1)
         metrics = await session.close()
-        result["cloud"] = {"transport": "websocket", "profile": "warm follow-up preview" if follow_up else "one-turn preview",
+        profile = "wake standby" if standby else ("warm follow-up preview" if follow_up else "one-turn preview")
+        result["cloud"] = {"transport": "websocket", "profile": profile,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
                            "finalization_confirmed": metrics.finalization_confirmed,
                            "usage_seconds": metrics.usage_seconds}

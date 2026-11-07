@@ -442,15 +442,15 @@ class Bench:
         result["metric"] = "returned_voice_to_audible_reply"
         replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
                                        gain_db=gain_db, follow_up=follow_up,
-                                       wait_for_preconnected_wake=ready_wake if preconnect else None)
+                                       wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby)
         if not replies:
             return
         await asyncio.sleep(.25)
         await device.end()
         captured, capture_start = device.recording()
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
-        for index, reply in enumerate(replies):
-            turn = result if index == 0 else result["warm_reply"]
+        turns = [result, result.get("warm_reply"), *result.get("additional_warm_replies", [])]
+        for index, (reply, turn) in enumerate(zip(replies, turns)):
             output = np.frombuffer(reply.pcm, dtype="<i2")[::2]
             turn["reply_output_signal"] = {
                 "peak_pcm": int(np.max(np.abs(output.astype(np.int32)), initial=0)),
@@ -467,9 +467,11 @@ class Bench:
             if endpoint["status"] == "estimated" and match["status"] == "detected":
                 endpoint["speech_end_to_audible_ms"] = round(
                     endpoint["speech_end_to_cloud_voice_ms"] + match["latency_ms"], 1)
-        if follow_up and len(replies) == 1:
-            result["trials"].append({"trial": 2, "turn": "warm_followup", "status": "unavailable",
-                                     "reason": result["warm_reply"]["error"]})
+        if len(turns) > len(replies):
+            failed = turns[len(replies)]
+            if failed and "error" in failed:
+                result["trials"].append({"trial": len(replies) + 1, "turn": "warm_followup",
+                                         "status": "unavailable", "reason": failed["error"]})
         if follow_up and any(t["status"] == "detected" for t in result["trials"]):
             result["status"] = "measured"
 
@@ -639,7 +641,8 @@ class Bench:
             result = self.results[0]
             if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
                 self.results.pop(0)
-            elif not result.get("cloud", {}).get("finalization_confirmed") or result["status"] == "failed":
+            elif (not result.get("cloud", {}).get("finalization_confirmed")
+                    or result["status"] == "failed" or result.get("conversation_end") == "error"):
                 return
             device = self.device.snapshot()
             if (not device["connected"] or device.get("muted") or not device.get("raw_ready")
@@ -683,7 +686,10 @@ class Bench:
             if armed:
                 self.opening_audio = OpeningAudio()
                 self.device.pcm_consumer = self.opening_audio.offer
-                await self.device.begin(result["id"], (55000 if follow_up else 30000) if kind == "voice_turn" else 5000,
+                duration_ms = 5_000
+                if kind == "voice_turn":
+                    duration_ms = 65_000 if standby else (55_000 if follow_up else 30_000)
+                await self.device.begin(result["id"], duration_ms,
                                         arm_timeout_ms=STANDBY_ARM_MS if standby else (19000 if preconnect else 32000))
             else:
                 await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)

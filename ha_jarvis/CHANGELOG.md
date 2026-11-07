@@ -1,3 +1,7 @@
+# 0.2.31
+
+- Keep listening for more follow-ups during wake standby. Ten seconds without detected speech ends the conversation and the App re-arms after cloud finalization. The existing session time limit still applies.
+
 # 0.2.30
 
 - Add opt-in wake standby to Voice preview. It renews the local wake arm and opens GPT-Live after each wake. Standby uses the existing budget and stops on restart, device loss or an unsettled cloud session.

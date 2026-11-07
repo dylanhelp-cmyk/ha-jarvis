@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import (CleanInput, OpeningEchoInput, SpeechEndpoint, gain_packet,
+from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
                                        run_voice_turn, stream_reply)
 from jarvis.opening_audio import OpeningAudio
 
@@ -230,6 +230,44 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
                                         warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
             self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)
+
+    async def test_standby_keeps_multiple_warm_turns_on_one_connection(self):
+        for ending in (FollowUpEnded("inactivity", "No detected speech"),
+                       FollowUpEnded("session_limit", "Preview time limit"),
+                       RuntimeError("Jack disconnected")):
+            with self.subTest(ending=ending):
+                class StandbySession(SimulatedSession):
+                    def media_deadline(self):
+                        return time.monotonic() + 50
+
+                event = asyncio.Event()
+                event.set()
+                device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=event, errors=[],
+                                         wake_playback_terminal={"drained": True, "rendered_samples": 480,
+                                                                 "first_rendered_ms": 10, "last_rendered_ms": 20},
+                                         clock_offset_ms=0)
+                opening = OpeningAudio()
+                opening.offer(PCMFrame(0, 0, int(time.monotonic() * 1000), np.zeros(256, dtype="<i2")), 0)
+                messages, result = [], {"id": "standby"}
+                returned = [object() for _ in range(3)]
+                with (patch("jarvis.conversation_trial.LiveSession", StandbySession),
+                      patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+                      patch("jarvis.conversation_trial.stream_reply", side_effect=[*returned, ending]) as play):
+                    replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4),
+                                                   31, lambda _: None, follow_up=True, standby=True)
+
+                self.assertEqual(replies, returned)
+                self.assertEqual(messages, ["ready", "closed"])
+                self.assertEqual(len({id(call.args[1]) for call in play.call_args_list}), 1)
+                self.assertEqual(result["warm_reply"]["id"], "standby-warm-2")
+                extra = result["additional_warm_replies"]
+                self.assertEqual(extra[0]["id"], "standby-warm-3")
+                if isinstance(ending, FollowUpEnded):
+                    self.assertEqual(result["conversation_end"], ending.reason)
+                    self.assertEqual(len(extra), 1)
+                else:
+                    self.assertEqual(result["conversation_end"], "error")
+                    self.assertEqual(extra[1]["error"], "Jack disconnected")
 
     async def test_preconnected_input_can_start_before_ack_drain_but_speaker_cannot(self):
         input_sent = asyncio.Event()

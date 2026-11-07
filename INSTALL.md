@@ -8,7 +8,7 @@ Local tests make no OpenAI calls. API credentials stay in the App's local data a
 
 To try a voice reply, run **Echo reference alignment** with the speakers in their usual position. Then select **Voice preview**, review and confirm the per-run room microphone consent, and start. When armed, say “Hey Jarvis” followed by a short question. To measure a warm turn on the same connection, enable the optional follow-up and wait for “listening for your warm follow-up” before speaking again. The preview sends cleaned audio to OpenAI GPT-Live and uses the API test budget. Repeat alignment after moving the speakers or restarting the App or Voice PE. Interruptions and Assist actions are future milestones.
 
-To keep the preview ready between uses, select **Stay ready for “Hey Jarvis”**, review the repeated audio consent and choose **Enable wake standby**. Each wake can start a budgeted preview with one warm follow-up. **Stop wake standby** disarms it. An App restart also turns standby off.
+To keep the preview ready between uses, select **Stay ready for “Hey Jarvis”**, review the repeated audio consent and choose **Enable wake standby**. Each wake can start a budgeted conversation with multiple follow-ups. After a reply finishes, standby listens for 10 seconds of inactivity and then returns to local wake detection. The preview session time limit still applies. **Stop wake standby** disarms it. An App restart also turns standby off.
 
 ## Recovery
 

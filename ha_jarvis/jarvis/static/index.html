@@ -75,7 +75,7 @@
             <label class="check"><input id="voice-follow-up" type="checkbox"><span>Measure one warm follow-up on the same GPT-Live connection. Wait until the App says “listening for your warm follow-up” before speaking again.</span></label>
             <label class="check"><input id="voice-standby" type="checkbox"><span>Stay ready for “Hey Jarvis” after each preview. This authorizes sending cleaned room microphone audio to OpenAI after each wake and using the API test budget until you stop standby. The idle microphone stays local. Standby ends on app restart.</span></label>
             <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from the selected voice mode to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
-            <p class="field-help">This preview ends after the selected one or two replies. Interruptions and device actions are outside this preview. Run Echo reference alignment first.</p>
+            <p class="field-help">The single-run preview ends after the selected one or two replies. Wake standby supports multiple follow-ups. Wait for the reply to finish before speaking. Device actions are outside this preview. Run Echo reference alignment first.</p>
           </div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
