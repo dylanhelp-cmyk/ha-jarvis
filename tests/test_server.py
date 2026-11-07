@@ -153,6 +153,57 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(simulator, return_exceptions=True)
             await ws.close()
 
+    async def test_armed_capture_preserves_first_samples_and_disarms(self):
+        from jarvis.opening_audio import OpeningAudio
+        ws = await self.audio.ws_connect("/device")
+        device = self.bench.device
+        try:
+            await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
+                                "sample_rate": RATE, "channels": 1, "raw_ready": True, "muted": False,
+                                "wake_capture_protocol": 1})
+            await ws.receive_json(timeout=2)
+            device.clock_offset_ms = 0
+            opening = OpeningAudio()
+            device.pcm_consumer = opening.offer
+            arm = asyncio.create_task(device.begin("wake-1", 5000, clock_synced=True, arm_timeout_ms=32000))
+            command = await ws.receive_json(timeout=2)
+            self.assertEqual(command["type"], "arm_wake_capture")
+            await ws.send_json({"type": "wake_capture_armed", "capture_id": "wake-1"})
+            await arm
+            self.assertTrue(device.snapshot()["wake_capture_armed"])
+            self.assertFalse(device.snapshot()["capturing"])
+            await ws.send_json({"type": "wake_word", "capture_id": "different", "wake_word": "Hey Jarvis"})
+            stamp = int(time.monotonic() * 1000)
+            await ws.send_json({"type": "wake_word", "capture_id": "wake-1",
+                                "wake_word": "Hey Jarvis", "device_time_ms": stamp})
+            await asyncio.wait_for(device.wake_event.wait(), 2)
+            self.assertEqual(device.wake_details["capture_id"], "wake-1")
+            await ws.send_json({"type": "capture_started", "capture_id": "wake-1"})
+            await asyncio.wait_for(device.started.wait(), 2)
+            pcm = np.arange(320, dtype="<i2").tobytes()
+            await ws.send_bytes(FRAME.pack(b"JPCM", 1, 1, 320, 0, 0, stamp) + pcm)
+            ending = asyncio.create_task(device.end())
+            self.assertEqual((await ws.receive_json(timeout=2))["type"], "stop_capture")
+            await ws.send_json({"type": "capture_stopped", "capture_id": "wake-1",
+                                "reason": "requested", "dropped_frames": 0})
+            await ending
+            frames, result = opening.release(time.monotonic())
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(frames[0].samples.tobytes(), pcm)
+
+            arm = asyncio.create_task(device.begin("wake-2", 5000, clock_synced=True, arm_timeout_ms=32000))
+            await ws.receive_json(timeout=2)
+            await ws.send_json({"type": "wake_capture_armed", "capture_id": "wake-2"})
+            await arm
+            ending = asyncio.create_task(device.end())
+            self.assertEqual((await ws.receive_json(timeout=2))["capture_id"], "wake-2")
+            await ws.send_json({"type": "wake_capture_disarmed", "capture_id": "wake-2", "reason": "requested"})
+            await ending
+            self.assertFalse(device.snapshot()["wake_capture_armed"])
+            self.assertEqual(device.frames, [])
+        finally:
+            await ws.close()
+
     async def test_verified_greeting_is_preloaded_without_streaming_it_as_playback(self):
         from jarvis.acknowledgment import cache_path, candidate_identity
         pcm = np.full(RATE // 4, 900, dtype="<i2").tobytes()

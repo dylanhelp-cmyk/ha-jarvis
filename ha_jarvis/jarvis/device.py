@@ -81,6 +81,9 @@ class Device:
         self.info = {}
         self.capture_id = None
         self.started = asyncio.Event()
+        self.armed = asyncio.Event()
+        self.awaiting_wake = False
+        self.arm_stop_reason = None
         self.stopped = asyncio.Event()
         self.frames = []
         self._capture_samples = 0
@@ -104,7 +107,9 @@ class Device:
 
     def snapshot(self):
         return {"connected": self.ws is not None and not self.ws.closed, **self.info,
-                "clock_rtt_ms": self.clock_rtt_ms, "capturing": self.capture_id is not None,
+                "clock_rtt_ms": self.clock_rtt_ms,
+                "capturing": self.capture_id is not None and (not self.awaiting_wake or self.started.is_set()),
+                "wake_capture_armed": self.awaiting_wake and self.armed.is_set() and not self.started.is_set(),
                 "wake_count": self.wake_count,
                 "last_wake_age_ms": (round((time.monotonic() - self.last_wake_at) * 1000)
                                      if self.last_wake_at is not None else None)}
@@ -147,14 +152,21 @@ class Device:
                 if self.clock_rtt_ms is None or rtt < self.clock_rtt_ms:
                     self.clock_rtt_ms = rtt
                     self.clock_offset_ms = (sent + received) / 2 - float(message["device_time_ms"])
-        elif kind == "capture_started" and message.get("capture_id") == self.capture_id:
+        elif kind == "wake_capture_armed" and self.awaiting_wake and message.get("capture_id") == self.capture_id:
+            self.armed.set()
+        elif kind == "wake_capture_disarmed" and self.awaiting_wake and message.get("capture_id") == self.capture_id:
+            reason = message.get("reason")
+            self.arm_stop_reason = reason if reason in ("requested", "muted", "arm_timeout",
+                "raw_stage_unverified", "microphone_not_running") else "device_disarmed"
+            self.stopped.set()
+        elif kind == "capture_started" and self.capture_id is not None and message.get("capture_id") == self.capture_id:
             for key in ("connection_generation", "capture_generation"):
                 number = message.get(key)
                 if type(number) is int and 0 <= number <= 0xFFFFFFFF:
                     self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
-            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id"):
+            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol"):
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")
@@ -163,9 +175,10 @@ class Device:
             if isinstance(word, str) and word.strip().casefold().replace("_", " ") == "hey jarvis":
                 self.wake_count += 1
                 self.last_wake_at = time.monotonic()
-                if not self.wake_event.is_set():
+                if (not self.wake_event.is_set() and
+                        (not self.awaiting_wake or message.get("capture_id") == self.capture_id)):
                     self.wake_details = {key: message[key] for key in
-                        ("device_time_ms", "ack_playback_id", "ack_generation", "ack_cache_id",
+                        ("device_time_ms", "capture_id", "ack_playback_id", "ack_generation", "ack_cache_id",
                          "ack_samples", "ack_reason") if key in message}
                     self.wake_playback_terminal = {}
                     self.wake_event.set()
@@ -181,6 +194,9 @@ class Device:
 
     def receive_pcm(self, data):
         if self.capture_id is None:
+            return
+        if self.awaiting_wake and not self.started.is_set():
+            self.errors.append("Microphone PCM arrived before the armed capture started")
             return
         frame = decode_frame(data)
         if self.next_sample is None and (frame.first_sample != 0 or frame.sequence != 0):
@@ -217,7 +233,7 @@ class Device:
                           span_difference_ms=round(span_ms - sample_span_ms, 1))
         return health
 
-    async def begin(self, capture_id, duration_ms, *, clock_synced=False):
+    async def begin(self, capture_id, duration_ms, *, clock_synced=False, arm_timeout_ms=None):
         if not self.snapshot()["connected"] or self.info.get("muted"):
             raise ValueError("Voice PE must be connected and physically unmuted")
         if self.info.get("raw_ready") is not True:
@@ -231,21 +247,28 @@ class Device:
         diagnostics = self.info.get("diagnostics", {})
         self.capture_session = {key: diagnostics[key] for key in ("boot_id", "connection_generation") if key in diagnostics}
         self.started.clear()
+        self.armed.clear()
+        self.arm_stop_reason = None
         self.stopped.clear()
+        self.awaiting_wake = arm_timeout_ms is not None
         if not clock_synced:
             await self.sync()
-        await self.ws.send_json({"type": "start_capture", "capture_id": capture_id, "duration_ms": duration_ms})
-        await asyncio.wait_for(self.started.wait(), timeout=5)
+        command = {"type": "start_capture", "capture_id": capture_id, "duration_ms": duration_ms}
+        if self.awaiting_wake:
+            command.update(type="arm_wake_capture", arm_timeout_ms=arm_timeout_ms)
+        await self.ws.send_json(command)
+        await asyncio.wait_for((self.armed if self.awaiting_wake else self.started).wait(), timeout=5)
 
     async def end(self):
         if self.capture_id is not None and self.ws is not None and not self.ws.closed:
             await self.ws.send_json({"type": "stop_capture", "capture_id": self.capture_id})
-            if self.started.is_set() and not self.stopped.is_set():
+            if (self.started.is_set() or self.armed.is_set()) and not self.stopped.is_set():
                 try:
                     await asyncio.wait_for(self.stopped.wait(), timeout=3)
                 except asyncio.TimeoutError:
                     self.errors.append("Device did not confirm capture completion and drop count")
         self.capture_id = None
+        self.awaiting_wake = False
 
     def recording(self):
         if not self.frames:

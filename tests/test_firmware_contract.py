@@ -80,6 +80,44 @@ int main() {
             actual = bytes.fromhex(subprocess.check_output([str(exe)], text=True))
         self.assertEqual(actual, struct.pack("<4sBBHIQI", b"JPCM", 1, 1, 320, 0x12345678, 0x123456789abcdef0, 0xfedcba98))
 
+    def test_wake_arm_is_one_shot_epoch_bound_and_wrap_safe(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        command = [compiler] if compiler else ([sys.executable, "-m", "ziglang", "c++"]
+                   if importlib.util.find_spec("ziglang") else None)
+        if command is None:
+            self.skipTest("Host C++ compiler unavailable")
+        source = r'''
+#include <cassert>
+#include "wake_capture.h"
+using namespace esphome::jarvis_stream;
+
+int main() {
+  WakeCaptureArm arm{"trial", 10000, 3, 12};  // deadline wraps over UINT32_MAX
+  assert(!arm.can_fire("Hey Siri", 0xfffffff9, 12));
+  assert(!arm.can_fire("Hey Jarvis", 0xfffffff9, 13));
+  assert(arm.can_fire("Hey Jarvis", 0xfffffff9, 12));
+  assert(arm.can_fire("Hey Jarvis", 2, 12));
+  assert(!arm.can_fire("Hey Jarvis", 3, 12));
+  const auto fired = arm.take();
+  assert(fired.id == "trial" && fired.duration_ms == 10000);
+  assert(!arm.pending() && !arm.can_fire("Hey Jarvis", 2, 12));
+
+  assert(wake_capture_sample_offset(512, 100, 101) == 512);
+  assert(wake_capture_sample_offset(512, 101, 101) == 512);
+  assert(wake_capture_sample_offset(512, 109, 101) == 384);
+  assert(wake_capture_sample_offset(512, 133, 101) == 0);
+  assert(wake_capture_sample_offset(500, 132, 101) == 4);
+  assert(wake_capture_sample_offset(512, 4, 0xfffffffc) == 384);
+}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            tmp = Path(folder)
+            cpp, exe = tmp / "wake_capture.cpp", tmp / "wake_capture.exe"
+            cpp.write_text(source)
+            subprocess.run([*command, "-std=c++17", "-I", str(FIRMWARE / "components/jarvis_stream"),
+                            str(cpp), "-o", str(exe)], check=True, capture_output=True, timeout=180)
+            subprocess.run([str(exe)], check=True, timeout=5)
+
     def test_hardware_and_privacy_configuration(self):
         main = (FIRMWARE / "voice-pe-testbench.yaml").read_text()
         package = (FIRMWARE / "voice-pe-package.yaml").read_text()

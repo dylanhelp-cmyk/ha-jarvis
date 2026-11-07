@@ -96,3 +96,26 @@ class StreamingEcho:
             self._processed += FRAME_SAMPLES
         self._pending = pcm[end:].copy()
         return b"".join(cleaned)
+
+
+def check_opening_reference(frames, pcm, clock_offset_ms, first_rendered_ms, acoustic_onset, voiced_start):
+    """Exercise the acknowledged clip as an AEC3 reference on an actual wake capture."""
+    scope = "offline wake clip alignment and sample accounting"
+    if type(first_rendered_ms) is not int or acoustic_onset is None or not frames:
+        return {"status": "unavailable", "scope": scope, "reason": "Missing rendered or acoustic onset"}
+    rendered_at = (first_rendered_ms + clock_offset_ms) / 1000
+    delay_ms = (acoustic_onset - rendered_at - voiced_start / SAMPLE_RATE) * 1000
+    if not 0 <= delay_ms <= 300:
+        return {"status": "unavailable", "scope": scope, "reason": "Unreliable render-to-microphone alignment"}
+    try:
+        echo = StreamingEcho(delay_ms)
+        # This single verified render drained. Digital silence after it is
+        # known for this bench window, which does not start any other playback.
+        echo.render(pcm + bytes(4 * 48000 * 3), rendered_at, first_frame=0)
+        processed = sum(len(echo.capture(frame, clock_offset_ms)) // 2 for frame in frames)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        return {"status": "unavailable", "scope": scope, "reason": type(exc).__name__}
+    total = sum(len(frame.samples) for frame in frames)
+    return {"status": "processed", "scope": scope, "estimated_delay_ms": round(delay_ms, 1),
+            "processed_samples": processed, "partial_final_block_samples": total - processed,
+            "near_end_preservation_verified": False}

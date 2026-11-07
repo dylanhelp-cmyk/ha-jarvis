@@ -1,3 +1,7 @@
+# 0.2.8
+
+- With firmware 0.2.3, arm the wake bench without capturing audio until the Voice PE detects Hey Jarvis. Report the first capture timestamp, bounded opening buffer and offline wake-clip echo alignment. Room audio stays local.
+
 # 0.2.7
 
 - Prime streamed synthetic replies with up to 50 ms of PCM to absorb uneven cloud packet delivery. Compare one WebSocket reply session with the previous timing windows. App-only update.

@@ -272,7 +272,10 @@ bool JarvisStream::verify_hardware_() {
 
 void JarvisStream::set_muted(bool muted) {
   muted_ = muted;
-  if (muted) active_ = false;
+  if (muted) {
+    active_ = false;
+    disarm_wake_capture_("muted");
+  }
 }
 
 void JarvisStream::record_fault_(FaultReason reason, const esp_websocket_event_data_t *data) {
@@ -320,18 +323,25 @@ void JarvisStream::send_state_() {
     root["raw_ready"] = hardware_ready_;
     root["jack_plugged"] = jack_plugged_;
     root["playback_protocol"] = 1;
+    root["wake_capture_protocol"] = 1;
     ack_cache_state_(root);
     root["xmos_version"] = xmos_version_;
     diagnostics_json_(root["diagnostics"].to<JsonObject>());
   }));
 }
 
-void JarvisStream::command_(const char *text) {
+void JarvisStream::command_(const char *text, uint32_t epoch) {
   bool visited = false;
-  json::parse_json(std::string(text), [this, &visited](JsonObject root) {
+  json::parse_json(std::string(text), [this, &visited, epoch](JsonObject root) {
     visited = true;
+    if (!connected_ || epoch != epoch_) return false;
     const std::string type = root["type"] | "";
-    if (type == "hello_ok") { authenticated_ = true; send_state_(); return true; }
+    if (type == "hello_ok") {
+      authenticated_ = true;
+      if (connected_ && epoch == epoch_) send_state_();
+      else authenticated_ = false;
+      return true;
+    }
     if (!authenticated_) return false;
     if (type == "clock_sync") {
       const uint32_t stamp = now_ms_();
@@ -343,45 +353,87 @@ void JarvisStream::command_(const char *text) {
       ack_cache_command_(type, root);
     } else if (type == "play_start" || type == "play_stop" || type == "play_drain") {
       playback_command_(type, root);
-    } else if (type == "stop_capture") {
-      const std::string id = root["capture_id"] | "";
-      if (id == capture_id_) stop_capture_("requested");
-    } else if (type == "start_capture") {
-      const std::string id = root["capture_id"] | "";
-      const uint32_t duration = root["duration_ms"] | uint32_t(0);
-      const char *error = nullptr;
-      if (id.empty() || id.size() > 128 || duration == 0 || duration > 120000) error = "invalid_capture";
-      else if (!capture_id_.empty()) error = "already_capturing";
-      else if (muted_) error = "muted";
-      else if (!(hardware_ready_ = verify_hardware_())) error = "raw_stage_unverified";
-      else if (!mic_->is_running()) error = "microphone_not_running";
-      if (error) {
-        send_json_(json::build_json([&](JsonObject out) {
-          out["type"] = "error"; out["capture_id"] = id; out["reason"] = error; out["message"] = error;
-        }));
-        return false;
-      }
-      xQueueReset(audio_queue_);
-      capture_id_ = id;
-      dropped_ = 0;
-      portENTER_CRITICAL(&capture_lock_);
-      ++generation_; sample_counter_ = 0; sequence_ = 0; deadline_ = now_ms_() + duration;
-      portEXIT_CRITICAL(&capture_lock_);
-      acknowledged_generation_ = 0;
-      pcm_send_history_.start(connection_generation_.load(), generation_.load());
-      // Arm locally, but the worker sends no PCM until this acknowledgement is actually transmitted.
-      active_ = true;
-      if (!send_json_(json::build_json([&](JsonObject out) {
-        out["type"] = "capture_started"; out["capture_id"] = id;
-        out["connection_generation"] = connection_generation_.load();
-        out["capture_generation"] = generation_.load();
-        out["first_sample"] = 0; out["device_time_ms"] = now_ms_();
-        out["timing"] = "estimated_callback_minus_block_duration";
-      }), true)) stop_capture_("transport_error");
+    } else if (type == "stop_capture" || type == "start_capture" || type == "arm_wake_capture") {
+      capture_command_(type, root, epoch);
     }
     return true;
   });
   if (!visited) record_fault_(FaultReason::MALFORMED_MESSAGE);
+}
+
+void JarvisStream::capture_command_(const std::string &type, JsonObject root, uint32_t epoch) {
+  const std::string id = root["capture_id"] | "";
+  if (type == "stop_capture") {
+    if (id.empty()) return;
+    if (id == wake_capture_arm_.id) disarm_wake_capture_("requested");
+    else if (id == capture_id_) stop_capture_("requested");
+    return;
+  }
+
+  const bool arm = type == "arm_wake_capture";
+  const uint32_t duration = root["duration_ms"] | uint32_t(0);
+  const uint32_t wait = root["arm_timeout_ms"] | uint32_t(0);
+  const char *error = nullptr;
+  if (id.empty() || id.size() > 128 || !duration || duration > WakeCaptureArm::MAX_DURATION_MS ||
+      (arm && (!wait || wait > WakeCaptureArm::MAX_WAIT_MS))) error = "invalid_capture";
+  else if (!capture_id_.empty()) error = "already_capturing";
+  else if (wake_capture_arm_.pending()) error = "already_armed";
+  else if (muted_) error = "muted";
+  else if (!(hardware_ready_ = verify_hardware_())) error = "raw_stage_unverified";
+  else if (!mic_->is_running()) error = "microphone_not_running";
+  if (error) {
+    send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "error"; out["capture_id"] = id; out["reason"] = error; out["message"] = error;
+    }));
+    return;
+  }
+
+  const uint32_t now = now_ms_();
+  if (arm) {
+    if (!connected_ || !authenticated_ || epoch != epoch_) return;
+    wake_capture_arm_ = {id, duration, now + wait, epoch};
+    if (!send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "wake_capture_armed"; out["capture_id"] = id;
+    }))) wake_capture_arm_ = {};
+  } else if (begin_capture_(id, duration, now, false, epoch)) {
+    send_capture_started_(now);
+  }
+}
+
+bool JarvisStream::begin_capture_(const std::string &id, uint32_t duration, uint32_t started_ms, bool from_wake,
+                                  uint32_t expected_epoch) {
+  if (!capture_id_.empty() || muted_ || !authenticated_ || !connected_ || expected_epoch != epoch_) return false;
+  xQueueReset(audio_queue_);
+  capture_id_ = id;
+  dropped_ = 0;
+  portENTER_CRITICAL(&capture_lock_);
+  if (++generation_ == 0) ++generation_;  // Zero means no start acknowledgement in the worker.
+  sample_counter_ = 0; sequence_ = 0; deadline_ = started_ms + duration;
+  capture_from_wake_ = from_wake;
+  capture_wake_ms_ = started_ms;
+  portEXIT_CRITICAL(&capture_lock_);
+  acknowledged_generation_ = 0;
+  pcm_send_history_.start(connection_generation_.load(), generation_.load());
+  // The callback can enqueue immediately. The worker sends no PCM until the
+  // capture_started acknowledgement is actually transmitted.
+  active_ = true;
+  if (!authenticated_ || !connected_ || expected_epoch != epoch_) {
+    stop_capture_("disconnected");
+    return false;
+  }
+  return true;
+}
+
+bool JarvisStream::send_capture_started_(uint32_t started_ms) {
+  if (send_json_(json::build_json([&](JsonObject out) {
+    out["type"] = "capture_started"; out["capture_id"] = capture_id_;
+    out["connection_generation"] = connection_generation_.load();
+    out["capture_generation"] = generation_.load();
+    out["first_sample"] = 0; out["device_time_ms"] = started_ms;
+    out["timing"] = "estimated_callback_minus_block_duration";
+  }), true)) return true;
+  stop_capture_("transport_error");
+  return false;
 }
 
 void JarvisStream::ack_cache_state_(JsonObject out) {
@@ -664,13 +716,19 @@ void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
   // MicrophoneSource supplies 16-bit, mono, gain=1. Never block its high-priority task on Wi-Fi.
   const size_t samples = data.size() / 2;
   const uint32_t callback_ms = now_ms_();
-  for (size_t offset = 0; offset < samples; offset += MAX_SAMPLES) {
+  size_t offset = 0;
+  uint32_t callback_generation;
+  portENTER_CRITICAL(&capture_lock_);
+  callback_generation = generation_;
+  if (capture_from_wake_) offset = wake_capture_sample_offset(samples, callback_ms, capture_wake_ms_);
+  portEXIT_CRITICAL(&capture_lock_);
+  for (; offset < samples; offset += MAX_SAMPLES) {
     AudioPacket packet{};
     packet.samples = std::min(MAX_SAMPLES, samples - offset);
     uint64_t first_sample;
     uint32_t sequence;
     portENTER_CRITICAL(&capture_lock_);
-    if (!active_ || muted_ || static_cast<int32_t>(callback_ms - deadline_) >= 0) {
+    if (!active_ || muted_ || callback_generation != generation_ || static_cast<int32_t>(callback_ms - deadline_) >= 0) {
       portEXIT_CRITICAL(&capture_lock_); return;
     }
     packet.generation = generation_;
@@ -685,8 +743,19 @@ void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
   }
 }
 
+void JarvisStream::disarm_wake_capture_(const char *reason) {
+  if (!wake_capture_arm_.pending()) return;
+  auto arm = wake_capture_arm_.take();
+  if (authenticated_ && arm.epoch == epoch_) {
+    send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "wake_capture_disarmed"; out["capture_id"] = arm.id; out["reason"] = reason;
+    }));
+  }
+}
+
 void JarvisStream::stop_capture_(const char *reason) {
   active_ = false;
+  disarm_wake_capture_(reason);
   if (audio_queue_) xQueueReset(audio_queue_);
   if (capture_id_.empty()) return;
   uint64_t count;
@@ -707,6 +776,18 @@ void JarvisStream::stop_capture_(const char *reason) {
 void JarvisStream::wake_word(const std::string &word) {
   if (muted_ || !authenticated_ || !connected_ || shutting_down_) return;
   const uint32_t detected_ms = now_ms_();
+  bool capture_started = false;
+  if (wake_capture_arm_.pending()) {
+    if (wake_capture_arm_.expired(detected_ms)) disarm_wake_capture_("arm_timeout");
+    else if (wake_capture_arm_.can_fire(word, detected_ms, epoch_.load())) {
+      if (!hardware_ready_) disarm_wake_capture_("raw_stage_unverified");
+      else if (!mic_->is_running()) disarm_wake_capture_("microphone_not_running");
+      else {
+        auto arm = wake_capture_arm_.take();  // One shot, including if start loses the connection.
+        capture_started = begin_capture_(arm.id, arm.duration_ms, detected_ms, true, arm.epoch);
+      }
+    }
+  }
   const char *reason = word == "Hey Jarvis" ? speaker_blocked_() : "different_wake_word";
   if (!reason && !ack_cache_.frames()) reason = "cache_missing";
   std::string ack_playback_id;
@@ -724,7 +805,11 @@ void JarvisStream::wake_word(const std::string &word) {
       out["ack_cache_id"] = ack_cache_.id();
       out["ack_samples"] = ack_cache_.frames();
     }
-  }))) return;
+  }))) {
+    if (capture_started) stop_capture_("transport_error");
+    return;
+  }
+  if (capture_started && !send_capture_started_(detected_ms)) return;
   if (!reason) start_playback_(ack_playback_id, ack_generation_, true);
 }
 
@@ -764,15 +849,21 @@ void JarvisStream::loop() {
         out["xmos_version"] = xmos_version_;
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
         out["playback_protocol"] = 1; out["jack_plugged"] = jack_plugged_;
+        out["wake_capture_protocol"] = 1;
         ack_cache_state_(out);
         diagnostics_json_(out["diagnostics"].to<JsonObject>());
       }));
-    } else command_(control.text);
+    } else command_(control.text, control.epoch);
   }
   if (muted_ != previous_mute_) { previous_mute_ = muted_; if (authenticated_) send_state_(); }
   if (jack_plugged_ != previous_jack_) { previous_jack_ = jack_plugged_; if (authenticated_) send_state_(); }
   ack_cache_loop_(now_ms_());
   playback_loop_(now_ms_());
+  if (wake_capture_arm_.pending()) {
+    if (!authenticated_ || !connected_ || wake_capture_arm_.epoch != epoch_) disarm_wake_capture_("disconnected");
+    else if (!hardware_ready_) disarm_wake_capture_("raw_stage_unverified");
+    else if (wake_capture_arm_.expired(now_ms_())) disarm_wake_capture_("arm_timeout");
+  }
   if (!capture_id_.empty() && (!active_ || muted_ || static_cast<int32_t>(now - deadline_) >= 0)) {
     stop_capture_(muted_ ? "muted" : "duration_complete");
   }
@@ -781,6 +872,7 @@ void JarvisStream::loop() {
 void JarvisStream::on_shutdown() {
   // ESPHome shutdown/OTA must not wait for a network task, socket or DNS operation.
   active_ = false; authenticated_ = false; connected_ = false;
+  disarm_wake_capture_("shutdown");
   stop_playback_("shutdown");
   abort_ack_cache_();
   network_ready_ = false; shutting_down_ = true;

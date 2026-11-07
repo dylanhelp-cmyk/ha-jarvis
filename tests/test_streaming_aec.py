@@ -1,9 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.streaming_aec import StreamingEcho
+from jarvis.streaming_aec import StreamingEcho, check_opening_reference
 
 
 class ReferenceRecorder:
@@ -28,6 +29,14 @@ class StreamingEchoTests(unittest.TestCase):
         self.assertEqual(first + second, captured[:480].tobytes())
         self.assertEqual(len(recorder.references), 3)
         np.testing.assert_array_equal(recorder.references[0], np.full(160, 2345))
+
+    def test_cached_acknowledgment_and_tail_fit_the_render_history(self):
+        frames = [PCMFrame(i, i * 256, 1000 + i * 16, np.zeros(256, dtype="<i2"))
+                  for i in range(80)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
+            result = check_opening_reference(frames, bytes(22080 * 4), 0, 1040, 1.08, 0)
+        self.assertEqual(result["status"], "processed", result)
+        self.assertEqual(result["processed_samples"], 80 * 256)
 
     def test_missing_render_frames_invalidate_the_reference(self):
         echo = StreamingEcho(100, processor=ReferenceRecorder())

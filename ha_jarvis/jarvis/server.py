@@ -27,6 +27,7 @@ from .acknowledgment import (approval_path, cache_path, candidate_identity, cand
                              generate_acknowledgment, read_candidate, verified_render)
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device
+from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
 from .playback import JackPlayback, WakeCacheUpload, stereo_pcm
 
@@ -111,6 +112,7 @@ class Bench:
             self.firmware_secrets_path.write_text(json.dumps(self.firmware_secrets))
             with suppress(OSError): self.firmware_secrets_path.chmod(0o600)
         self.device = Device()
+        self.opening_audio = None
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
@@ -240,24 +242,38 @@ class Bench:
         if cached is None or device.info.get("ack_cache_id") != cached[0]:
             raise ValueError("Verify and preload the wake acknowledgment first")
         ident, pcm = cached
-        device.wake_event.clear()
-        device.wake_details = {}
-        device.wake_playback_terminal = {}
         self.test["phase"] = "armed for Hey Jarvis"
+        waiting = [asyncio.create_task(device.wake_event.wait())]
+        if device.awaiting_wake:
+            waiting.append(asyncio.create_task(device.stopped.wait()))
         try:
-            await asyncio.wait_for(device.wake_event.wait(), 30)
-        except TimeoutError:
-            result.update(status="unavailable", reason="No Hey Jarvis wake detected during the 30-second window")
+            await asyncio.wait(waiting, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in waiting:
+                task.cancel()
+            await asyncio.gather(*waiting, return_exceptions=True)
+        if not device.wake_event.is_set():
+            result.update(status="unavailable", reason=device.arm_stop_reason or
+                          "No Hey Jarvis wake detected during the 30-second window")
             return
         self.test["phase"] = "capturing the acknowledgment"
         wake = dict(device.wake_details)
         startup = None
+        opening_ready = asyncio.Event()
+        opening = self.opening_audio
+
+        def handoff(at):
+            if opening is not None and self.device.pcm_consumer is not None:
+                self.device.pcm_consumer = None
+                _, result["opening_audio"] = opening.release(at)
+            opening_ready.set()
+
         stamp = wake.get("device_time_ms")
         if startup_transport and wake.get("ack_cache_id") == ident and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF:
             detected_at = (stamp + device.clock_offset_ms) / 1000
-            startup = asyncio.create_task(self.measure_cloud_startup(startup_transport, detected_at))
+            startup = asyncio.create_task(self.measure_cloud_startup(startup_transport, detected_at, handoff))
         try:
-            await self.measure_wake_audio(result, wake, ident, pcm)
+            await self.measure_wake_audio(result, wake, ident, pcm, opening_ready if startup else None, handoff)
             if startup is not None:
                 self.test["phase"] = "finalizing the GPT-Live startup test"
                 result["cloud_readiness"] = await startup
@@ -271,7 +287,7 @@ class Bench:
                 startup.cancel()
                 await asyncio.gather(startup, return_exceptions=True)
 
-    async def measure_cloud_startup(self, transport, detected_at):
+    async def measure_cloud_startup(self, transport, detected_at, handoff):
         from .live_session import LiveSession
 
         async def discard_audio(pcm, rate):
@@ -281,9 +297,14 @@ class Bench:
         ready = None
         try:
             await session.start()
-            ready = round((time.monotonic() - detected_at) * 1000, 1)
+            now = time.monotonic()
+            ready = round((now - detected_at) * 1000, 1)
+            handoff(now)
         except (OSError, RuntimeError, ValueError):
-            pass
+            opening = self.opening_audio
+            if opening is not None:
+                opening.error = "cloud_startup_failed"
+            handoff(time.monotonic())
         finally:
             metrics = await session.close()
         return {"transport": transport, "wake_to_ready_ms": ready,
@@ -291,13 +312,20 @@ class Bench:
                 "finalization_confirmed": metrics.finalization_confirmed,
                 "scope": "startup only; no room microphone samples connected to GPT-Live"}
 
-    async def measure_wake_audio(self, result, wake, ident, pcm):
+    async def measure_wake_audio(self, result, wake, ident, pcm, opening_ready, handoff):
         from .live_bench import match_response, render_reference, voiced_bounds
 
         device = self.device
         ws = device.ws
         try:
             await asyncio.sleep(1.35)
+            if opening_ready is not None and self.opening_audio is not None:
+                try:
+                    await asyncio.wait_for(opening_ready.wait(), 1.6)
+                except TimeoutError:
+                    self.opening_audio.error = "cloud_startup_timeout"
+            if opening_ready is None or not opening_ready.is_set():
+                handoff(time.monotonic())
         except asyncio.CancelledError:
             if (ws is device.ws and ws is not None and not ws.closed and wake.get("ack_playback_id")
                     and not device.wake_playback_terminal):
@@ -317,7 +345,9 @@ class Bench:
             result.update(status="unavailable", reason="Voice PE did not confirm a complete playback for this wake")
             return
         detected_at = (stamp + device.clock_offset_ms) / 1000
-        if not capture_start <= detected_at <= capture_start + len(captured) / RATE:
+        if result.get("wake_capture_mode") == "device_armed":
+            result["wake_to_first_capture_sample_ms"] = round((capture_start - detected_at) * 1000, 1)
+        if not capture_start - .08 <= detected_at <= capture_start + len(captured) / RATE:
             result.update(status="unavailable", reason="Wake timing is outside the captured interval")
             return
         reference = await asyncio.to_thread(render_reference, pcm)
@@ -333,6 +363,12 @@ class Bench:
         result["trials"] = [{"trial": 1, **match}]
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
+        if result.get("wake_capture_mode") == "device_armed":
+            from .streaming_aec import check_opening_reference
+
+            result["opening_echo"] = await asyncio.to_thread(
+                check_opening_reference, tuple(device.frames), pcm, device.clock_offset_ms,
+                terminal.get("first_rendered_ms"), match.get("audible_onset_at"), bounds[0])
 
     async def measure_synthetic_replies(self, result, transport, profile):
         from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
@@ -386,7 +422,18 @@ class Bench:
         player = sender = None
         try:
             self.test["phase"] = "synchronizing Voice PE and starting capture"
-            await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
+            armed = kind == "wake_ack" and self.device.info.get("wake_capture_protocol") == 1
+            if kind == "wake_ack":
+                self.device.wake_event.clear()
+                self.device.wake_details = {}
+                self.device.wake_playback_terminal = {}
+                result["wake_capture_mode"] = "device_armed" if armed else "prestarted_bench_capture"
+            if armed:
+                self.opening_audio = OpeningAudio()
+                self.device.pcm_consumer = self.opening_audio.offer
+                await self.device.begin(result["id"], 5000, arm_timeout_ms=32000)
+            else:
+                await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
             result["device_session"] = dict(self.device.capture_session)
             self.test["phase"] = "capturing a quiet baseline"
             if kind == "connection":
@@ -506,6 +553,8 @@ class Bench:
                 result["elapsed_seconds"] = round(time.monotonic() - started, 3)
             finally:
                 self.device.playback = None
+                self.device.pcm_consumer = None
+                self.opening_audio = None
                 self.device.frames.clear()
                 self.test = {"running": False, "phase": "idle"}
 
@@ -772,7 +821,7 @@ def create_audio(bench):
             accepted = True
             bench.device.info = {k: message[k] for k in ("device_id", "sample_rate", "muted", "raw_ready",
                                 "firmware", "xmos_version", "playback_protocol", "jack_plugged",
-                                "ack_cache_protocol", "ack_cache_id") if k in message}
+                                "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol") if k in message}
             bench.device.receive_json(message)
             bench.observe_firmware()
             await ws.send_json({"type": "hello_ok", "protocol": 1})

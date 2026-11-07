@@ -105,6 +105,15 @@ function showResults(results) {
     list.append(card);
     add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
+    if (result.wake_capture_mode === 'device_armed') {
+      const onset = result.wake_to_first_capture_sample_ms;
+      add(card, 'p', onset == null ? 'Device-armed capture timing unavailable.' :
+        'First microphone sample was timestamped ' + onset + ' ms relative to wake detection.');
+      const opening = result.opening_audio;
+      if (opening) add(card, 'p', opening.status === 'ready' ?
+        'Opening buffer kept ' + opening.sample_count + ' samples in order.' :
+        'Opening buffer requested a retry (' + opening.reason + ').');
+    }
     if (result.cloud_readiness) {
       const ready = result.cloud_readiness;
       add(card, 'p', ready.wake_to_ready_ms == null ? 'GPT-Live readiness unavailable.' :

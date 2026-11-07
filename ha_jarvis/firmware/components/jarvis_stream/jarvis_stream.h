@@ -16,6 +16,7 @@
 #include "pcm_send_history.h"
 #include "protocol.h"
 #include "ack_cache.h"
+#include "wake_capture.h"
 
 namespace esphome::jarvis_stream {
 struct FaultLock {
@@ -56,9 +57,14 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   static void websocket_event(void *arg, esp_event_base_t base, int32_t event, void *data);
   void receive_event_(int32_t event, esp_websocket_event_data_t *data);
   void microphone_data_(const std::vector<uint8_t> &data);
-  void command_(const char *text);
+  void command_(const char *text, uint32_t epoch);
   bool send_json_(const std::string &text, bool capture_start = false, bool refresh_diagnostics = false);
+  void capture_command_(const std::string &type, JsonObject root, uint32_t epoch);
+  bool begin_capture_(const std::string &id, uint32_t duration, uint32_t started_ms, bool from_wake,
+                      uint32_t expected_epoch);
+  bool send_capture_started_(uint32_t started_ms);
   void stop_capture_(const char *reason);
+  void disarm_wake_capture_(const char *reason);
   void ack_cache_command_(const std::string &type, JsonObject root);
   void ack_cache_loop_(uint32_t now);
   void abort_ack_cache_();
@@ -90,6 +96,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   std::atomic<bool> playback_overflow_{false};
   HighFrequencyLoopRequester playback_loop_request_;
   AckCache ack_cache_;
+  WakeCaptureArm wake_capture_arm_;
   uint32_t ack_cache_started_{0}, ack_cache_activity_{0}, ack_generation_{0};
   std::string playback_id_;
   uint32_t playback_generation_{0}, playback_sequence_{0}, playback_activity_{0};
@@ -111,6 +118,8 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   portMUX_TYPE capture_lock_ = portMUX_INITIALIZER_UNLOCKED;
   uint64_t sample_counter_{0};
   uint32_t sequence_{0}, deadline_{0};
+  uint32_t capture_wake_ms_{0};
+  bool capture_from_wake_{false};
   uint32_t last_hardware_check_{0};
   bool hardware_ready_{false}, previous_mute_{true};
   std::string xmos_version_;

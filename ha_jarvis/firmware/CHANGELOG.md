@@ -1,3 +1,8 @@
+# 0.2.3
+
+- Let the paired App arm one bounded local microphone capture for the next Hey Jarvis. Capture starts on the Voice PE before the cached acknowledgment plays. The App receives the existing timestamped PCM format and capture counters.
+- An unarmed wake still plays the cached acknowledgment without starting capture. Mute, cancellation, disconnect and expiry clear an unused arm.
+
 # 0.2.2
 
 - Preload a verified wake clip into Voice PE RAM and play it through the 3.5 mm jack on Hey Jarvis. Pair with App 0.2.3 or later and run its local Wake acknowledgment test.
