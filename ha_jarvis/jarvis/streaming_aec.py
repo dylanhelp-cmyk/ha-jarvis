@@ -156,6 +156,14 @@ class ConfirmedRenderInput:
         self.finished = False
         self.error = None
 
+    def prime_capture(self, frames, offset_ms):
+        """Process quiet pre-roll before the playback command is sent."""
+        try:
+            return b"".join(self.echo.capture(frame, offset_ms) for frame in frames)
+        except (RuntimeError, ValueError) as exc:
+            self.error = str(exc)
+            return b""
+
     def offer(self, frame, offset_ms):
         if self.error:
             return b""

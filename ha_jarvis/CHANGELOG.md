@@ -1,3 +1,7 @@
+# 0.2.35
+
+- Process the quiet pre-roll before waiting for DMA timing so it cannot fill the live echo queue.
+
 # 0.2.34
 
 - Add live DMA-reference echo measurement to the quiet-room echo test. Run Echo reference alignment first. The result measures speaker-only echo reduction and keeps room audio local.

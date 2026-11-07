@@ -733,10 +733,12 @@ class Bench:
                     def observe_echo(frame, offset_ms):
                         cleaned.extend(live_echo.offer(frame, offset_ms))
 
-                    for frame in self.device.frames:
-                        observe_echo(frame, self.device.clock_offset_ms)
-                    self.device.pcm_consumer = observe_echo
             await asyncio.sleep(.5)
+            if live_echo:
+                # Playback has not been requested. Prime AEC with known silence
+                # instead of filling the bounded queue waiting for a DMA report.
+                cleaned.extend(live_echo.prime_capture(self.device.frames, self.device.clock_offset_ms))
+                self.device.pcm_consumer = observe_echo
             self.device.playback = player
             self.test["phase"] = "playing through the Voice PE jack"
             requested_at = time.monotonic()

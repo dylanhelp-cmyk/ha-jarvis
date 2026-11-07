@@ -28,11 +28,13 @@ class StreamingEchoTests(unittest.TestCase):
                   for i in range(11)]
         with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
             stream = ConfirmedRenderInput(player, pcm, 35)
-        self.assertTrue(all(not stream.offer(frame, 0) for frame in frames[:6]))
+        pre_roll = stream.prime_capture(frames[:3], 0)
+        self.assertEqual(len(pre_roll), 640 * 2)
+        self.assertTrue(all(not stream.offer(frame, 0) for frame in frames[3:6]))
         player.first_rendered_ms, player.last_rendered_ms, player.frames_rendered = 1040, 1140, 4800
         clean = b"".join(stream.offer(frame, 0) for frame in frames[6:10])
-        self.assertEqual(clean, samples[:1760].tobytes())
-        self.assertEqual(stream.processed_during_playback, 1760)
+        self.assertEqual(pre_roll + clean, samples[:1760].tobytes())
+        self.assertEqual(stream.processed_during_playback, 1120)
         self.assertEqual(stream.waiting_samples, 768)
 
         player.max_render_discontinuity_us = 20_000
