@@ -1,3 +1,7 @@
+# 0.2.40
+
+- In the two-turn voice preview, use confirmed playback timing to capture a prompt follow-up. Keep the quiet guard when the render reference is uncertain.
+
 # 0.2.39
 
 - Start sending cleaned opening speech as soon as the connection and a verified portion of the cached wake playback are ready. Hold the spoken reply until “Yes sir” finishes.

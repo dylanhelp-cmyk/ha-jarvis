@@ -199,7 +199,11 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(device.playback)
 
     async def test_warm_reply_reuses_session_with_fresh_capture_and_no_cold_queue(self):
-        with patch("jarvis.conversation_trial.LiveSession", SimulatedSession),              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+        with (patch("jarvis.conversation_trial.LiveSession", SimulatedSession),
+              patch("jarvis.conversation_trial.BenchReply", SimulatedReply),
+              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+              patch("jarvis.conversation_trial.warm_input_after_render",
+                    side_effect=lambda *_: CleanInput(31, fresh_after=time.monotonic())) as handoff):
             event = asyncio.Event()
             event.set()
             device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=event,
@@ -230,6 +234,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
                                         warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
             self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)
+            self.assertEqual(result["warm_reply"]["opening_reference_mode"], "confirmed_render_tail")
+            handoff.assert_called_once_with(device, replies[0], 31)
 
     async def test_standby_keeps_multiple_warm_turns_on_one_connection(self):
         for ending in (FollowUpEnded("inactivity", "No detected speech"),

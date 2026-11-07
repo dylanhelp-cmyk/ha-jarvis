@@ -468,7 +468,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             if input_deadline is not None and time.monotonic() >= input_deadline:
                 result["conversation_end"] = "session_limit"
                 break
-            stream = warm_input_after_render(device, replies[-1], delay_ms) if standby else None
+            stream = warm_input_after_render(device, replies[-1], delay_ms)
             reference = "confirmed_render_tail" if stream is not None else "quiet_tail_guard"
             if stream is None:
                 phase("clearing the speaker echo tail")
