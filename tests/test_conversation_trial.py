@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import SpeechEndpoint, gain_packet, run_voice_turn
+from jarvis.conversation_trial import CleanInput, SpeechEndpoint, gain_packet, run_voice_turn
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -72,6 +72,24 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    def test_echo_guard_keeps_sample_order_across_partial_aec_blocks(self):
+        buffered = 0
+        def aec_capture(frame, _offset):
+            nonlocal buffered
+            buffered += len(frame.samples)
+            count = buffered // 160 * 160
+            buffered -= count
+            return bytes(count * 2)
+        with patch("jarvis.conversation_trial.StreamingEcho",
+                   return_value=SimpleNamespace(capture=aec_capture)):
+            stream = CleanInput(31, passthrough_after=1.015625)
+        pcm = np.arange(512, dtype="<i2")
+        stream.offer(PCMFrame(0, 0, 1000, pcm[:256]), 0)
+        stream.offer(PCMFrame(1, 256, 1016, pcm[256:]), 0)
+        expected = np.concatenate((np.zeros(250, dtype="<i2"), pcm[250:480]))
+        np.testing.assert_array_equal(np.frombuffer(stream.pending, dtype="<i2"), expected)
+        self.assertEqual(stream.passthrough_samples, 230)
+
     def test_input_gain_preserves_zero_and_reports_overload(self):
         pcm = np.array([0, -100, 100, 32767, -32768], dtype="<i2").tobytes()
         self.assertEqual(gain_packet(pcm, 0), (pcm, 32768, 32768, 0))
@@ -147,3 +165,20 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
                                         warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
             self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)
+
+    async def test_preconnection_timeout_finalizes_without_sending_room_audio(self):
+        messages, result = [], {"id": "preconnected"}
+        device = SimpleNamespace(ws=None, wake_details={}, wake_terminal_event=asyncio.Event())
+
+        async def wait_for_wake():
+            self.assertEqual(messages, ["ready"])
+            return False
+
+        with patch("jarvis.conversation_trial.LiveSession", SimulatedSession):
+            replies = await run_voice_turn(device, messages, result, OpeningAudio(), b"", 31, lambda _: None,
+                                           wait_for_preconnected_wake=wait_for_wake)
+
+        self.assertEqual(replies, [])
+        self.assertEqual(messages, ["ready", "closed"])
+        self.assertEqual(result["connection_start"], "before_wake")
+        self.assertTrue(result["cloud"]["finalization_confirmed"])

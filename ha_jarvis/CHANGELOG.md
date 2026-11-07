@@ -1,3 +1,8 @@
+# 0.2.17
+
+- Keep echo processing through the confirmed wake clip and a 180 ms acoustic tail guard. Preserve microphone levels when the jack is quiet.
+- Add an explicit paid preconnection comparison to Voice preview. GPT-Live opens before wake and closes if no wake arrives within the 15-second wait. The existing wake-triggered connection remains the default.
+
 # 0.2.16
 
 - Default the opt-in voice preview to +24 dB App input gain and show active gain while testing. Pair firmware 0.2.4 to add fixed 4x capture gain before the 16-bit conversion.

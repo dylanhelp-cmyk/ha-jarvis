@@ -248,21 +248,21 @@ class Bench:
             return delay
         return None
 
-    async def wait_for_wake(self, result):
+    async def wait_for_wake(self, result, *, timeout=30):
         device = self.device
         self.test["phase"] = "armed for Hey Jarvis"
         waiting = [asyncio.create_task(device.wake_event.wait())]
         if device.awaiting_wake:
             waiting.append(asyncio.create_task(device.stopped.wait()))
         try:
-            await asyncio.wait(waiting, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in waiting:
                 task.cancel()
             await asyncio.gather(*waiting, return_exceptions=True)
         if not device.wake_event.is_set():
             result.update(status="unavailable", reason=device.arm_stop_reason or
-                          "No Hey Jarvis wake detected during the 30-second window")
+                          f"No Hey Jarvis wake detected during the {timeout}-second window")
             return False
         return True
 
@@ -389,7 +389,7 @@ class Bench:
                 terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
                 match.get("audible_onset_at"), bounds[0])
 
-    async def measure_voice_turn(self, result, gain_db, follow_up):
+    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_response, render_reference, voiced_bounds
 
@@ -399,15 +399,23 @@ class Bench:
         if cached is None or delay is None:
             raise ValueError("Run a successful echo reference alignment first")
         ident, pcm = cached
-        if not await self.wait_for_wake(result):
+        async def ready_wake():
+            if not await self.wait_for_wake(result, timeout=15 if preconnect else 30):
+                return False
+            if device.wake_details.get("ack_cache_id") != ident:
+                raise RuntimeError("The verified wake acknowledgment did not start")
+            return True
+
+        if not preconnect and not await ready_wake():
             return
-        if device.wake_details.get("ack_cache_id") != ident:
-            raise RuntimeError("The verified wake acknowledgment did not start")
         def stage(phase):
             self.test["phase"] = phase
         result["metric"] = "returned_voice_to_audible_reply"
         replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
-                                       gain_db=gain_db, follow_up=follow_up)
+                                       gain_db=gain_db, follow_up=follow_up,
+                                       wait_for_preconnected_wake=ready_wake if preconnect else None)
+        if not replies:
+            return
         await asyncio.sleep(.25)
         await device.end()
         captured, capture_start = device.recording()
@@ -541,7 +549,8 @@ class Bench:
                                      "reason": "The synthetic turn did not complete"})
         result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
 
-    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0, follow_up=False):
+    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
+                  follow_up=False, preconnect=False):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -564,7 +573,7 @@ class Bench:
                 self.opening_audio = OpeningAudio()
                 self.device.pcm_consumer = self.opening_audio.offer
                 await self.device.begin(result["id"], (55000 if follow_up else 30000) if kind == "voice_turn" else 5000,
-                                        arm_timeout_ms=32000)
+                                        arm_timeout_ms=19000 if preconnect else 32000)
             else:
                 await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
             result["device_session"] = dict(self.device.capture_session)
@@ -576,7 +585,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "voice_turn":
-                await self.measure_voice_turn(result, gain_db, follow_up)
+                await self.measure_voice_turn(result, gain_db, follow_up, preconnect)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -866,6 +875,9 @@ def create_ui(bench):
         follow_up = data.get("follow_up", False)
         if type(follow_up) is not bool or (follow_up and kind != "voice_turn"):
             raise ValueError("A warm follow-up is available only in the voice preview")
+        preconnect = data.get("preconnect", False)
+        if type(preconnect) is not bool or (preconnect and kind != "voice_turn"):
+            raise ValueError("Preconnection is available only in the consent-gated voice preview")
         gain_db = data.get("input_gain_db", 24 if kind == "voice_turn" else 0)
         if type(gain_db) is not int or gain_db not in (0, 12, 24):
             raise ValueError("Choose 0, 12 or 24 dB of preview microphone gain")
@@ -893,7 +905,8 @@ def create_ui(bench):
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
         if kind == "voice_turn":
             bench.test["input_gain_db"] = gain_db
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db, follow_up=follow_up))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
+                                                  follow_up=follow_up, preconnect=preconnect))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

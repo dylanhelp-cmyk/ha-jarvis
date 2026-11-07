@@ -5,6 +5,7 @@ import asyncio
 from collections import deque
 from contextlib import suppress
 from dataclasses import replace
+import math
 import time
 
 import numpy as np
@@ -24,9 +25,12 @@ INSTRUCTIONS = (
 class CleanInput:
     """Bridge 16 ms device blocks to paced 20 ms input without discarding speech."""
 
-    def __init__(self, delay_ms, *, fresh_after=None):
+    def __init__(self, delay_ms, *, fresh_after=None, passthrough_after=None):
         self.echo = StreamingEcho(delay_ms)
         self.fresh_after = fresh_after
+        self.passthrough_after = passthrough_after
+        self.raw_pending = bytearray()
+        self.processed_samples = self.passthrough_samples = 0
         self.sample_origin = None
         self.pending = bytearray()
         self.changed = asyncio.Event()
@@ -48,6 +52,19 @@ class CleanInput:
             clean = self.echo.capture(frame, clock_offset_ms)
             if self.capture_start is None:
                 self.capture_start = captured_at
+            if self.passthrough_after is not None:
+                # AEC emits whole 10 ms blocks even when the device supplies
+                # 16 ms blocks. Keep the exact unfiltered counterpart in order.
+                self.raw_pending.extend(frame.samples.tobytes())
+                if not 0 <= len(self.raw_pending) - len(clean) < 320:
+                    raise RuntimeError("Echo processor output lost its capture alignment")
+                raw = bytes(self.raw_pending[:len(clean)])
+                del self.raw_pending[:len(clean)]
+                cutoff = math.ceil((self.passthrough_after - self.capture_start) * RATE)
+                boundary = min(len(clean) // 2, max(0, cutoff - self.processed_samples))
+                clean = clean[:2 * boundary] + raw[2 * boundary:]
+                self.passthrough_samples += len(raw) // 2 - boundary
+                self.processed_samples += len(raw) // 2
             if len(self.pending) + len(clean) > 3 * RATE * 2:
                 raise RuntimeError("clean_opening_queue_overflow")
             self.pending.extend(clean)
@@ -185,7 +202,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                                  "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
         result["input_signal"] = {"gain_db": gain_db, "peak_before_gain_pcm": peak_before,
                                   "peak_transmitted_pcm": peak_after, "clipped_samples": clipped,
-                                  "vad_voice_packets": endpoint.voice_packets}
+                                  "vad_voice_packets": endpoint.voice_packets,
+                                  "capture_samples_after_echo_guard": stream.passthrough_samples}
         device.pcm_consumer = None
         if sender is not None:
             if not sender.done():
@@ -197,9 +215,11 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         device.playback = None
 
 
-async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0, follow_up=False):
+async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
+                         follow_up=False, wait_for_preconnected_wake=None):
     """Open once on wake and optionally measure a fresh-input warm follow-up."""
     ws = device.ws
+    preconnect = wait_for_preconnected_wake is not None
     startup = None
     output = None
 
@@ -211,15 +231,23 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         if output is not None:
             await output.receive(audio, rate)
 
+    result["connection_start"] = "before_wake" if preconnect else "on_wake"
     session = LiveSession(settings, on_audio=on_audio, transport="websocket",
-                          max_seconds=60 if follow_up else 30, startup_timeout=3, instructions=INSTRUCTIONS)
+                          max_seconds=60 if follow_up or preconnect else 30,
+                          startup_timeout=3, instructions=INSTRUCTIONS)
     try:
-        phase("connecting to GPT-Live while the cached acknowledgment plays")
+        phase("preconnecting to GPT-Live" if preconnect else
+              "connecting to GPT-Live while the cached acknowledgment plays")
         started = time.monotonic()
         startup = asyncio.create_task(session.start())
         async with asyncio.timeout(3):
             await startup
-            result["wake_receipt_to_ready_ms"] = round((time.monotonic() - started) * 1000, 1)
+        ready_at = time.monotonic()
+        if preconnect and not await wait_for_preconnected_wake():
+            return []
+        wake_received_at = getattr(device, "last_wake_at", None) or started
+        result["wake_receipt_to_ready_ms"] = round((ready_at - wake_received_at) * 1000, 1)
+        async with asyncio.timeout(3):
             await device.wake_terminal_event.wait()
         terminal = device.wake_playback_terminal
         first, last = terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms")
@@ -229,8 +257,11 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         buffered, result["opening_audio"] = opening.release(time.monotonic())
         if not buffered or device.errors:
             raise RuntimeError(result["opening_audio"]["reason"] or "opening_capture_failed")
-        stream = CleanInput(delay_ms)
         offset = device.clock_offset_ms
+        # The jack has drained, but leave room for the measured acoustic
+        # delay and a conservative tail before bypassing the echo processor.
+        tail_cleared_at = (last + offset + delay_ms) / 1000 + .18
+        stream = CleanInput(delay_ms, passthrough_after=tail_cleared_at)
         stream.echo.render(pcm, (first + offset) / 1000, first_frame=0)
         stream.echo.finish_render(len(pcm) // 4, (last + offset) / 1000)
         for frame in buffered:
@@ -244,7 +275,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             phase("clearing the speaker echo tail")
             await asyncio.sleep(.18)
             warm = result["warm_reply"] = {"id": result["id"] + "-warm"}
-            stream = CleanInput(delay_ms, fresh_after=time.monotonic())
+            fresh_at = time.monotonic()
+            stream = CleanInput(delay_ms, fresh_after=fresh_at, passthrough_after=fresh_at)
             try:
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up",

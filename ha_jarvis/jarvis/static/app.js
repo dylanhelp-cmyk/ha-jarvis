@@ -161,6 +161,10 @@ function showResults(results) {
         add(card, 'p', 'Warm input maximum queue age: ' + warm.input_queue.max_packet_age_ms + ' ms.');
       }
     }
+    if (result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
+      const lead = result.wake_receipt_to_ready_ms;
+      add(card, 'p', 'GPT-Live ready ' + Math.abs(lead) + ' ms ' + (lead <= 0 ? 'before' : 'after') + ' wake receipt.');
+    }
     if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {
@@ -239,7 +243,7 @@ $('run-test').addEventListener('click', () => {
     if (!$('voice-turn-confirmed').checked) return;
     $('voice-turn-confirmed').checked = false;
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true,
-      input_gain_db: Number($('voice-input-gain').value), follow_up: $('voice-follow-up').checked});
+      input_gain_db: Number($('voice-input-gain').value), follow_up: $('voice-follow-up').checked, preconnect: $('voice-preconnect').checked});
   }
   action(() => api('api/tests', 'POST', body));
 });
