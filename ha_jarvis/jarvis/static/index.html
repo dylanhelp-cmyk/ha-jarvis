@@ -67,6 +67,9 @@
             <p class="field-help">The cloud connection starts at wake. Room audio stays on this App.</p>
           </div>
           <div id="voice-turn-consent" hidden>
+            <label for="voice-input-gain">Microphone gain after echo cancellation</label>
+            <select id="voice-input-gain"><option value="0">0 dB</option><option value="12">+12 dB</option><option value="24">+24 dB</option></select>
+            <p class="field-help">Use more gain if speech is too quiet at your usual distance. Overload is counted in the test results.</p>
             <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from this one turn to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
             <p class="field-help">This preview ends after one answer. Follow-ups, interruptions and device actions are outside this preview. Run Echo reference alignment first.</p>
           </div>

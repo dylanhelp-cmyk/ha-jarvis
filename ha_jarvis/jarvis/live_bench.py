@@ -46,7 +46,7 @@ def render_reference(pcm):
 
 def match_response(captured, capture_start, reference, voiced_start_sample,
                    fixture_end_at, earliest_output_at, *, handoff_at=None,
-                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32):
+                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32, onset_horizon_seconds=4):
     """Require distinct reply windows to agree before reporting onset."""
     unavailable = {"status": "unavailable", "latency_ms": None,
                    "fixture_end_to_audible_ms": None, "windows": []}
@@ -54,8 +54,8 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
     bounds = voiced_bounds(reference)
     if bounds is None or bounds[1] - voiced_start_sample < width + int(min(.2, window_seconds) * RATE):
         return {**unavailable, "reason": "Reply is too short or weak for two distinct acoustic windows"}
-    # Start windows at distinct positions over at most the first four seconds.
-    last = min(bounds[1] - width, voiced_start_sample + 4 * RATE)
+    # Select distinct windows from the configured onset region.
+    last = min(bounds[1] - width, voiced_start_sample + int(onset_horizon_seconds * RATE))
     starts = sorted(set(int(value) for value in np.linspace(voiced_start_sample, last, 4)))
     starts = [value for index, value in enumerate(starts)
               if index == 0 or value - starts[index - 1] >= int(.06 * RATE)]

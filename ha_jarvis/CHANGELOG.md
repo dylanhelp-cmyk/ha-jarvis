@@ -1,3 +1,7 @@
+# 0.2.13
+
+- Add selectable preview microphone gain after echo cancellation, preserve input diagnostics even when no reply arrives, and estimate acoustic onset independently of later reply gaps. App-only update.
+
 # 0.2.12
 
 - Allow a 120 ms host-side source reserve for live preview replies and retain playback diagnostics if they stall.

@@ -133,6 +133,13 @@ function showResults(results) {
     if (result.kind === 'voice_turn' && result.digital_first_voice_ms != null) {
       add(card, 'p', 'First returned speech ' + result.digital_first_voice_ms + ' ms after input streaming began.');
     }
+    if (result.input_signal) {
+      const signal = result.input_signal;
+      const peak = signal.peak_transmitted_pcm;
+      const level = peak ? (20 * Math.log10(peak / 32768)).toFixed(1) + ' dBFS' : 'digital silence';
+      add(card, 'p', 'Sent peak ' + level + ' at ' + signal.gain_db + ' dB gain · ' +
+        signal.vad_voice_packets + ' VAD voice packets · ' + signal.clipped_samples + ' overloaded samples.');
+    }
     if (result.speech_endpoint?.status === 'estimated') {
       const timing = result.speech_endpoint;
       add(card, 'p', 'Estimated speech end to audible reply: ' +
@@ -218,7 +225,8 @@ $('run-test').addEventListener('click', () => {
   if (kind === 'voice_turn') {
     if (!$('voice-turn-confirmed').checked) return;
     $('voice-turn-confirmed').checked = false;
-    Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true});
+    Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true,
+      input_gain_db: Number($('voice-input-gain').value)});
   }
   action(() => api('api/tests', 'POST', body));
 });

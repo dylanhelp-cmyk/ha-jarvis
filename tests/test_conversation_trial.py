@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame
-from jarvis.conversation_trial import SpeechEndpoint, run_voice_turn
+from jarvis.conversation_trial import SpeechEndpoint, gain_packet, run_voice_turn
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -72,6 +72,13 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    def test_input_gain_preserves_zero_and_reports_overload(self):
+        pcm = np.array([0, -100, 100, 32767, -32768], dtype="<i2").tobytes()
+        self.assertEqual(gain_packet(pcm, 0), (pcm, 32768, 32768, 0))
+        output, before, after, overload = gain_packet(pcm, 24)
+        self.assertEqual((before, after, overload), (32768, 32768, 2))
+        self.assertEqual(np.frombuffer(output, dtype="<i2").tolist(), [0, -1585, 1585, 32767, -32768])
+
     def test_speech_timing_requires_a_burst_then_quiet(self):
         detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
         endpoint = SpeechEndpoint(detector)

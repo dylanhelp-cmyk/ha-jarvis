@@ -389,7 +389,7 @@ class Bench:
                 terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
                 match.get("audible_onset_at"), bounds[0])
 
-    async def measure_voice_turn(self, result):
+    async def measure_voice_turn(self, result, gain_db):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_response, render_reference, voiced_bounds
 
@@ -406,7 +406,8 @@ class Bench:
         def stage(phase):
             self.test["phase"] = phase
         result["metric"] = "returned_voice_to_audible_reply"
-        reply = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage)
+        reply = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
+                                     gain_db=gain_db)
         await asyncio.sleep(.25)
         await device.end()
         captured, capture_start = device.recording()
@@ -416,7 +417,8 @@ class Bench:
             match = {"status": "unavailable", "reason": "Reply reference had no usable speech"}
         else:
             match = await asyncio.to_thread(match_response, captured, capture_start, reference, bounds[0],
-                                            reply.first_voice_at, reply.first_voice_at, window_seconds=.14)
+                                            reply.first_voice_at, reply.first_voice_at, window_seconds=.14,
+                                            onset_horizon_seconds=.28)
             match.pop("fixture_end_to_audible_ms", None)
         result["trials"] = [{"trial": 1, **match}]
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
@@ -527,7 +529,7 @@ class Bench:
                                      "reason": "The synthetic turn did not complete"})
         result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
 
-    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline"):
+    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -561,7 +563,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "voice_turn":
-                await self.measure_voice_turn(result)
+                await self.measure_voice_turn(result, gain_db)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -848,6 +850,9 @@ def create_ui(bench):
                 raise ValueError("Confirm comfortable speaker volume before starting")
             if device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True:
                 raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
+        gain_db = data.get("input_gain_db", 0)
+        if type(gain_db) is not int or gain_db not in (0, 12, 24):
+            raise ValueError("Choose 0, 12 or 24 dB of preview microphone gain")
         if kind == "voice_turn":
             if data.get("confirm_paid") is not True or data.get("allow_room_audio_to_openai") is not True:
                 raise ValueError("Explicitly authorize sending cleaned microphone audio to OpenAI for this turn")
@@ -870,7 +875,7 @@ def create_ui(bench):
                 raise ValueError("A configured key and a settled budget ledger are required")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport))
+        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

@@ -6,6 +6,8 @@ from collections import deque
 from contextlib import suppress
 import time
 
+import numpy as np
+
 from .audio import RATE
 from .live_bench import BenchReply
 from .live_session import LiveSession
@@ -70,11 +72,13 @@ class SpeechEndpoint:
         self.quiet_frames = 0
         self.active = False
         self.last_voice = None
+        self.voice_packets = 0
 
     def observe(self, pcm, captured_at, sent_at):
         voiced = self.detector.is_speech(pcm, RATE)
         self.recent.append(voiced)
         if voiced:
+            self.voice_packets += 1
             self.quiet_frames = 0
             if self.active or sum(self.recent) >= 3:
                 self.active = True
@@ -97,13 +101,24 @@ class SpeechEndpoint:
                 "speech_end_to_cloud_voice_ms": round((first_voice_at - captured_at) * 1000, 1)}
 
 
-async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase):
+def gain_packet(pcm, gain_db):
+    """Apply fixed gain after AEC and report overload without auto-gain pumping."""
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.int32)
+    scaled = np.rint(samples * 10 ** (gain_db / 20)).astype(np.int32)
+    clipped = int(np.count_nonzero((scaled < -32768) | (scaled > 32767)))
+    output = np.clip(scaled, -32768, 32767).astype("<i2")
+    return output.tobytes(), int(np.max(np.abs(samples))), int(np.max(np.abs(output.astype(np.int32)))), clipped
+
+
+async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0):
     """Open on wake, clean the local acknowledgment, then stream one reply."""
     reply = BenchReply(device, result["id"])
     ws = device.ws
     sender = startup = None
     accept_output = False
     endpoint = SpeechEndpoint()
+    sent = peak_before = peak_after = clipped = 0
+    first_age = max_age = None
 
     async def on_audio(audio, rate):
         if accept_output:
@@ -139,8 +154,6 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         phase("streaming the cleaned opening speech")
         accept_output = True
         origin = time.monotonic()
-        sent = 0
-        first_age = max_age = None
         while reply.first_voice_at is None:
             if time.monotonic() - origin >= 10:
                 raise TimeoutError("No spoken reply within the one-turn input window")
@@ -158,13 +171,14 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                     raise RuntimeError("Microphone input exceeded its capture-age bound; retry the turn")
                 first_age = age if first_age is None else first_age
                 max_age = age if max_age is None else max(max_age, age)
+                packet, before, after, overload = gain_packet(packet, gain_db)
                 await session.send_audio(packet)
+                peak_before = max(peak_before, before)
+                peak_after = max(peak_after, after)
+                clipped += overload
                 endpoint.observe(packet, captured_at, sent_at)
                 sent += 320
         device.pcm_consumer = None
-        result["input_samples_sent"] = sent
-        result["input_queue"] = {"first_packet_age_ms": round(first_age, 1) if first_age is not None else None,
-                                 "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
         result["digital_first_voice_ms"] = round((reply.first_voice_at - origin) * 1000, 1)
         phase("playing the GPT-Live reply through the jack")
@@ -184,6 +198,12 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         result["playback"] = reply.player.snapshot()
         return reply
     finally:
+        result["input_samples_sent"] = sent
+        result["input_queue"] = {"first_packet_age_ms": round(first_age, 1) if first_age is not None else None,
+                                 "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
+        result["input_signal"] = {"gain_db": gain_db, "peak_before_gain_pcm": peak_before,
+                                  "peak_transmitted_pcm": peak_after, "clipped_samples": clipped,
+                                  "vad_voice_packets": endpoint.voice_packets}
         device.pcm_consumer = None
         if startup is not None and not startup.done():
             startup.cancel()
