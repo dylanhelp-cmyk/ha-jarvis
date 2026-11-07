@@ -1,9 +1,11 @@
 # 0.2.18
 
+- Add a +36 dB microphone option with peak protection for quiet capture.
+- Preserve up to 40 ms of quiet reply audio before the first strong sound and record digital output peak and full-scale sample count.
 - Start the Voice PE speaker while the App fills the reply reserve. Record the reserve fill and remaining handshake wait separately. The playback reserves and sample pacing are unchanged.
 - Give warm follow-ups 10 seconds of inactivity. Detected speech resets that timer within the paid preview's 18-second input limit.
 - Add a read-only Assist connection check. It reports the discovered tool count and uses the access token once.
-- App-only update. Run Echo reference alignment, then try Voice preview with a warm follow-up at normal volume and preconnection off.
+- App-only update. Run Echo reference alignment, then try Voice preview with +36 dB, a warm follow-up, normal speaking volume, and preconnection off.
 
 # 0.2.17
 

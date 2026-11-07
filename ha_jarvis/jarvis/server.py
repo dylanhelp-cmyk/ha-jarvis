@@ -423,6 +423,11 @@ class Bench:
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
         for index, reply in enumerate(replies):
             turn = result if index == 0 else result["warm_reply"]
+            output = np.frombuffer(reply.pcm, dtype="<i2")[::2]
+            turn["reply_output_signal"] = {
+                "peak_pcm": int(np.max(np.abs(output.astype(np.int32)), initial=0)),
+                "full_scale_samples": int(np.count_nonzero((output == -32768) | (output == 32767))),
+            }
             reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
             bounds = voiced_bounds(reference)
             if bounds is None:
@@ -897,8 +902,8 @@ def create_ui(bench):
         if type(preconnect) is not bool or (preconnect and kind != "voice_turn"):
             raise ValueError("Preconnection is available only in the consent-gated voice preview")
         gain_db = data.get("input_gain_db", 24 if kind == "voice_turn" else 0)
-        if type(gain_db) is not int or gain_db not in (0, 12, 24):
-            raise ValueError("Choose 0, 12 or 24 dB of preview microphone gain")
+        if type(gain_db) is not int or gain_db not in (0, 12, 24, 36):
+            raise ValueError("Choose 0, 12, 24 or 36 dB of preview microphone gain")
         if kind == "voice_turn":
             if data.get("confirm_paid") is not True or data.get("allow_room_audio_to_openai") is not True:
                 raise ValueError("Explicitly authorize sending cleaned microphone audio to OpenAI for this turn")

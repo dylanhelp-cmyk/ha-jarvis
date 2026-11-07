@@ -1,10 +1,25 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE, make_probe
-from jarvis.live_bench import match_response, render_reference, voiced_bounds
+from jarvis.live_bench import BenchReply, match_response, render_reference, voiced_bounds
+
+
+class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retains_quiet_lead_across_packet_boundary(self):
+        reply = BenchReply(SimpleNamespace(ws=None), "test")
+        quiet = np.arange(960, dtype="<i2") % 40 + 20
+        strong = np.full(320, 1200, dtype="<i2")
+        with patch.object(reply, "_render") as render:
+            await reply.receive(quiet.tobytes(), RATE)
+            self.assertIsNone(reply.first_voice_at)
+            render.assert_not_called()
+            await reply.receive(strong.tobytes(), RATE)
+            frame, = render.call_args.args
+        np.testing.assert_array_equal(frame.to_ndarray().ravel(), np.concatenate((quiet[-640:], strong)))
 
 
 class ReplyMatchingTests(unittest.TestCase):

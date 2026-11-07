@@ -130,10 +130,19 @@ class SpeechEndpoint:
 
 
 def gain_packet(pcm, gain_db):
-    """Apply fixed gain after AEC and report overload without auto-gain pumping."""
+    """Apply fixed gain after AEC, with peak protection at the highest setting."""
     samples = np.frombuffer(pcm, dtype="<i2").astype(np.int32)
     scaled = np.rint(samples * 10 ** (gain_db / 20)).astype(np.int32)
     clipped = int(np.count_nonzero((scaled < -32768) | (scaled > 32767)))
+    if gain_db == 36:
+        knee, headroom = 24576, 8191
+        magnitude = np.abs(scaled)
+        above_knee = magnitude > knee
+        excess = magnitude[above_knee] - knee
+        scaled[above_knee] = np.rint(
+            np.sign(scaled[above_knee]) * (knee + headroom * (excess / (headroom + excess)))
+        ).astype(np.int32)
+        clipped = 0
     output = np.clip(scaled, -32768, 32767).astype("<i2")
     return output.tobytes(), int(np.max(np.abs(samples))), int(np.max(np.abs(output.astype(np.int32)))), clipped
 

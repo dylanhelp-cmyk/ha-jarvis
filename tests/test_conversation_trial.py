@@ -139,6 +139,15 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((before, after, overload), (32768, 32768, 2))
         self.assertEqual(np.frombuffer(output, dtype="<i2").tolist(), [0, -1585, 1585, 32767, -32768])
 
+    def test_high_gain_lifts_quiet_speech_and_compresses_loud_peaks(self):
+        pcm = np.array([0, -117, 117, 800, 2000, 32767, -32768], dtype="<i2").tobytes()
+        output, _, peak, overload = gain_packet(pcm, 36)
+        samples = np.frombuffer(output, dtype="<i2")
+        self.assertEqual(samples[:3].tolist(), [0, -7382, 7382])
+        self.assertTrue(24576 < samples[3] < samples[4] < samples[5] < 32767)
+        self.assertLess(peak, 32767)
+        self.assertEqual(overload, 0)
+
     def test_speech_timing_requires_a_burst_then_quiet(self):
         detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
         endpoint = SpeechEndpoint(detector)

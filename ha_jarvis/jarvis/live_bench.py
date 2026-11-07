@@ -146,6 +146,7 @@ class BenchReply:
         self.pcm = bytearray()
         self.transcript = ""
         self.first_voice_at = self.last_voice_at = None
+        self.leading_pcm = b""
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
 
     def _render(self, frame):
@@ -164,8 +165,13 @@ class BenchReply:
             self.last_voice_at = time.monotonic()
             if self.first_voice_at is None:
                 self.first_voice_at = self.last_voice_at
-                samples = samples[max(0, bounds[0] - RATE // 100):]
+                # Preserve quiet consonants that precede the first strong
+                # block, including when they arrived in an earlier packet.
+                prefix = (self.leading_pcm + pcm[:2 * bounds[0]])[-2 * (rate // 25):]
+                samples = np.frombuffer(prefix + pcm[2 * bounds[0]:], dtype="<i2")
+                self.leading_pcm = b""
         elif self.first_voice_at is None:
+            self.leading_pcm = (self.leading_pcm + pcm)[-2 * (rate // 25):]
             return
         frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
         frame.sample_rate = rate
