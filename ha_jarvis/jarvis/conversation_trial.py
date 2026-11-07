@@ -14,6 +14,7 @@ from .audio import RATE
 from .lifecycle import ConversationPolicy
 from .live_bench import BenchReply
 from .live_session import LiveSession
+from .playback import RATE as RENDER_RATE
 from .streaming_aec import StreamingEcho
 
 INSTRUCTIONS = (
@@ -26,10 +27,12 @@ INSTRUCTIONS = (
 class CleanInput:
     """Bridge 16 ms device blocks to paced 20 ms input without discarding speech."""
 
-    def __init__(self, delay_ms, *, fresh_after=None, passthrough_after=None):
+    def __init__(self, delay_ms, *, fresh_after=None, passthrough_after=None, release_after=None):
         self.echo = StreamingEcho(delay_ms)
         self.fresh_after = fresh_after
         self.passthrough_after = passthrough_after
+        self.release_after = release_after
+        self.discarded_samples = 0
         self.raw_pending = bytearray()
         self.processed_samples = self.passthrough_samples = 0
         self.sample_origin = None
@@ -65,7 +68,13 @@ class CleanInput:
                 boundary = min(len(clean) // 2, max(0, cutoff - self.processed_samples))
                 clean = clean[:2 * boundary] + raw[2 * boundary:]
                 self.passthrough_samples += len(raw) // 2 - boundary
-                self.processed_samples += len(raw) // 2
+            first_sample = self.processed_samples
+            self.processed_samples += len(clean) // 2
+            if self.release_after is not None:
+                cutoff = math.ceil((self.release_after - self.capture_start) * RATE)
+                discard = min(len(clean) // 2, max(0, cutoff - first_sample))
+                clean = clean[2 * discard:]
+                self.discarded_samples += discard
             if len(self.pending) + len(clean) > 3 * RATE * 2:
                 raise RuntimeError("clean_opening_queue_overflow")
             self.pending.extend(clean)
@@ -83,7 +92,7 @@ class CleanInput:
         packet = bytes(self.pending[:640])
         del self.pending[:640]
         self.released_samples += 320
-        return packet, self.capture_start + self.released_samples / RATE
+        return packet, self.capture_start + (self.discarded_samples + self.released_samples) / RATE
 
 
 class OpeningEchoInput(CleanInput):
@@ -156,6 +165,43 @@ class OpeningEchoInput(CleanInput):
         self.confirm()
         async for chunk in reply.chunks():
             yield chunk
+
+
+def warm_input_after_render(device, reply, delay_ms):
+    """Warm AEC with the measured render tail, then release only new speech."""
+    span = reply.player.confirmed_span()
+    offset = device.clock_offset_ms
+    if span is None or offset is None or reply.player.schedule_rebases or not device.frames:
+        return None
+    total_frames = len(reply.pcm) // 4
+    if total_frames != reply.player.frames_rendered or abs(span[1] - span[0] - total_frames / 48) > 15:
+        return None
+
+    # Retain enough of the known reply to warm the echo filter. Nothing from
+    # before the estimated end of audible speech goes to the next turn.
+    tail_frames = min(total_frames, RENDER_RATE // 2)
+    render_end = (span[1] + offset) / 1000
+    render_start = render_end - tail_frames / RENDER_RATE
+    acoustic_end = render_end + delay_ms / 1000
+    if time.monotonic() - acoustic_end > .2:
+        return None
+    stream = CleanInput(delay_ms, fresh_after=render_start + .025, release_after=acoustic_end,
+                        passthrough_after=acoustic_end + .18)
+    stream.echo.render(bytes(reply.pcm[-4 * tail_frames:]), render_start, first_frame=0)
+    stream.echo.finish_render(tail_frames, render_end)
+
+    # Capture is bounded by the current device generation. Replay only the
+    # end of the capture while preserving the device's original sample order.
+    frames = []
+    for frame in reversed(device.frames):
+        if (frame.capture_ms + offset) / 1000 < stream.fresh_after:
+            break
+        frames.append(frame)
+    if not frames or (frames[-1].capture_ms + offset) / 1000 >= acoustic_end - .1:
+        return None
+    for frame in reversed(frames):
+        stream.offer(frame, offset)
+    return None if stream.error else stream
 
 
 class SpeechEndpoint:
@@ -413,15 +459,18 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             }
         input_deadline = session.media_deadline() - REPLY_DRAIN_SECONDS if standby else None
         while follow_up:
-            phase("clearing the speaker echo tail")
-            await asyncio.sleep(.18)
-            fresh_at = time.monotonic()
-            if input_deadline is not None and fresh_at >= input_deadline:
+            if input_deadline is not None and time.monotonic() >= input_deadline:
                 result["conversation_end"] = "session_limit"
                 break
+            stream = warm_input_after_render(device, replies[-1], delay_ms) if standby else None
+            reference = "confirmed_render_tail" if stream is not None else "quiet_tail_guard"
+            if stream is None:
+                phase("clearing the speaker echo tail")
+                await asyncio.sleep(.18)
+                fresh_at = time.monotonic()
+                stream = CleanInput(delay_ms, fresh_after=fresh_at, passthrough_after=fresh_at)
             turn_number = len(replies) + 1
-            warm = {"id": f'{result["id"]}-warm-{turn_number}'}
-            stream = CleanInput(delay_ms, fresh_after=fresh_at, passthrough_after=fresh_at)
+            warm = {"id": f'{result["id"]}-warm-{turn_number}', "opening_reference_mode": reference}
             try:
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up", gain_db=gain_db,

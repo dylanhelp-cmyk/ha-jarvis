@@ -1,3 +1,7 @@
+# 0.2.32
+
+- In wake standby, use confirmed reply render timing to preserve speech that starts just after the previous reply. Keep the existing echo guard when the render timing is ambiguous or arrives late.
+
 # 0.2.31
 
 - Keep listening for more follow-ups during wake standby. Ten seconds without detected speech ends the conversation and the App re-arms after cloud finalization. The existing session time limit still applies.

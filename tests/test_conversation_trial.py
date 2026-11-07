@@ -8,7 +8,7 @@ import numpy as np
 
 from jarvis.audio import PCMFrame
 from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
-                                       run_voice_turn, stream_reply)
+                                       run_voice_turn, stream_reply, warm_input_after_render)
 from jarvis.opening_audio import OpeningAudio
 
 
@@ -252,6 +252,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 returned = [object() for _ in range(3)]
                 with (patch("jarvis.conversation_trial.LiveSession", StandbySession),
                       patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+                      patch("jarvis.conversation_trial.warm_input_after_render", return_value=None),
                       patch("jarvis.conversation_trial.stream_reply", side_effect=[*returned, ending]) as play):
                     replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4),
                                                    31, lambda _: None, follow_up=True, standby=True)
@@ -268,6 +269,33 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(result["conversation_end"], "error")
                     self.assertEqual(extra[1]["error"], "Jack disconnected")
+
+    async def test_warm_render_tail_keeps_new_speech_and_rejects_ambiguous_timing(self):
+        base_ms, render_end_ms, delay_ms = 10_000, 10_500, 31.03125
+        samples = np.arange(40 * 256, dtype="<i2")
+        frames = [PCMFrame(i, i * 256, base_ms + 16 * i, samples[i * 256:(i + 1) * 256])
+                  for i in range(40)]
+        device = SimpleNamespace(clock_offset_ms=0, frames=frames)
+        player = SimpleNamespace(confirmed_span=lambda: (base_ms, render_end_ms),
+                                 frames_rendered=24_000, schedule_rebases=0)
+        reply = SimpleNamespace(player=player, pcm=bytes(24_000 * 4))
+        with (patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+              patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: 10.64))):
+            stream = warm_input_after_render(device, reply, delay_ms)
+            self.assertIsNotNone(stream)
+            first, stamp = await stream.packet()
+            # The estimated acoustic boundary falls halfway through a sample period.
+            self.assertEqual(first, samples[8497:8817].tobytes())
+            self.assertAlmostEqual(stamp, 10 + 8817 / 16000)
+            player.schedule_rebases = 1
+            self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
+            player.schedule_rebases = 0
+            player.confirmed_span = lambda: (base_ms - 25, render_end_ms)
+            self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
+
+        player.confirmed_span = lambda: (base_ms, render_end_ms)
+        with patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: 10.80)):
+            self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
 
     async def test_preconnected_input_can_start_before_ack_drain_but_speaker_cannot(self):
         input_sent = asyncio.Event()
