@@ -1,6 +1,6 @@
 # Voice PE 3.5 mm audio bench firmware
 
-For repository-managed updates, keep `voice-pe-repository.yaml` in ESPHome Builder. It downloads the package and custom component from [ha-jarvis](https://github.com/dylanhelp-cmyk/ha-jarvis) on `main`, refreshing on validation or compilation when its five-minute cache expires. Validate and compile with **ESPHome 2026.10.0 / ESP-IDF 5.5.6**. The jack playback milestone uses firmware **0.2.1**.
+For repository-managed updates, keep `voice-pe-repository.yaml` in ESPHome Builder. It downloads the package and custom component from [ha-jarvis](https://github.com/dylanhelp-cmyk/ha-jarvis) on `main`, refreshing on validation or compilation when its five-minute cache expires. Validate and compile with **ESPHome 2026.10.0 / ESP-IDF 5.5.6**. Use firmware **0.2.2** with App **0.2.3** for cached wake playback.
 
 Add the keys in `secrets.example.yaml` to Builder's `secrets.yaml`: Wi-Fi, fresh API encryption key, unique OTA password, App LAN URL (`ws://HA_LAN_IP:8099/device`) and App-generated pairing token. Replace the intentionally invalid all-zero API example. This milestone authenticates over **plain LAN WebSocket**; keep port 8099 private.
 
@@ -32,7 +32,6 @@ Firmware 0.1.6 adds `diagnostics.pcm_send`, null until an accepted capture. Its 
 
 The normal `capture_stopped` acknowledgement refreshes its summary in the network worker after its preceding PCM call returns. If a newer capture has already replaced the retained summary, the older stop control preserves its original snapshot instead of adopting the newer capture's IDs. This is bounded measurement, not a new stale-frame cutoff or larger audio buffer. A genuine send failure still stops capture/resets transport because a WebSocket frame header or payload may already have been written.
 
-**Focused hardware check:** update the App revision accompanying this firmware, rebuild the existing Builder entry after its five-minute cache expires, confirm firmware **0.1.6**, then run one **AirPlay / WAV - Stream stability** trial at your chosen comfortable volume. Keep the existing full delayed-playback observation tail. Export after completion, or after reconnection if it fails. Inspect send return/duration, queue residence and continuity before another change or repeat; no test is started automatically.
 
 Timestamps estimate first-sample time from callback minus block duration; **XMOS/I2S delay remains uncalibrated**. Clock sync uses the same 32-bit monotonic millisecond epoch (49-day wrap). Raw PCM is not calibrated SPL. Missing frames/poor sync invalidate measurements. Physical mute, audio quality, wake accuracy and wireless reliability remain untested.
 

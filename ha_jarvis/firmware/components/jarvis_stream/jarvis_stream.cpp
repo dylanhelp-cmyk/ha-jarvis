@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esphome/components/json/json_util.h"
@@ -25,6 +26,10 @@ void JarvisStream::setup() {
   speaker_->set_audio_stream_info(audio::AudioStreamInfo(32, 2, 48000));
   speaker_->add_audio_output_callback([this](uint32_t frames, int64_t end_us) {
     playback_clock_lock_.enter();
+    if (!rendered_samples_) {
+      const int64_t start_us = end_us - static_cast<int64_t>(frames) * 1000000 / 48000;
+      rendered_start_ms_ = static_cast<uint32_t>(start_us / 1000);
+    }
     rendered_samples_ += frames;
     rendered_end_ms_ = static_cast<uint32_t>(end_us / 1000);
     playback_clock_lock_.exit();
@@ -315,6 +320,7 @@ void JarvisStream::send_state_() {
     root["raw_ready"] = hardware_ready_;
     root["jack_plugged"] = jack_plugged_;
     root["playback_protocol"] = 1;
+    ack_cache_state_(root);
     root["xmos_version"] = xmos_version_;
     diagnostics_json_(root["diagnostics"].to<JsonObject>());
   }));
@@ -333,6 +339,8 @@ void JarvisStream::command_(const char *text) {
         out["type"] = "clock_sync"; out["id"] = root["id"];
         out["server_time_ms"] = root["server_time_ms"]; out["device_time_ms"] = stamp;
       }));
+    } else if (type == "ack_cache_start" || type == "ack_cache_commit" || type == "ack_cache_abort") {
+      ack_cache_command_(type, root);
     } else if (type == "play_start" || type == "play_stop" || type == "play_drain") {
       playback_command_(type, root);
     } else if (type == "stop_capture") {
@@ -376,21 +384,127 @@ void JarvisStream::command_(const char *text) {
   if (!visited) record_fault_(FaultReason::MALFORMED_MESSAGE);
 }
 
+void JarvisStream::ack_cache_state_(JsonObject out) {
+  out["ack_cache_protocol"] = 1;
+  if (ack_cache_.frames()) out["ack_cache_id"] = ack_cache_.id();
+}
+
+void JarvisStream::ack_cache_error_(uint32_t generation, const char *reason) {
+  send_json_(json::build_json([&](JsonObject out) {
+    out["type"] = "ack_cache_error"; out["generation"] = generation; out["reason"] = reason;
+  }));
+}
+
+void JarvisStream::abort_ack_cache_() {
+  if (!ack_cache_.generation()) return;
+  ack_cache_.abort();
+  xQueueReset(playback_queue_);
+  playback_overflow_ = false;
+}
+
+void JarvisStream::ack_cache_command_(const std::string &type, JsonObject root) {
+  const uint32_t generation = root["generation"] | uint32_t(0);
+  if (type == "ack_cache_start") {
+    const uint32_t frames = root["samples"] | uint32_t(0);
+    const std::string id = root["cache_id"] | "";
+    if (!AckCache::valid_manifest(generation, id, frames)) {
+      ack_cache_error_(generation, "invalid_manifest");
+      return;
+    }
+    if (!playback_id_.empty() || ack_cache_.generation()) {
+      ack_cache_error_(generation, "busy");
+      return;
+    }
+    AckCache::Pcm pcm(static_cast<uint8_t *>(heap_caps_malloc(frames * PLAYBACK_FRAME_BYTES,
+                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), std::free);
+    if (!pcm) {
+      ack_cache_error_(generation, "no_memory");
+      return;
+    }
+    xQueueReset(playback_queue_);
+    playback_overflow_ = false;
+    ack_cache_.begin(generation, id, frames, std::move(pcm));
+    ack_cache_started_ = ack_cache_activity_ = now_ms_();
+    if (!send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "ack_cache_ready"; out["generation"] = generation;
+    }))) abort_ack_cache_();
+    return;
+  }
+  if (!generation || generation != ack_cache_.generation()) {
+    ack_cache_error_(generation, "unknown_generation");
+    return;
+  }
+  if (type == "ack_cache_abort") {
+    abort_ack_cache_();
+    send_json_(json::build_json([&](JsonObject out) {
+      out["type"] = "ack_cache_aborted"; out["generation"] = generation;
+    }));
+    return;
+  }
+  if (playback_overflow_.exchange(false) || !ack_cache_.commit()) {
+    abort_ack_cache_();
+    ack_cache_error_(generation, "incomplete_upload");
+    return;
+  }
+  send_json_(json::build_json([&](JsonObject out) {
+    out["type"] = "ack_cache_committed"; out["generation"] = generation;
+    out["cache_id"] = ack_cache_.id();
+  }));
+}
+
+void JarvisStream::ack_cache_loop_(uint32_t now) {
+  const uint32_t generation = ack_cache_.generation();
+  if (!generation) return;
+  if (!authenticated_ || !connected_) {
+    abort_ack_cache_();
+    return;
+  }
+  const char *error = nullptr;
+  if (playback_overflow_.exchange(false)) error = "queue_overflow";
+  else if (now - ack_cache_activity_ >= 2000 || now - ack_cache_started_ >= 10000) error = "upload_timeout";
+  else {
+    for (int i = 0; i < 4 && xQueueReceive(playback_queue_, &playback_packet_, 0) == pdTRUE; ++i) {
+      const auto &packet = playback_packet_;
+      if (packet.epoch != epoch_ || packet.header.generation != generation) continue;
+      if (!ack_cache_.append(packet.header, packet.pcm)) {
+        error = "invalid_sequence";
+        break;
+      }
+      ack_cache_activity_ = now;
+      if (!send_json_(json::build_json([&](JsonObject out) {
+        out["type"] = "ack_cache_progress"; out["generation"] = generation;
+        out["samples"] = ack_cache_.received();
+      }))) {
+        abort_ack_cache_();
+        return;
+      }
+    }
+  }
+  if (error) {
+    abort_ack_cache_();
+    ack_cache_error_(generation, error);
+  }
+}
+
+const char *JarvisStream::speaker_blocked_() const {
+  if (!jack_plugged_) return "jack_unplugged";
+  if (muted_) return "muted";
+  if (!playback_id_.empty() || !speaker_->is_stopped()) return "speaker_busy";
+  if (ack_cache_.generation()) return "cache_upload";
+  return nullptr;
+}
+
 void JarvisStream::playback_command_(const std::string &type, JsonObject root) {
   const std::string id = root["playback_id"] | "";
   const uint32_t generation = root["generation"] | uint32_t(0);
   if (type != "play_start") {
     if (!playback_id_.empty() && id == playback_id_ && generation == playback_generation_) {
       if (type == "play_stop") stop_playback_("requested");
-      else playback_drain_ = true;
+      else if (!local_ack_playback_) playback_drain_ = true;
     }
     return;
   }
-  const char *error = nullptr;
-  if (id.empty() || id.size() > 128 || generation == 0) error = "invalid_playback";
-  else if (!jack_plugged_) error = "jack_unplugged";
-  else if (muted_) error = "muted";
-  else if (!playback_id_.empty() || !speaker_->is_stopped()) error = "speaker_busy";
+  const char *error = id.empty() || id.size() > 128 || generation == 0 ? "invalid_playback" : speaker_blocked_();
   if (error) {
     send_json_(json::build_json([&](JsonObject out) {
       out["type"] = "play_stopped"; out["playback_id"] = id; out["generation"] = generation;
@@ -398,22 +512,37 @@ void JarvisStream::playback_command_(const std::string &type, JsonObject root) {
     }));
     return;
   }
+  start_playback_(id, generation);
+}
+
+void JarvisStream::playback_identity_(JsonObject out) {
+  out["playback_id"] = playback_id_; out["generation"] = playback_generation_;
+  if (local_ack_playback_) {
+    out["source"] = "wake_ack";
+    out["ack_cache_id"] = ack_cache_.id();
+  }
+}
+
+void JarvisStream::start_playback_(const std::string &id, uint32_t generation, bool local_ack) {
   xQueueReset(playback_queue_);
   playback_overflow_ = false;
   playback_id_ = id;
   playback_generation_ = generation;
+  local_ack_playback_ = local_ack;
   playback_samples_ = 0;
   playback_sequence_ = 0;
   playback_activity_ = now_ms_();
   reported_samples_ = 0;
   last_play_clock_report_ = playback_activity_;
   playback_clock_lock_.enter();
-  rendered_samples_ = rendered_end_ms_ = 0;
+  rendered_samples_ = rendered_start_ms_ = rendered_end_ms_ = 0;
   playback_clock_lock_.exit();
   playback_loop_request_.start();
   speaker_->start();
   if (!send_json_(json::build_json([&](JsonObject out) {
-    out["type"] = "play_started"; out["playback_id"] = id; out["generation"] = generation;
+    out["type"] = "play_started";
+    playback_identity_(out);
+    if (local_ack_playback_) out["device_time_ms"] = playback_activity_;
   }))) stop_playback_("transport_error");
 }
 
@@ -425,7 +554,7 @@ void JarvisStream::stop_playback_(const char *reason, bool drained) {
   playback_pending_ = playback_drain_ = playback_finishing_ = false;
   if (authenticated_ && connected_ && !shutting_down_) {
     playback_clock_lock_.enter();
-    const uint32_t rendered = rendered_samples_, end_ms = rendered_end_ms_;
+    const uint32_t rendered = rendered_samples_, start_ms = rendered_start_ms_, end_ms = rendered_end_ms_;
     playback_clock_lock_.exit();
     if (drained && rendered != playback_samples_) {
       drained = false;
@@ -433,12 +562,14 @@ void JarvisStream::stop_playback_(const char *reason, bool drained) {
     }
     send_json_(json::build_json([&](JsonObject out) {
       out["type"] = drained ? "play_drained" : "play_stopped";
-      out["playback_id"] = playback_id_; out["generation"] = playback_generation_;
+      playback_identity_(out);
       out["reason"] = reason; out["samples"] = playback_samples_;
       out["rendered_samples"] = rendered; out["last_rendered_ms"] = end_ms;
+      if (local_ack_playback_ && rendered) out["first_rendered_ms"] = start_ms;
     }));
   }
   playback_id_.clear();
+  local_ack_playback_ = false;
 }
 
 void JarvisStream::playback_loop_(uint32_t now) {
@@ -446,17 +577,19 @@ void JarvisStream::playback_loop_(uint32_t now) {
   if (!connected_ || !authenticated_) { stop_playback_("disconnected"); return; }
   if (muted_) { stop_playback_("muted"); return; }
   if (!jack_plugged_) { stop_playback_("jack_unplugged"); return; }
-  if (playback_overflow_.exchange(false)) { stop_playback_("queue_overflow"); return; }
+  if (playback_overflow_.exchange(false) && !local_ack_playback_) { stop_playback_("queue_overflow"); return; }
   if (now - playback_activity_ >= 2000) { stop_playback_("playback_timeout"); return; }
   if (!reported_samples_ || now - last_play_clock_report_ >= 100) {
     playback_clock_lock_.enter();
-    const uint32_t rendered = rendered_samples_, end_ms = rendered_end_ms_;
+    const uint32_t rendered = rendered_samples_, start_ms = rendered_start_ms_, end_ms = rendered_end_ms_;
     playback_clock_lock_.exit();
     if (rendered != reported_samples_) {
       if (!send_json_(json::build_json([&](JsonObject out) {
-        out["type"] = "play_clock"; out["playback_id"] = playback_id_;
-        out["generation"] = playback_generation_; out["rendered_samples"] = rendered;
+        out["type"] = "play_clock";
+        playback_identity_(out);
+        out["rendered_samples"] = rendered;
         out["last_rendered_ms"] = end_ms; out["timing"] = "i2s_dma_completion";
+        if (local_ack_playback_) out["first_rendered_ms"] = start_ms;
       }))) { stop_playback_("transport_error"); return; }
       reported_samples_ = rendered;
       last_play_clock_report_ = now;
@@ -471,18 +604,31 @@ void JarvisStream::playback_loop_(uint32_t now) {
   for (int packet = 0; packet < 4; ++packet) {
     if (!connected_ || !authenticated_) { stop_playback_("disconnected"); return; }
     if (!playback_pending_) {
-      if (xQueueReceive(playback_queue_, &playback_packet_, 0) != pdTRUE) {
-        if (playback_drain_) {
+      const uint8_t *pcm = playback_packet_.pcm;
+      if (local_ack_playback_) {
+        const uint32_t remaining = ack_cache_.frames() - playback_samples_;
+        if (!remaining) {
           speaker_->finish();
           playback_finishing_ = true;
+          return;
         }
-        return;
-      }
-      if (playback_packet_.epoch != epoch_ || playback_packet_.header.generation != playback_generation_) continue;
-      if (playback_packet_.header.sequence != playback_sequence_ ||
-          playback_packet_.header.first_sample != playback_samples_) {
-        stop_playback_("invalid_sequence");
-        return;
+        const auto frames = static_cast<uint16_t>(std::min<size_t>(MAX_PLAYBACK_FRAMES, remaining));
+        playback_packet_.header = {frames, playback_generation_, playback_sequence_, playback_samples_};
+        pcm = ack_cache_.pcm() + playback_samples_ * PLAYBACK_FRAME_BYTES;
+      } else {
+        if (xQueueReceive(playback_queue_, &playback_packet_, 0) != pdTRUE) {
+          if (playback_drain_) {
+            speaker_->finish();
+            playback_finishing_ = true;
+          }
+          return;
+        }
+        if (playback_packet_.epoch != epoch_ || playback_packet_.header.generation != playback_generation_) continue;
+        if (playback_packet_.header.sequence != playback_sequence_ ||
+            playback_packet_.header.first_sample != playback_samples_) {
+          stop_playback_("invalid_sequence");
+          return;
+        }
       }
       playback_pending_ = true;
       playback_offset_ = 0;
@@ -491,8 +637,8 @@ void JarvisStream::playback_loop_(uint32_t now) {
       const size_t samples = playback_packet_.header.samples * 2;
       for (size_t i = 0; i < samples; ++i) {
         playback_i2s_[4 * i] = playback_i2s_[4 * i + 1] = 0;
-        playback_i2s_[4 * i + 2] = playback_packet_.pcm[2 * i];
-        playback_i2s_[4 * i + 3] = playback_packet_.pcm[2 * i + 1];
+        playback_i2s_[4 * i + 2] = pcm[2 * i];
+        playback_i2s_[4 * i + 3] = pcm[2 * i + 1];
       }
     }
     const auto &header = playback_packet_.header;
@@ -504,8 +650,9 @@ void JarvisStream::playback_loop_(uint32_t now) {
     ++playback_sequence_;
     playback_samples_ += header.samples;
     if (!send_json_(json::build_json([&](JsonObject out) {
-      out["type"] = "play_render"; out["playback_id"] = playback_id_;
-      out["generation"] = playback_generation_; out["first_sample"] = header.first_sample;
+      out["type"] = "play_render";
+      playback_identity_(out);
+      out["first_sample"] = header.first_sample;
       out["samples"] = header.samples; out["device_time_ms"] = playback_activity_;
       out["timing"] = "speaker_buffer_acceptance";
     }))) { stop_playback_("transport_error"); return; }
@@ -558,12 +705,27 @@ void JarvisStream::stop_capture_(const char *reason) {
 }
 
 void JarvisStream::wake_word(const std::string &word) {
-  if (muted_ || !authenticated_) return;
-  send_json_(json::build_json([&](JsonObject out) {
-    out["type"] = "wake_word"; out["wake_word"] = word; out["device_time_ms"] = now_ms_();
+  if (muted_ || !authenticated_ || !connected_ || shutting_down_) return;
+  const uint32_t detected_ms = now_ms_();
+  const char *reason = word == "Hey Jarvis" ? speaker_blocked_() : "different_wake_word";
+  if (!reason && !ack_cache_.frames()) reason = "cache_missing";
+  std::string ack_playback_id;
+  if (!reason) {
+    if (++ack_generation_ == 0) ++ack_generation_;
+    ack_playback_id = "wake-ack-" + std::to_string(ack_generation_);
+  }
+  if (!send_json_(json::build_json([&](JsonObject out) {
+    out["type"] = "wake_word"; out["wake_word"] = word; out["device_time_ms"] = detected_ms;
     out["capture_id"] = capture_id_;
-  }));
-  // Wake is an event only: it cannot arm streaming or run a Home Assistant pipeline.
+    if (reason) out["ack_reason"] = reason;
+    else {
+      out["ack_playback_id"] = ack_playback_id;
+      out["ack_generation"] = ack_generation_;
+      out["ack_cache_id"] = ack_cache_.id();
+      out["ack_samples"] = ack_cache_.frames();
+    }
+  }))) return;
+  if (!reason) start_playback_(ack_playback_id, ack_generation_, true);
 }
 
 void JarvisStream::loop() {
@@ -577,6 +739,7 @@ void JarvisStream::loop() {
   if (transport_fault_.exchange(false)) {
     stop_capture_("disconnected");
     stop_playback_("disconnected");
+    abort_ack_cache_();
     // Preserve a newly arrived CONNECTED event; stale controls are rejected by epoch below.
   }
   if (now - last_hardware_check_ >= 5000 && capture_id_.empty()) {
@@ -593,6 +756,7 @@ void JarvisStream::loop() {
     if (control.kind == 1) {
       stop_capture_("reconnected");
       stop_playback_("reconnected");
+      abort_ack_cache_();
       send_json_(json::build_json([this](JsonObject out) {
         out["type"] = "hello"; out["protocol"] = 1; out["device_id"] = device_id_;
         out["token"] = token_; out["sample_rate"] = 16000; out["channels"] = 1;
@@ -600,12 +764,14 @@ void JarvisStream::loop() {
         out["xmos_version"] = xmos_version_;
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
         out["playback_protocol"] = 1; out["jack_plugged"] = jack_plugged_;
+        ack_cache_state_(out);
         diagnostics_json_(out["diagnostics"].to<JsonObject>());
       }));
     } else command_(control.text);
   }
   if (muted_ != previous_mute_) { previous_mute_ = muted_; if (authenticated_) send_state_(); }
   if (jack_plugged_ != previous_jack_) { previous_jack_ = jack_plugged_; if (authenticated_) send_state_(); }
+  ack_cache_loop_(now_ms_());
   playback_loop_(now_ms_());
   if (!capture_id_.empty() && (!active_ || muted_ || static_cast<int32_t>(now - deadline_) >= 0)) {
     stop_capture_(muted_ ? "muted" : "duration_complete");
@@ -616,6 +782,7 @@ void JarvisStream::on_shutdown() {
   // ESPHome shutdown/OTA must not wait for a network task, socket or DNS operation.
   active_ = false; authenticated_ = false; connected_ = false;
   stop_playback_("shutdown");
+  abort_ack_cache_();
   network_ready_ = false; shutting_down_ = true;
 }
 }  // namespace esphome::jarvis_stream

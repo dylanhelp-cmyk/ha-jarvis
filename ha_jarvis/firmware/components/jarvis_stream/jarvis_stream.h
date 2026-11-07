@@ -15,6 +15,7 @@
 #include "fault_history.h"
 #include "pcm_send_history.h"
 #include "protocol.h"
+#include "ack_cache.h"
 
 namespace esphome::jarvis_stream {
 struct FaultLock {
@@ -58,7 +59,15 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void command_(const char *text);
   bool send_json_(const std::string &text, bool capture_start = false, bool refresh_diagnostics = false);
   void stop_capture_(const char *reason);
+  void ack_cache_command_(const std::string &type, JsonObject root);
+  void ack_cache_loop_(uint32_t now);
+  void abort_ack_cache_();
+  void ack_cache_error_(uint32_t generation, const char *reason);
+  void ack_cache_state_(JsonObject out);
+  const char *speaker_blocked_() const;
   void playback_command_(const std::string &type, JsonObject root);
+  void start_playback_(const std::string &id, uint32_t generation, bool local_ack = false);
+  void playback_identity_(JsonObject out);
   void playback_loop_(uint32_t now);
   void stop_playback_(const char *reason, bool drained = false);
   bool verify_hardware_();
@@ -80,16 +89,19 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   std::atomic<bool> intentional_stop_{false};
   std::atomic<bool> playback_overflow_{false};
   HighFrequencyLoopRequester playback_loop_request_;
+  AckCache ack_cache_;
+  uint32_t ack_cache_started_{0}, ack_cache_activity_{0}, ack_generation_{0};
   std::string playback_id_;
   uint32_t playback_generation_{0}, playback_sequence_{0}, playback_activity_{0};
   uint32_t last_play_clock_report_{0};
   uint64_t playback_samples_{0};
   FaultLock playback_clock_lock_;
-  uint32_t rendered_samples_{0}, rendered_end_ms_{0}, reported_samples_{0};
+  uint32_t rendered_samples_{0}, rendered_start_ms_{0}, rendered_end_ms_{0}, reported_samples_{0};
   PlaybackPacket playback_packet_{};
   uint8_t playback_i2s_[MAX_PLAYBACK_FRAMES * 8]{};
   size_t playback_offset_{0};
   bool playback_pending_{false}, playback_drain_{false}, playback_finishing_{false};
+  bool local_ack_playback_{false};
   bool jack_plugged_{false}, previous_jack_{false};
   std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
   std::atomic<uint32_t> connection_generation_{0};

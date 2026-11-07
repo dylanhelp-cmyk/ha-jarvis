@@ -1,3 +1,7 @@
+# 0.2.2
+
+- Preload a verified wake clip into Voice PE RAM and play it through the 3.5 mm jack on Hey Jarvis. Pair with App 0.2.3 or later and run its local Wake acknowledgment test.
+
 # 0.2.1 - service 10 ms playback packets without waiting for ordinary loop ticks
 
 - Service up to four playback packets per loop, yielding immediately on a partial or full speaker buffer. Request the faster ESPHome loop only during active playback and drain.
