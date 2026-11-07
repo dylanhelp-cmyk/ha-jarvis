@@ -17,6 +17,7 @@
 #include "protocol.h"
 #include "ack_cache.h"
 #include "wake_capture.h"
+#include "render_clock.h"
 
 namespace esphome::jarvis_stream {
 struct FaultLock {
@@ -105,7 +106,8 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   uint32_t last_play_clock_report_{0};
   uint64_t playback_samples_{0};
   FaultLock playback_clock_lock_;
-  uint32_t rendered_samples_{0}, rendered_start_ms_{0}, rendered_end_ms_{0}, reported_samples_{0};
+  RenderClock render_clock_;
+  uint32_t reported_samples_{0};
   PlaybackPacket playback_packet_{};
   uint8_t playback_i2s_[MAX_PLAYBACK_FRAMES * 8]{};
   size_t playback_offset_{0};

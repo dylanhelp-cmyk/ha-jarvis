@@ -118,6 +118,43 @@ int main() {
                             str(cpp), "-o", str(exe)], check=True, capture_output=True, timeout=180)
             subprocess.run([str(exe)], check=True, timeout=5)
 
+    def test_dma_clock_measures_gap_independently_of_the_total_span(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        command = [compiler] if compiler else ([sys.executable, "-m", "ziglang", "c++"]
+                   if importlib.util.find_spec("ziglang") else None)
+        if command is None:
+            self.skipTest("Host C++ compiler unavailable")
+        source = r'''
+#include <cassert>
+#include "render_clock.h"
+using esphome::jarvis_stream::RenderClock;
+
+int main() {
+  RenderClock clock;
+  clock.append(480, 10000);
+  clock.append(480, 20000);
+  assert(clock.frames == 960 && clock.first_us == 0 && clock.last_us == 20000);
+  assert(clock.max_discontinuity_us == 0);
+
+  clock.append(480, 70000);  // 40 ms of inserted silence
+  clock.append(480, 40000);  // contradicting timestamp hides it from the total span
+  assert(clock.frames == 1920 && clock.last_us == 40000);
+  assert(clock.max_discontinuity_us == 40000);
+
+  clock = {};
+  clock.append(240, 260000);
+  assert(clock.first_us == 255000 && clock.last_us == 260000);
+  assert(clock.frames == 240 && clock.max_discontinuity_us == 0);
+}
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            tmp = Path(folder)
+            cpp, exe = tmp / "render_clock.cpp", tmp / "render_clock.exe"
+            cpp.write_text(source)
+            subprocess.run([*command, "-std=c++17", "-I", str(FIRMWARE / "components/jarvis_stream"),
+                            str(cpp), "-o", str(exe)], check=True, capture_output=True, timeout=180)
+            subprocess.run([str(exe)], check=True, timeout=5)
+
     def test_hardware_and_privacy_configuration(self):
         main = (FIRMWARE / "voice-pe-testbench.yaml").read_text()
         package = (FIRMWARE / "voice-pe-package.yaml").read_text()

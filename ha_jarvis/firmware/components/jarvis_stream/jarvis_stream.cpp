@@ -26,12 +26,7 @@ void JarvisStream::setup() {
   speaker_->set_audio_stream_info(audio::AudioStreamInfo(32, 2, 48000));
   speaker_->add_audio_output_callback([this](uint32_t frames, int64_t end_us) {
     playback_clock_lock_.enter();
-    if (!rendered_samples_) {
-      const int64_t start_us = end_us - static_cast<int64_t>(frames) * 1000000 / 48000;
-      rendered_start_ms_ = static_cast<uint32_t>(start_us / 1000);
-    }
-    rendered_samples_ += frames;
-    rendered_end_ms_ = static_cast<uint32_t>(end_us / 1000);
+    render_clock_.append(frames, end_us);
     playback_clock_lock_.exit();
   });
   mic_->add_data_callback([this](const std::vector<uint8_t> &data) { microphone_data_(data); });
@@ -588,7 +583,7 @@ void JarvisStream::start_playback_(const std::string &id, uint32_t generation, b
   reported_samples_ = 0;
   last_play_clock_report_ = playback_activity_;
   playback_clock_lock_.enter();
-  rendered_samples_ = rendered_start_ms_ = rendered_end_ms_ = 0;
+  render_clock_ = {};
   playback_clock_lock_.exit();
   playback_loop_request_.start();
   speaker_->start();
@@ -607,9 +602,9 @@ void JarvisStream::stop_playback_(const char *reason, bool drained) {
   playback_pending_ = playback_drain_ = playback_finishing_ = false;
   if (authenticated_ && connected_ && !shutting_down_) {
     playback_clock_lock_.enter();
-    const uint32_t rendered = rendered_samples_, start_ms = rendered_start_ms_, end_ms = rendered_end_ms_;
+    const auto clock = render_clock_;
     playback_clock_lock_.exit();
-    if (drained && rendered != playback_samples_) {
+    if (drained && clock.frames != playback_samples_) {
       drained = false;
       reason = "render_incomplete";
     }
@@ -617,8 +612,12 @@ void JarvisStream::stop_playback_(const char *reason, bool drained) {
       out["type"] = drained ? "play_drained" : "play_stopped";
       playback_identity_(out);
       out["reason"] = reason; out["samples"] = playback_samples_;
-      out["rendered_samples"] = rendered; out["last_rendered_ms"] = end_ms;
-      if (local_ack_playback_ && rendered) out["first_rendered_ms"] = start_ms;
+      out["rendered_samples"] = clock.frames;
+      out["last_rendered_ms"] = static_cast<uint32_t>(clock.last_us / 1000);
+      if (clock.frames) {
+        out["first_rendered_ms"] = static_cast<uint32_t>(clock.first_us / 1000);
+        out["max_render_discontinuity_us"] = clock.max_discontinuity_us;
+      }
     }));
   }
   playback_id_.clear();
@@ -634,17 +633,19 @@ void JarvisStream::playback_loop_(uint32_t now) {
   if (now - playback_activity_ >= 2000) { stop_playback_("playback_timeout"); return; }
   if (!reported_samples_ || now - last_play_clock_report_ >= 100) {
     playback_clock_lock_.enter();
-    const uint32_t rendered = rendered_samples_, start_ms = rendered_start_ms_, end_ms = rendered_end_ms_;
+    const auto clock = render_clock_;
     playback_clock_lock_.exit();
-    if (rendered != reported_samples_) {
+    if (clock.frames != reported_samples_) {
       if (!send_json_(json::build_json([&](JsonObject out) {
         out["type"] = "play_clock";
         playback_identity_(out);
-        out["rendered_samples"] = rendered;
-        out["last_rendered_ms"] = end_ms; out["timing"] = "i2s_dma_completion";
-        if (local_ack_playback_) out["first_rendered_ms"] = start_ms;
+        out["rendered_samples"] = clock.frames;
+        out["last_rendered_ms"] = static_cast<uint32_t>(clock.last_us / 1000);
+        out["first_rendered_ms"] = static_cast<uint32_t>(clock.first_us / 1000);
+        out["max_render_discontinuity_us"] = clock.max_discontinuity_us;
+        out["timing"] = "i2s_dma_completion";
       }))) { stop_playback_("transport_error"); return; }
-      reported_samples_ = rendered;
+      reported_samples_ = clock.frames;
       last_play_clock_report_ = now;
     }
   }

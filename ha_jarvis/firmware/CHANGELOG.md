@@ -1,3 +1,7 @@
+# 0.2.5
+
+- Report the first and last DMA render timestamps and the largest timing break for streamed playback. App 0.2.33 can use these reports to avoid aligning a follow-up to a discontinuous render.
+
 # 0.2.4
 
 - Raise channel 0 capture gain to 4x before conversion to PCM16 and report it to the App. Wake detection still uses its own channel.
