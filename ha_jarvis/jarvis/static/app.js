@@ -116,7 +116,7 @@ function showResults(results) {
       }
     }
     if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
-    if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' startup: ' +
+    if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
     for (const trial of result.trials) {
       const cold = trial.cold_startup_ms;
@@ -227,5 +227,5 @@ $('generate-ack').addEventListener('click', () => {
 $('run-synthetic-replies').addEventListener('click', () => {
   if (!window.confirm('Start one budgeted GPT-Live session with two built-in synthetic prompts? Room audio stays local.')) return;
   action(() => api('api/cloud/tests', 'POST', {transport: $('reply-transport').value,
-    comfortable_volume_confirmed: $('volume-confirmed').checked, confirm_paid: true}));
+    comfortable_volume_confirmed: $('volume-confirmed').checked, profile: $('reply-profile').value, confirm_paid: true}));
 });

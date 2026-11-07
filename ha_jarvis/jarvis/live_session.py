@@ -84,13 +84,14 @@ class _PCMTrack(AudioStreamTrack):
 
 class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
-                 startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None):
+                 startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
         self.greeting, self.on_transcript = greeting, on_transcript
+        self.instructions = instructions
         self.max_seconds, self.startup_timeout, self.close_timeout = max_seconds, startup_timeout, close_timeout
         self.metrics = LiveMetrics(transport)
         self._http = self._ws = self._pc = self._channel = self._track = None
@@ -119,7 +120,7 @@ class LiveSession:
             self._close_task = asyncio.create_task(self._close())
 
     def _config(self):
-        config = {"model": MODEL, "instructions": self.greeting or INSTRUCTIONS,
+        config = {"model": MODEL, "instructions": self.greeting or self.instructions,
                   "store": False, "delegation": {"type": "client"},
                   "audio": {"output": {"voice": VOICE}}}
         if self.greeting:

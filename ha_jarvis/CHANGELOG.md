@@ -1,3 +1,7 @@
+# 0.2.6
+
+- Compare direct-answer prompting with the baseline using the same synthetic audio. The diagnostics record whether a returned transcript mentions the expected answer. App-only update.
+
 # 0.2.5
 
 - Add the synthetic reply timing bench. Select WebSocket or WebRTC and run one session with two digital prompts to measure first and warm audible replies through the jack. App-only update.

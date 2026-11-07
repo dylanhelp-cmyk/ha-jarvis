@@ -334,7 +334,7 @@ class Bench:
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
-    async def measure_synthetic_replies(self, result, transport):
+    async def measure_synthetic_replies(self, result, transport, profile):
         from .live_bench import (SYNTHETIC_PROMPTS, benchmark_replies, match_response,
                                  render_reference, synthesize_fixture, voiced_bounds)
 
@@ -345,13 +345,13 @@ class Bench:
             self.test["phase"] = phase
         result["metric"] = "synthetic_digital_speech_end_to_audible_reply"
         result["cloud"] = await benchmark_replies(self.device, self.cloud_settings, transport,
-                                                   result["id"], fixtures, timings, stage)
+                                                   result["id"], fixtures, timings, stage, profile)
         await asyncio.sleep(.35)
         await self.device.end()
         captured, capture_start = self.device.recording()
         result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
         offset = self.device.clock_offset_ms
-        for index, (endpoint, reply) in enumerate(timings, 1):
+        for index, (endpoint, reply, answer_check) in enumerate(timings, 1):
             reference = await asyncio.to_thread(render_reference, bytes(reply.pcm))
             bounds = voiced_bounds(reference)
             if bounds is None:
@@ -365,7 +365,7 @@ class Bench:
                     acoustic_delay_range=(-.04, .45), window_seconds=.2)
             match.update(trial=index, turn="first" if index == 1 else "warm_followup",
                          digital_end_to_cloud_voice_ms=round((reply.first_voice_at - endpoint) * 1000, 1),
-                         playback=reply.player.snapshot())
+                         expected_answer_mentioned=answer_check, playback=reply.player.snapshot())
             result["trials"].append(match)
         if result["cloud"]["failure"]:
             result["error"] = result["cloud"]["failure"]
@@ -375,7 +375,7 @@ class Bench:
                                      "reason": "The synthetic turn did not complete"})
         result["status"] = "measured" if any(x["status"] == "detected" for x in result["trials"]) else "unavailable"
 
-    async def run(self, kind, repetitions, startup_transport=None):
+    async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline"):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -396,7 +396,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "synthetic_replies":
-                await self.measure_synthetic_replies(result, startup_transport)
+                await self.measure_synthetic_replies(result, startup_transport, reply_profile)
                 return
             if kind == "wake_ack":
                 await self.measure_wake_ack(result, startup_transport)
@@ -622,9 +622,14 @@ def create_ui(bench):
             return web.json_response({"native_aec3_usable": False, "reason": type(exc).__name__})
     async def cloud_start(request):
         data = await request.json()
-        if not isinstance(data, dict) or set(data) != {"transport", "confirm_paid", "comfortable_volume_confirmed"}:
+        required = {"transport", "confirm_paid", "comfortable_volume_confirmed"}
+        if not isinstance(data, dict) or not required <= set(data) <= required | {"profile"}:
             raise web.HTTPServiceUnavailable(text="Choose the built-in synthetic reply benchmark")
+        from .live_bench import REPLY_PROFILES
         transport = data["transport"]
+        profile = data.get("profile", "baseline")
+        if not isinstance(profile, str) or profile not in REPLY_PROFILES:
+            raise ValueError("Choose a supported synthetic reply profile")
         if transport not in ("websocket", "webrtc") or data["confirm_paid"] is not True:
             raise ValueError("Explicitly confirm a paid synthetic reply test and choose the transport")
         if data["comfortable_volume_confirmed"] is not True:
@@ -640,7 +645,7 @@ def create_ui(bench):
             raise ValueError("A configured key and a settled budget ledger are required")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing synthetic reply benchmark"}
-        bench.task = asyncio.create_task(bench.run("synthetic_replies", 2, transport))
+        bench.task = asyncio.create_task(bench.run("synthetic_replies", 2, transport, profile))
         return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):

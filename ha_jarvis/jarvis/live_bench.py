@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 import io
+import re
 import time
 import wave
 
@@ -12,7 +13,7 @@ import numpy as np
 
 from .audio import RATE, detect_probe
 from .playback import JackPlayback, RATE as RENDER_RATE
-from .live_session import LiveSession
+from .live_session import INSTRUCTIONS, LiveSession
 
 
 POST_INPUT_SECONDS = 15.0
@@ -136,6 +137,7 @@ class BenchReply:
         self.queue = asyncio.Queue(maxsize=65)
         self.pending_bytes = 0
         self.pcm = bytearray()
+        self.transcript = ""
         self.first_voice_at = self.last_voice_at = None
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
 
@@ -172,7 +174,17 @@ class BenchReply:
         await self.queue.put(None)
 
 
-async def benchmark_replies(device, settings, transport, identity, fixtures, timings, stage):
+REPLY_PROFILES = {
+    "baseline": INSTRUCTIONS,
+    "direct": (
+        "Listen until the user finishes a clear question, then start the answer promptly. "
+        "Lead with the answer itself in a complete short sentence. "
+        "Wait through thinking pauses or incomplete questions. Do not greet, delegate work or use tools."
+    ),
+}
+
+
+async def benchmark_replies(device, settings, transport, identity, fixtures, timings, stage, profile):
     """Stream two digital fixtures and two incremental replies on one Live session."""
     current = None
 
@@ -180,7 +192,12 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         if current is not None:
             await current.receive(pcm, rate)
 
-    session = LiveSession(settings, on_audio=on_audio, transport=transport)
+    def on_transcript(delta):
+        if current is not None and isinstance(delta, str):
+            current.transcript = (current.transcript + delta)[:512]
+
+    session = LiveSession(settings, on_audio=on_audio, transport=transport,
+                          instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
     failure = None
     try:
         stage("connecting to GPT-Live")
@@ -221,7 +238,11 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                     await sender
                 if reply.player.frames_rendered != reply.player.frames_sent:
                     raise RuntimeError("Voice PE did not confirm rendering the complete synthetic reply")
-                timings.append((fixture_end_at, reply))
+                expected = ("paris", "seine")[index - 1]
+                answer_check = (expected in re.findall(r"[a-z]+", reply.transcript.casefold())
+                                if reply.transcript.strip() else None)
+                reply.transcript = ""
+                timings.append((fixture_end_at, reply, answer_check))
             finally:
                 current = None
                 if not sender.done():
@@ -234,6 +255,6 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         failure = str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
-    return {"transport": transport, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+    return {"transport": transport, "profile": profile, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}
