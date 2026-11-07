@@ -59,6 +59,49 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["trials"][0]["digital_end_to_cloud_voice_ms"], 400)
         self.assertIsNone(result["trials"][0]["latency_ms"])
 
+    async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        fixture = (np.full(RATE, 1000, dtype="<i2").tobytes(), RATE - 1)
+        sleep = AsyncMock()
+        captured = np.zeros(4 * RATE, dtype=np.int16)
+        self.bench.device.clock_offset_ms = 0
+
+        async def send(chunks, **options):
+            self.assertEqual(options, {"prime_packets": 5, "source_prime_packets": 12, "recover_reply_stalls": True})
+            sizes = []
+            async for chunk in chunks:
+                sizes.append(len(chunk))
+                if len(sizes) in (10, 11):
+                    self.assertEqual(sleep.await_count, 1 if len(sizes) == 10 else 2)
+            self.assertEqual(sizes, [19200] * 20)
+
+        player = SimpleNamespace(send_stream=send, stop=AsyncMock(), frames_rendered=96000,
+                                 schedule_rebases=1, snapshot=lambda: {"reason": "drained"},
+                                 accepted_at=lambda frame, _: frame / 48000)
+        calls = []
+
+        def match(*_, handoff_at, **__):
+            calls.append(handoff_at(0))
+            return {"status": "detected", "windows": [
+                {"status": "detected"}, {"status": "detected"},
+                {"status": "unavailable" if len(calls) == 2 else "detected"}]}
+
+        result = {"id": "local-recovery", "trials": []}
+        with (patch("jarvis.server.JackPlayback", return_value=player),
+              patch("jarvis.server.asyncio.sleep", sleep),
+              patch.object(self.bench.device, "end", new_callable=AsyncMock),
+              patch.object(self.bench.device, "recording", return_value=(captured, 0)),
+              patch("jarvis.live_bench.synthesize_fixture", return_value=fixture),
+              patch("jarvis.live_bench.match_response", side_effect=match)):
+            await self.bench.measure_reply_stall(result)
+        self.assertEqual(calls, [0, 1])
+        self.assertEqual(sleep.await_args_list[1].args, (.25,))
+        self.assertEqual([trial["status"] for trial in result["trials"]], ["detected", "unavailable"])
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIsNone(self.bench.device.playback)
+
     async def test_cloud_key_stays_local_and_never_enters_read_or_diagnostic_responses(self):
         key = 'sk-test-local-only-' + 'x' * 32
         response = await self.ui.put('/api/cloud', json={'api_key':key})

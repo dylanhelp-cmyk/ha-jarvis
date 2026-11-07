@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', stability: 'Stream stability',
-  synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -179,6 +179,9 @@ function showResults(results) {
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
+    if (result.kind === 'reply_stall' && result.playback?.schedule_rebases) {
+      add(card, 'p', 'Sender shifted its schedule by ' + result.playback.schedule_shift_ms + ' ms.');
+    }
     if (result.stability) add(card, 'p', result.stability.status === 'measured' ?
       'Pilot gaps ' + result.stability.dropout_count : result.stability.reason);
     if (result.render_alignment) add(card, 'p', result.render_alignment.status === 'processed' ?

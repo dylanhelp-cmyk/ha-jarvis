@@ -531,6 +531,63 @@ class Bench:
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
+    async def measure_reply_stall(self, result):
+        from .live_bench import SYNTHETIC_PROMPTS, match_response, render_reference, synthesize_fixture
+
+        phrases = []
+        for prompt in SYNTHETIC_PROMPTS:
+            pcm, end = await synthesize_fixture(prompt)
+            samples = np.frombuffer(pcm, dtype="<i2")[:end]
+            # End the first phrase on a 10 ms boundary so the pause is
+            # injected between complete wire packets.
+            samples = np.pad(samples, (0, (-len(samples)) % (RATE // 100)))
+            phrases.append(await asyncio.to_thread(stereo_pcm, samples // 2))
+
+        async def chunks():
+            for index, pcm in enumerate(phrases):
+                if index:
+                    await asyncio.sleep(.25)
+                for offset in range(0, len(pcm), 19200):
+                    yield pcm[offset:offset + 19200]
+
+        device = self.device
+        await asyncio.sleep(.4)
+        self.test["phase"] = "playing two local phrases with a deliberate delivery pause"
+        player = JackPlayback(device, result["id"])
+        device.playback = player
+        requested_at = time.monotonic()
+        try:
+            await player.send_stream(chunks(), prime_packets=5, source_prime_packets=12, recover_reply_stalls=True)
+        finally:
+            with suppress(RuntimeError, OSError, TimeoutError):
+                await player.stop()
+            device.playback = None
+            result["playback"] = player.snapshot()
+        if player.frames_rendered != sum(map(len, phrases)) // 4 or player.schedule_rebases != 1:
+            raise RuntimeError("Voice PE did not confirm the entire fixture and one sender recovery")
+
+        await asyncio.sleep(.4)
+        await device.end()
+        captured, capture_start = device.recording()
+        first_frame = 0
+        for index, pcm in enumerate(phrases, 1):
+            reference = await asyncio.to_thread(render_reference, pcm)
+
+            def handoff(sample):
+                return player.accepted_at(first_frame + sample * 3, device.clock_offset_ms)
+
+            match = await asyncio.to_thread(
+                match_response, captured, capture_start, reference, 0, requested_at, requested_at,
+                handoff_at=handoff, acoustic_delay_range=(-.03, .35), window_seconds=.24)
+            windows = match["windows"]
+            heard_end = match["status"] == "detected" and windows[-1]["status"] == "detected"
+            result["trials"].append({"trial": index, "status": "detected" if heard_end else "unavailable",
+                                     "latency_ms": None, "windows": windows,
+                                     "reason": "Speech and its final window matched" if heard_end else
+                                     match.get("reason", "Final speech window could not be confirmed")})
+            first_frame += len(pcm) // 4
+        result["status"] = "measured" if all(t["status"] == "detected" for t in result["trials"]) else "unavailable"
+
     async def measure_synthetic_replies(self, result, transport, profile):
         from .live_bench import SYNTHETIC_PROMPTS, benchmark_replies, match_streamed_reply, synthesize_fixture
 
@@ -623,6 +680,9 @@ class Bench:
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
+                return
+            if kind == "reply_stall":
+                await self.measure_reply_stall(result)
                 return
             if kind == "synthetic_replies":
                 await self.measure_synthetic_replies(result, startup_transport, reply_profile)
@@ -913,7 +973,7 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "voice_turn"):
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "reply_stall", "voice_turn"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
