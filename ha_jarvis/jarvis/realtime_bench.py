@@ -35,7 +35,7 @@ def estimated_cost(usage):
 class RealtimeBenchmarkSession(LiveSession):
     def __init__(self, settings, *, on_audio, instructions, on_transcript):
         super().__init__(settings, on_audio=on_audio, transport="websocket",
-                         instructions=instructions, on_transcript=on_transcript)
+                         instructions=instructions, on_transcript=on_transcript, output_buffer_seconds=8)
         self.metrics.transport = "realtime"
         self.metrics.model = MODEL
         self.input_converter = AudioResampler(format="s16", layout="mono", rate=PCM_RATE)
@@ -61,6 +61,9 @@ class RealtimeBenchmarkSession(LiveSession):
         if self.armed or self.requested >= 2:
             raise LiveSessionError("Realtime benchmark allows exactly one response per synthetic turn")
         self.armed = True
+
+    def reply_finished(self, turn):
+        return self.completed >= turn and self._output.empty()
 
     async def _request_reply(self):
         try:
@@ -96,7 +99,11 @@ class RealtimeBenchmarkSession(LiveSession):
             if response.get("status") != "completed":
                 self._fail("Realtime response did not complete")
         elif kind == "error":
-            self._fail("Realtime benchmark reported an error")
+            code = event.get("error", {}).get("code")
+            known_codes = {"invalid_request_error", "invalid_value", "rate_limit_exceeded",
+                           "response_in_progress", "server_error", "insufficient_quota"}
+            self._fail(f"Realtime benchmark reported {code}" if code in known_codes else
+                       "Realtime benchmark reported an error")
 
     async def send_audio(self, pcm):
         if not self._ready.is_set() or self._closing or self._failed.is_set():

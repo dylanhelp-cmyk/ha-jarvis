@@ -84,7 +84,8 @@ class _PCMTrack(AudioStreamTrack):
 
 class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
-                 startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS):
+                 startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
+                 output_buffer_seconds=1):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
@@ -102,7 +103,8 @@ class LiveSession:
         self._tasks = set()
         self._close_task = None
         self._closing = self._disposed = False
-        self._output = asyncio.Queue(maxsize=50)
+        self._output = asyncio.Queue(maxsize=50 * output_buffer_seconds)
+        self._output_limit_bytes = RATE * 2 * output_buffer_seconds
         self._output_bytes = 0
 
     def _spawn(self, coroutine):
@@ -238,8 +240,8 @@ class LiveSession:
     def _queue_audio(self, pcm):
         if self._closing or not pcm:
             return
-        if len(pcm) % 2 or self._output_bytes + len(pcm) > RATE * 2:
-            self._fail("Cloud output queue exceeded one second or contained invalid PCM")
+        if len(pcm) % 2 or self._output_bytes + len(pcm) > self._output_limit_bytes:
+            self._fail("Cloud output queue exceeded its limit or contained invalid PCM")
             return
         try:
             self._output.put_nowait(pcm)

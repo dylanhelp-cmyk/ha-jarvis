@@ -10,6 +10,13 @@ from jarvis.playback import stereo_pcm
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quiet_audio_can_extend_a_reply_without_finishing_it_early(self):
+        reply = BenchReply(SimpleNamespace(ws=None), "test")
+        reply.last_voice_at = 1.0
+        reply.last_audio_at = 1.6
+        self.assertFalse(reply.ready_to_drain(1.9))
+        self.assertTrue(reply.ready_to_drain(2.21))
+
     async def test_live_reply_attenuation_reaches_the_render_reference(self):
         source = (3000 * np.sin(2 * np.pi * 440 * np.arange(1600) / RATE)).astype("<i2").tobytes()
         pcm = []

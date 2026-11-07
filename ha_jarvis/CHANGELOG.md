@@ -1,3 +1,9 @@
+# 0.2.26
+
+- Drain queued reply audio after a failed synthetic comparison. Preserve the failure reason in the result.
+- Let the isolated Realtime benchmark buffer bursts of returned audio and finish at the provider's response completion event.
+- Allow brief quiet gaps in GPT-Live output before ending playback.
+
 # 0.2.25
 
 - Add a separate synthetic comparison for GPT-Realtime-2.1 Mini over WebSocket with 220 ms of silence to detect the end of speech.

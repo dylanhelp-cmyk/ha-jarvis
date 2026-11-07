@@ -289,7 +289,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
         phase("playing the GPT-Live reply through the jack")
         async with asyncio.timeout(8):
-            while time.monotonic() - reply.last_voice_at < .6:
+            while not reply.ready_to_drain(time.monotonic()):
                 if sender.done():
                     sender.result()
                     raise RuntimeError("Reply playback stopped early")

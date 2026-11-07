@@ -177,13 +177,15 @@ async def synthesize_fixture(prompt):
 
 
 class BenchReply:
-    def __init__(self, device, identity, *, output_gain_db=0):
+    def __init__(self, device, identity, *, output_gain_db=0, output_buffer_seconds=1):
         self.player = JackPlayback(device, identity)
-        self.queue = asyncio.Queue(maxsize=65)
+        self.queue = asyncio.Queue(maxsize=65 * output_buffer_seconds)
+        self.queue_limit_bytes = output_buffer_seconds * RENDER_RATE * 4
         self.pending_bytes = 0
         self.pcm = bytearray()
         self.transcript = ""
         self.first_voice_at = self.last_voice_at = None
+        self.last_audio_at = None
         self.first_voice_sample = None
         self.leading_pcm = b""
         self.output_scale = 10 ** (output_gain_db / 20)
@@ -195,13 +197,14 @@ class BenchReply:
             if self.output_scale != 1:
                 mono = np.rint(mono * self.output_scale)
             stereo = np.repeat(mono, 2).astype("<i2").tobytes()
-            if self.pending_bytes + len(stereo) > RENDER_RATE * 4 or len(self.pcm) + len(stereo) > 8 * RENDER_RATE * 4:
+            if self.pending_bytes + len(stereo) > self.queue_limit_bytes or len(self.pcm) + len(stereo) > 8 * RENDER_RATE * 4:
                 raise RuntimeError("Synthetic reply exceeded its playback queue or duration bound")
             self.queue.put_nowait(stereo)
             self.pending_bytes += len(stereo)
             self.pcm.extend(stereo)
 
     async def receive(self, pcm, rate):
+        self.last_audio_at = time.monotonic()
         samples = np.frombuffer(pcm, dtype="<i2")
         bounds = voiced_bounds(samples)
         if bounds is not None:
@@ -220,6 +223,11 @@ class BenchReply:
         frame = av.AudioFrame.from_ndarray(samples.reshape(1, -1), format="s16", layout="mono")
         frame.sample_rate = rate
         self._render(frame)
+
+    def ready_to_drain(self, now):
+        return self.last_voice_at is not None and (
+            now - self.last_audio_at >= .8 or now - self.last_voice_at >= 1.2
+        )
 
     async def chunks(self):
         while (chunk := await self.queue.get()) is not None:
@@ -266,7 +274,8 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         stage("connecting to GPT-Live")
         await session.start()
         for index, (fixture, endpoint) in enumerate(fixtures, 1):
-            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=-6)
+            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=-6,
+                               output_buffer_seconds=8 if transport == "realtime" else 1)
             current = reply
             device.playback = reply.player
             sender = asyncio.create_task(reply.player.send_stream(reply.chunks(), prime_packets=5,
@@ -294,7 +303,9 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                     if input_samples < endpoint <= input_samples + 320:
                         fixture_end_at = sent_at + (endpoint - input_samples) / RATE
                     input_samples += 320
-                    if fixture_end_at and reply.last_voice_at and time.monotonic() - reply.last_voice_at >= .6:
+                    complete = (session.reply_finished(index) if transport == "realtime"
+                                else reply.ready_to_drain(time.monotonic()))
+                    if fixture_end_at and complete:
                         break
                 else:
                     raise TimeoutError("No complete spoken reply arrived within the trial window")
@@ -309,6 +320,14 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                                 if reply.transcript.strip() else None)
                 reply.transcript = ""
                 timings.append((fixture_end_at, reply, answer_check))
+            except (OSError, RuntimeError, ValueError, TimeoutError):
+                current = None
+                if reply.first_voice_at is not None and not sender.done():
+                    with suppress(OSError, RuntimeError, ValueError, TimeoutError):
+                        async with asyncio.timeout(8):
+                            await reply.finish()
+                            await sender
+                raise
             finally:
                 current = None
                 if not sender.done():
@@ -318,7 +337,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                     await reply.player.stop()
                 device.playback = None
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        failure = str(exc) or type(exc).__name__
+        failure = session.metrics.error or str(exc) or type(exc).__name__
     finally:
         metrics = await session.close()
     return {"transport": transport, "model": metrics.model, "profile": profile, "playback_prime_ms": 50, "source_reserve_ms": 120,

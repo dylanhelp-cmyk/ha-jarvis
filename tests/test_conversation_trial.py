@@ -62,6 +62,9 @@ class SimulatedReply:
     def chunks(self):
         return None
 
+    def ready_to_drain(self, now):
+        return self.last_voice_at is not None and now - self.last_voice_at >= .6
+
     async def finish(self):
         self.draining.set()
 
