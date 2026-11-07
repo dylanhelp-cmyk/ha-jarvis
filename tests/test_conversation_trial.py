@@ -277,7 +277,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                   for i in range(40)]
         device = SimpleNamespace(clock_offset_ms=0, frames=frames)
         player = SimpleNamespace(confirmed_span=lambda: (base_ms, render_end_ms),
-                                 frames_rendered=24_000, schedule_rebases=0)
+                                 frames_rendered=24_000, schedule_rebases=0, max_render_discontinuity_us=None)
         reply = SimpleNamespace(player=player, pcm=bytes(24_000 * 4))
         with (patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
               patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: 10.64))):
@@ -290,6 +290,9 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             player.schedule_rebases = 1
             self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
             player.schedule_rebases = 0
+            player.max_render_discontinuity_us = 20_000
+            self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
+            player.max_render_discontinuity_us = None
             player.confirmed_span = lambda: (base_ms - 25, render_end_ms)
             self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
 

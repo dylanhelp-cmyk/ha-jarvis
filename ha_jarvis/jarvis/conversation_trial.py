@@ -171,7 +171,8 @@ def warm_input_after_render(device, reply, delay_ms):
     """Warm AEC with the measured render tail, then release only new speech."""
     span = reply.player.confirmed_span()
     offset = device.clock_offset_ms
-    if span is None or offset is None or reply.player.schedule_rebases or not device.frames:
+    if (span is None or offset is None or reply.player.schedule_rebases or not device.frames
+            or (reply.player.max_render_discontinuity_us or 0) > 15_000):
         return None
     total_frames = len(reply.pcm) // 4
     if total_frames != reply.player.frames_rendered or abs(span[1] - span[0] - total_frames / 48) > 15:

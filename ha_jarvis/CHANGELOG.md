@@ -1,3 +1,7 @@
+# 0.2.33
+
+- Refill the existing playback buffer after a recoverable reply delivery stall. Keep the samples in order and continue at the regular playback rate.
+
 # 0.2.32
 
 - In wake standby, use confirmed reply render timing to preserve speech that starts just after the previous reply. Keep the existing echo guard when the render timing is ambiguous or arrives late.

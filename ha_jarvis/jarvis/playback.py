@@ -101,6 +101,9 @@ class JackPlayback:
         self.frames_rendered = None
         self.last_rendered_ms = None
         self.first_render_report = None
+        self.first_rendered_ms = None
+        self.max_render_discontinuity_us = None
+        self.render_clock_invalid = False
         self.accepted = []
         self.reason = None
         self.terminal_confirmed = False
@@ -134,8 +137,20 @@ class JackPlayback:
                     and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF):
                 self.frames_rendered = rendered
                 self.last_rendered_ms = stamp
-                if rendered and self.first_render_report is None:
-                    self.first_render_report = rendered, stamp
+                if rendered:
+                    if self.first_render_report is None:
+                        self.first_render_report = rendered, stamp
+                    if "first_rendered_ms" in message or "max_render_discontinuity_us" in message:
+                        first = message.get("first_rendered_ms")
+                        gap = message.get("max_render_discontinuity_us")
+                        if (type(first) is not int or not 0 <= first <= stamp
+                                or type(gap) is not int or not 0 <= gap <= 120_000_000
+                                or (self.first_rendered_ms is not None and first != self.first_rendered_ms)
+                                or gap < (self.max_render_discontinuity_us or 0)):
+                            self.render_clock_invalid = True
+                        else:
+                            self.first_rendered_ms = first
+                            self.max_render_discontinuity_us = gap
             if kind == "play_started":
                 self.started.set()
             elif kind in ("play_stopped", "play_drained"):
@@ -233,11 +248,13 @@ class JackPlayback:
             if lag > MAX_SEND_LAG_MS:
                 if not recover_reply_stalls or lag > MAX_REPLY_RECOVERY_LAG_MS:
                     raise RuntimeError("Voice PE sender fell behind; playback stopped without acceleration")
-                # A short source stall may be audible. Move the schedule forward
-                # so the next packets keep their normal cadence.
-                anchor += lag / 1000
+                # Refill the existing device prime as data becomes available.
+                # The wire can burst within its window while the DAC stays at 48 kHz.
+                refill_advance_ms = min(self.frames_sent, advance_frames) * 1000 / RATE
+                shift_ms = lag - refill_advance_ms
+                anchor += shift_ms / 1000
                 self.schedule_rebases += 1
-                self.schedule_shift_ms += lag
+                self.schedule_shift_ms += shift_ms
             count = len(payload) // frame_bytes
             header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, self.frames_sent)
             self.frames_sent += count
@@ -271,11 +288,13 @@ class JackPlayback:
 
     def confirmed_span(self):
         """Return inferred DMA start and reported end for fully drained audio."""
-        if (self.reason != "drained" or self.frames_rendered != self.frames_sent
+        if (self.render_clock_invalid or self.reason != "drained" or self.frames_rendered != self.frames_sent
                 or self.first_render_report is None or self.last_rendered_ms is None):
             return None
         first_count, first_end = self.first_render_report
-        first_ms = (first_end - round(first_count * 1000 / RATE)) & 0xFFFFFFFF
+        first_ms = self.first_rendered_ms
+        if first_ms is None:
+            first_ms = (first_end - round(first_count * 1000 / RATE)) & 0xFFFFFFFF
         if first_ms >= self.last_rendered_ms:
             return None
         return first_ms, self.last_rendered_ms
@@ -293,6 +312,11 @@ class JackPlayback:
             result["source_prime_wait_ms"] = round(self.source_prime_wait_ms, 1)
         if self.play_start_wait_ms is not None:
             result["play_start_wait_after_prime_ms"] = round(self.play_start_wait_ms, 1)
+        if self.first_rendered_ms is not None or self.render_clock_invalid:
+            result["render_clock_valid"] = not self.render_clock_invalid
+            if not self.render_clock_invalid:
+                result["first_rendered_device_ms"] = self.first_rendered_ms
+                result["max_render_discontinuity_us"] = self.max_render_discontinuity_us
         if self.first_render_report is not None:
             first, stamp = self.first_render_report
             if self.frames_rendered > first:

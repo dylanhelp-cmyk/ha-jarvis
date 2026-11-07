@@ -129,6 +129,56 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(ws.commands, ["play_start"])
                     self.assertEqual(len(sent), 1)
 
+    async def test_stall_refills_the_device_prime_then_resumes_pacing(self):
+        clock = 10.0
+        sent = []
+        ws = FakeSocket()
+        ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "refill")
+        payloads = [bytes([value]) * (480 * 4) for value in range(12)]
+
+        async def sleep(seconds):
+            nonlocal clock
+            clock += seconds
+
+        async def record(packet):
+            sent.append((clock, packet[HEADER.size:]))
+            await FakeSocket.send_bytes(ws, packet)
+
+        async def chunks():
+            nonlocal clock
+            yield b"".join(payloads[:6])
+            clock += .25
+            yield b"".join(payloads[6:])
+
+        ws.send_bytes = record
+        with (patch("jarvis.playback.time", SimpleNamespace(monotonic=lambda: clock)),
+              patch("jarvis.playback.asyncio.sleep", sleep)):
+            await player.send_stream(chunks(), prime_packets=5, recover_reply_stalls=True)
+
+        self.assertEqual([pcm for _, pcm in sent], payloads)
+        self.assertEqual([packet[6] for packet in ws.packets], [480 * i for i in range(12)])
+        self.assertTrue(all(abs(stamp - sent[6][0]) < 1e-8 for stamp, _ in sent[6:11]))
+        self.assertAlmostEqual(sent[11][0] - sent[10][0], .01)
+        self.assertEqual(player.snapshot()["schedule_rebases"], 1)
+        self.assertEqual(player.snapshot()["schedule_shift_ms"], 200.0)
+        self.assertEqual(ws.commands, ["play_start", "play_drain"])
+
+    def test_device_clock_uses_exact_origin_and_rejects_conflicting_reports(self):
+        ws = FakeSocket()
+        player = JackPlayback(SimpleNamespace(ws=ws), "clock")
+        player.frames_sent = 4_800
+        report = {"type": "play_clock", "playback_id": player.id, "generation": player.generation,
+                  "rendered_samples": 2_400, "first_rendered_ms": 1000, "last_rendered_ms": 1070,
+                  "max_render_discontinuity_us": 20_000}
+        player.receive(report)
+        report.update(type="play_drained", rendered_samples=4_800, last_rendered_ms=1120)
+        player.receive(report)
+        self.assertEqual(player.confirmed_span(), (1000, 1120))
+        self.assertEqual(player.snapshot()["max_render_discontinuity_us"], 20_000)
+        player.receive({**report, "first_rendered_ms": 1001})
+        self.assertIsNone(player.confirmed_span())
+        self.assertFalse(player.snapshot()["render_clock_valid"])
+
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
         device = SimpleNamespace(ws=old)
