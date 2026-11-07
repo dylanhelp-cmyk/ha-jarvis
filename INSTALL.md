@@ -8,6 +8,8 @@ Local tests make no OpenAI calls. API credentials stay in the App's local data a
 
 To try a voice reply, run **Echo reference alignment** with the speakers in their usual position. Then select **Voice preview**, review and confirm the per-run room microphone consent, and start. When armed, say “Hey Jarvis” followed by a short question. To measure a warm turn on the same connection, enable the optional follow-up and wait for “listening for your warm follow-up” before speaking again. The preview sends cleaned audio to OpenAI GPT-Live and uses the API test budget. Repeat alignment after moving the speakers or restarting the App or Voice PE. Interruptions and Assist actions are future milestones.
 
+To keep the preview ready between uses, select **Stay ready for “Hey Jarvis”**, review the repeated audio consent and choose **Enable wake standby**. Each wake can start a budgeted preview with one warm follow-up. **Stop wake standby** disarms it. An App restart also turns standby off.
+
 ## Recovery
 
 Keep a Supervisor backup of the previous App and its data, and a matching firmware build or fixed source checkout, before upgrading. The rollback pair is App **0.1.36** and firmware **0.1.6**, from commit [ae6d932](https://github.com/dylanhelp-cmyk/ha-jarvis/tree/ae6d932). Restore the App and firmware together. Use the fixed source from that commit if Builder's usual repository entry now points to the wired firmware. Keep the existing device name and secrets. If OTA recovery is unavailable, install the fixed firmware through USB.

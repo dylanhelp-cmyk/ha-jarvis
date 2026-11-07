@@ -35,6 +35,9 @@ function readiness() {
   $('wake-startup-options').hidden = !wakeTest;
   $('voice-turn-consent').hidden = kind !== 'voice_turn';
   startup.disabled = running || busy;
+  const standby = kind === 'voice_turn' && $('voice-standby').checked;
+  $('voice-preconnect').disabled = standby;
+  $('voice-follow-up').disabled = standby;
   let reason = '';
   if (!device?.connected) reason = 'Connect the paired Voice PE.';
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
@@ -45,9 +48,10 @@ function readiness() {
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
-  else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for this turn.';
+  else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for the selected voice mode.';
   $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for an authorized cloud voice preview.' : 'Ready for a local test.');
-  $('run-test').textContent = 'Run ' + labels[kind].toLowerCase();
+  $('run-test').textContent = standby ? 'Enable wake standby' : 'Run ' + labels[kind].toLowerCase();
+  $('cancel-test').textContent = state?.test.standby ? 'Stop wake standby' : 'Stop test';
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
   $('cancel-test').disabled = busy;
@@ -228,7 +232,7 @@ for (const button of document.querySelectorAll('.test-option')) {
     readiness();
   });
 }
-for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport', 'voice-turn-confirmed']) $(id).addEventListener('change', readiness);
+for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport', 'voice-turn-confirmed', 'voice-standby']) $(id).addEventListener('change', readiness);
 
 $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -257,8 +261,10 @@ $('run-test').addEventListener('click', () => {
   if (kind === 'voice_turn') {
     if (!$('voice-turn-confirmed').checked) return;
     $('voice-turn-confirmed').checked = false;
-    Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true,
-      input_gain_db: Number($('voice-input-gain').value), follow_up: $('voice-follow-up').checked, preconnect: $('voice-preconnect').checked});
+    const standby = $('voice-standby').checked;
+    Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true, standby,
+      allow_repeated_wake_audio: standby, input_gain_db: Number($('voice-input-gain').value),
+      follow_up: standby || $('voice-follow-up').checked, preconnect: !standby && $('voice-preconnect').checked});
   }
   action(() => api('api/tests', 'POST', body));
 });

@@ -1,3 +1,7 @@
+# 0.2.30
+
+- Add opt-in wake standby to Voice preview. It renews the local wake arm and opens GPT-Live after each wake. Standby uses the existing budget and stops on restart, device loss or an unsettled cloud session.
+
 # 0.2.29
 
 - Add a local Speech recovery check. It measures two generated phrases through the jack with an intentional delivery pause. Use it with the speakers at a comfortable level and idle.

@@ -59,6 +59,65 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["trials"][0]["digital_end_to_cloud_voice_ms"], 400)
         self.assertIsNone(result["trials"][0]["latency_ms"])
 
+    async def test_standby_rearms_locally_and_waits_for_a_real_wake_before_cloud(self):
+        from unittest.mock import AsyncMock
+
+        device = self.bench.device
+        second_arm = asyncio.Event()
+        third_arm = asyncio.Event()
+        arms = []
+        device.info["wake_capture_protocol"] = 1
+
+        async def begin(identity, _duration, *, arm_timeout_ms):
+            self.assertEqual(arm_timeout_ms, 120_000)
+            arms.append(identity)
+            device.awaiting_wake = True
+            device.stopped.clear()
+            if len(arms) == 1:
+                device.arm_stop_reason = "arm_timeout"
+                device.stopped.set()
+            elif len(arms) == 2:
+                second_arm.set()
+            elif len(arms) == 3:
+                third_arm.set()
+
+        async def voice_turn(_device, _settings, result, *_args, **kwargs):
+            self.assertTrue(device.wake_event.is_set())
+            self.assertTrue(kwargs["follow_up"])
+            self.assertIsNone(kwargs["wait_for_preconnected_wake"])
+            result["cloud"] = {"finalization_confirmed": True}
+            result["status"] = "unavailable"
+            return []
+
+        ready = {"connected": True, "muted": False, "raw_ready": True,
+                 "jack_plugged": True, "wake_capture_protocol": 1, "playback_protocol": 1}
+        self.bench.cloud_settings.set_key("sk-local-standby-test-key")
+        with (patch.object(device, "snapshot", return_value=ready),
+              patch.object(device, "begin", side_effect=begin),
+              patch.object(device, "end", new_callable=AsyncMock),
+              patch.object(self.bench, "alignment_delay", return_value=35),
+              patch.object(self.bench, "acknowledgment_status", return_value={"cached_on_device": True}),
+              patch("jarvis.server.verified_render", return_value=("clip", b"pcm")),
+              patch("jarvis.conversation_trial.run_voice_turn", side_effect=voice_turn) as cloud):
+            body = {"kind": "voice_turn", "standby": True, "confirm_paid": True,
+                    "allow_room_audio_to_openai": True, "comfortable_volume_confirmed": True}
+            response = await self.ui.post("/api/tests", json=body)
+            self.assertEqual(response.status, 400)
+            self.assertIsNone(self.bench.task)
+            body["allow_repeated_wake_audio"] = True
+            response = await self.ui.post("/api/tests", json=body)
+            self.assertEqual(response.status, 202)
+            await asyncio.wait_for(second_arm.wait(), 1)
+            cloud.assert_not_called()
+            self.assertEqual(len(self.bench.results), 1)
+            device.wake_details = {"ack_cache_id": "clip"}
+            device.wake_event.set()
+            await asyncio.wait_for(third_arm.wait(), 1)
+            cloud.assert_awaited_once()
+            await self.bench.cancel()
+            self.assertFalse(self.bench.test["running"])
+            self.assertEqual(len(set(arms)), 3)
+
     async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

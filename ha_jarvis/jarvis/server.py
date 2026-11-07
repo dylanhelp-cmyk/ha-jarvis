@@ -34,6 +34,7 @@ from .playback import JackPlayback, WakeCacheUpload, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
+STANDBY_ARM_MS = 120_000
 DEFAULTS = {"ha_lan_url": "", "repetitions": 3}
 LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
                  "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
@@ -416,7 +417,7 @@ class Bench:
                 result["opening_prefix_echo"] = {"status": "unavailable",
                     "reason": "No usable partial render report matched the completed acknowledgment"}
 
-    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect):
+    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_streamed_reply
 
@@ -427,7 +428,8 @@ class Bench:
             raise ValueError("Run a successful echo reference alignment first")
         ident, pcm = cached
         async def ready_wake():
-            if not await self.wait_for_wake(result, timeout=15 if preconnect else 30):
+            timeout = STANDBY_ARM_MS / 1000 + 2 if standby else (15 if preconnect else 30)
+            if not await self.wait_for_wake(result, timeout=timeout):
                 return False
             if device.wake_details.get("ack_cache_id") != ident:
                 raise RuntimeError("The verified wake acknowledgment did not start")
@@ -630,8 +632,24 @@ class Bench:
         result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
                                              for x in result["trials"]) else "unavailable"
 
+    async def run_standby(self, gain_db):
+        """Keep local wake available until explicitly stopped or the setup changes."""
+        while True:
+            await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True)
+            result = self.results[0]
+            if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
+                self.results.pop(0)
+            elif not result.get("cloud", {}).get("finalization_confirmed") or result["status"] == "failed":
+                return
+            device = self.device.snapshot()
+            if (not device["connected"] or device.get("muted") or not device.get("raw_ready")
+                    or self.alignment_delay() is None or not self.acknowledgment_status()["cached_on_device"]
+                    or self.cloud_settings.public()["paid_retry_blocked"]):
+                return
+            self.test = {"running": True, "id": uuid.uuid4().hex, "phase": "rearming for Hey Jarvis", "standby": True}
+
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
-                  follow_up=False, preconnect=False):
+                  follow_up=False, preconnect=False, *, standby=False):
         started = time.monotonic()
         result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -641,6 +659,8 @@ class Bench:
         del self.results[30:]
         player = sender = None
         digital_only = kind == "synthetic_replies" and startup_transport == "realtime"
+        if standby:
+            result["standby"] = True
         try:
             if digital_only:
                 result["route"] = "digital"
@@ -664,7 +684,7 @@ class Bench:
                 self.opening_audio = OpeningAudio()
                 self.device.pcm_consumer = self.opening_audio.offer
                 await self.device.begin(result["id"], (55000 if follow_up else 30000) if kind == "voice_turn" else 5000,
-                                        arm_timeout_ms=19000 if preconnect else 32000)
+                                        arm_timeout_ms=STANDBY_ARM_MS if standby else (19000 if preconnect else 32000))
             else:
                 await self.device.begin(result["id"], 100000 if kind == "connection" else 65000)
             result["device_session"] = dict(self.device.capture_session)
@@ -676,7 +696,7 @@ class Bench:
                 result.update(status="passed", metric="microphone_connection")
                 return
             if kind == "voice_turn":
-                await self.measure_voice_turn(result, gain_db, follow_up, preconnect)
+                await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -857,6 +877,8 @@ def create_ui(bench):
             data = await request.json()
             if not isinstance(data, dict) or set(data) != {"api_key"}:
                 raise ValueError("Only local API key entry is supported")
+            if bench.test.get("standby"):
+                raise web.HTTPConflict(text="Stop wake standby before changing the OpenAI key")
             bench.cloud_settings.set_key(data["api_key"])
         return web.json_response({**bench.cloud_settings.public(), "fixture_loaded": bool(bench.cloud_fixture),
                                   "benchmark_available": True,
@@ -991,6 +1013,11 @@ def create_ui(bench):
         preconnect = data.get("preconnect", False)
         if type(preconnect) is not bool or (preconnect and kind != "voice_turn"):
             raise ValueError("Preconnection is available only in the consent-gated voice preview")
+        standby = data.get("standby", False)
+        if type(standby) is not bool or (standby and (kind != "voice_turn" or preconnect)):
+            raise ValueError("Wake standby uses the voice preview and connects only after wake")
+        if standby and data.get("allow_repeated_wake_audio") is not True:
+            raise ValueError("Explicitly authorize cleaned microphone audio after each wake while standby is enabled")
         gain_db = data.get("input_gain_db", 24 if kind == "voice_turn" else 0)
         if type(gain_db) is not int or gain_db not in (0, 12, 24, 36):
             raise ValueError("Choose 0, 12, 24 or 36 dB of preview microphone gain")
@@ -1018,8 +1045,12 @@ def create_ui(bench):
         bench.test = {"running": True, "id": ident, "phase": "preparing"}
         if kind == "voice_turn":
             bench.test["input_gain_db"] = gain_db
-        bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
-                                                  follow_up=follow_up, preconnect=preconnect))
+        if standby:
+            bench.test["standby"] = True
+            bench.task = asyncio.create_task(bench.run_standby(gain_db))
+        else:
+            bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
+                                                      follow_up=follow_up, preconnect=preconnect))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):
@@ -1123,7 +1154,7 @@ def create_audio(bench):
                     bench.observe_firmware()
                     if bench.device.info.get("muted") and bench.test.get("id") and bench.test["running"]:
                         asyncio.create_task(bench.cancel("device_muted"))
-                    elif bench.device.playback and bench.device.info.get("jack_plugged") is False:
+                    elif (bench.device.playback or bench.test.get("standby")) and bench.device.info.get("jack_plugged") is False:
                         asyncio.create_task(bench.cancel("jack_unplugged"))
         except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:
             disconnect_details = {"protocol_error": str(exc), "exception_type": type(exc).__name__, "server_close_code": 1008}
