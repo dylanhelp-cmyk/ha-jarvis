@@ -46,7 +46,7 @@ def render_reference(pcm):
 
 def match_response(captured, capture_start, reference, voiced_start_sample,
                    fixture_end_at, earliest_output_at, *, handoff_at=None,
-                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32, onset_horizon_seconds=4):
+                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32, onset_horizon_seconds=4, allow_late_outlier=False):
     """Require distinct reply windows to agree before reporting onset."""
     unavailable = {"status": "unavailable", "latency_ms": None,
                    "fixture_end_to_audible_ms": None, "windows": []}
@@ -81,6 +81,13 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
     if len(candidates) < 2:
         return {**result, "reason": "Fewer than two reliable acoustic reply windows"}
     spread = (max(candidates) - min(candidates)) * 1000
+    if (spread > 40 and allow_late_outlier and len(candidates) == len(windows) == 4
+            and min(w["confidence"] for w in windows[:3]) >= .8
+            and max(candidates[:3]) - min(candidates[:3]) <= .012
+            and candidates[-1] > max(candidates[:3])):
+        windows[-1]["late_outlier"] = True
+        candidates = candidates[:3]
+        spread = (max(candidates) - min(candidates)) * 1000
     if spread > 40:
         return {**result, "reason": "Acoustic reply windows contradict each other", "window_spread_ms": round(spread, 2)}
     onset = float(np.median(candidates))

@@ -1,3 +1,7 @@
+# 0.2.15
+
+- Allow the known-clip alignment to identify a later acoustic outlier when three strong early windows agree within 12 ms. Report the outlier. Ordinary reply timing still requires its windows to agree. App-only update.
+
 # 0.2.14
 
 - Add an optional warm follow-up to the consent-gated Voice preview. After the first answer, wait for the listening status before speaking again. The test keeps the same connection and measures a fresh microphone queue. App-only update.

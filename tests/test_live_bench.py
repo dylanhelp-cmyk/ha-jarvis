@@ -47,6 +47,21 @@ class ReplyMatchingTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertIn("contradict", result["reason"])
 
+    def test_known_clip_alignment_can_flag_one_late_window_without_relaxing_reply_timing(self):
+        reply = np.full(RATE, 1200, dtype="<i2")
+        starts = np.linspace(0, RATE - int(.14 * RATE), 4, dtype=int)
+        fake = [{"status": "detected", "confidence": .95,
+                 "offset_seconds": 1 + offset / RATE + (.047 if i == 3 else 0)}
+                for i, offset in enumerate(starts)]
+        with patch("jarvis.live_bench.detect_probe", side_effect=fake):
+            strict = match_response(np.zeros(8 * RATE), 100, reply, 0, 101, 101.1, window_seconds=.14)
+        self.assertEqual(strict["status"], "unavailable")
+        with patch("jarvis.live_bench.detect_probe", side_effect=fake):
+            calibrated = match_response(np.zeros(8 * RATE), 100, reply, 0, 101, 101.1,
+                                        window_seconds=.14, allow_late_outlier=True)
+        self.assertEqual(calibrated["status"], "detected", calibrated)
+        self.assertTrue(calibrated["windows"][-1]["late_outlier"])
+
     def test_known_fixture_energy_trims_head_and_tail(self):
         samples = np.concatenate((np.zeros(320), np.full(640, 2000), np.zeros(480))).astype("<i2")
         self.assertEqual(voiced_bounds(samples), (320, 960))

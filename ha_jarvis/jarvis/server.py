@@ -483,7 +483,7 @@ class Bench:
                 hi = min(len(captured), round((started + .9 - capture_start) * RATE))
                 match = await asyncio.to_thread(
                     match_response, captured[lo:hi], capture_start + lo / RATE, reference,
-                    bounds[0], started, started, window_seconds=.14)
+                    bounds[0], started, started, window_seconds=.14, allow_late_outlier=True)
                 if match["status"] == "detected":
                     delays.append((match["audible_onset_at"] - started - bounds[0] / RATE) * 1000)
                     renders.append((pcm, *span))
