@@ -17,12 +17,15 @@ def _bands(pcm):
 
 
 def measure_echo_reduction(captured_int16, capture_start, rendered_int16, render_start,
-                           measured_delay_ms):
+                           measured_delay_ms, *, precleaned=None):
     result = {'status': 'unavailable', 'reason': None, 'scope': SCOPE,
               'pilot_band_reduction_db': None, 'delay_assumed_ms': None,
               'raw_pilot_band_dbfs': None, 'processed_pilot_band_dbfs': None,
               'noise_floor_band_dbfs': None, 'noise_floor_limited': None,
               'max_processor_call_ms': None}
+    if precleaned is not None:
+        result['scope'] = 'DMA-confirmed live far-end processing; no near-end speech acceptance'
+
     def unavailable(reason):
         return {**result, 'reason': reason}
     for pcm in (captured_int16, rendered_int16):
@@ -67,21 +70,26 @@ def measure_echo_reduction(captured_int16, capture_start, rendered_int16, render
     result.update(raw_pilot_band_dbfs=db(sum(raw_level)), noise_floor_band_dbfs=db(sum(raw_floor)))
     if result['raw_pilot_snr_db'] < 8 or np.any(raw_level < raw_floor * 4):
         return unavailable('Raw acoustic pilot is too weak relative to quiet pre-roll noise')
-    try:
-        processor = HostAEC3(reference_delay_ms=0, stream_delay_ms=0)
-    except (ImportError, RuntimeError) as exc:
-        return unavailable(f'Native AEC3 backend is unavailable ({type(exc).__name__})')
-    processed = np.empty(n, dtype='<i2')
-    for index in range(0, n, FRAME_SAMPLES):
-        processed[index:index + FRAME_SAMPLES] = np.frombuffer(processor.process(
-            captured_int16[index:index + FRAME_SAMPLES].astype('<i2', copy=False).tobytes(),
-            aligned[index:index + FRAME_SAMPLES].tobytes()), dtype='<i2')
+    if precleaned is None:
+        try:
+            processor = HostAEC3(reference_delay_ms=0, stream_delay_ms=0)
+        except (ImportError, RuntimeError) as exc:
+            return unavailable(f'Native AEC3 backend is unavailable ({type(exc).__name__})')
+        processed = np.empty(n, dtype='<i2')
+        for index in range(0, n, FRAME_SAMPLES):
+            processed[index:index + FRAME_SAMPLES] = np.frombuffer(processor.process(
+                captured_int16[index:index + FRAME_SAMPLES].astype('<i2', copy=False).tobytes(),
+                aligned[index:index + FRAME_SAMPLES].tobytes()), dtype='<i2')
+        result['max_processor_call_ms'] = round(processor.max_processing_ms, 3)
+    elif precleaned.ndim != 1 or precleaned.dtype != np.dtype('int16') or len(precleaned) != n:
+        return unavailable('Live echo output does not cover the complete aligned capture')
+    else:
+        processed = precleaned
     level = float(sum(np.median(_bands(processed[start:end]), axis=0)))
     floor = max(float(sum(raw_floor)), float(sum(np.percentile(_bands(processed[quiet_start:quiet_end]), 95, axis=0))))
     limited = level <= floor * 2
     result.update(status='measured', reason='Reduction is bounded by the measured noise floor' if limited else 'Pilot-band power comparison only; not full-band ERLE',
         processed_pilot_band_dbfs=db(level), noise_floor_band_dbfs=db(floor), noise_floor_limited=limited,
         pilot_band_reduction_db=round(10 * math.log10(sum(raw_level) / max(level, floor)), 2),
-        max_processor_call_ms=round(processor.max_processing_ms, 3),
         ignored_tail_samples=len(captured_int16) - n)
     return result

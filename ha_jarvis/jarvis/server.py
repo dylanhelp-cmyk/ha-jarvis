@@ -718,12 +718,29 @@ class Bench:
                 return
             signal_pcm, probes = bench_signal(kind, repetitions)
             pcm = await asyncio.to_thread(stereo_pcm, signal_pcm)
-            await asyncio.sleep(.5)
             player = JackPlayback(self.device, result["id"])
+            live_echo = None
+            alignment = self.alignment_delay() if kind == "echo" else None
+            if alignment is not None:
+                from .streaming_aec import ConfirmedRenderInput
+
+                cleaned = bytearray()
+                try:
+                    live_echo = ConfirmedRenderInput(player, pcm, alignment)
+                except (ImportError, RuntimeError) as exc:
+                    result["live_echo"] = {"status": "unavailable", "reason": f"AEC3 unavailable ({type(exc).__name__})"}
+                else:
+                    def observe_echo(frame, offset_ms):
+                        cleaned.extend(live_echo.offer(frame, offset_ms))
+
+                    for frame in self.device.frames:
+                        observe_echo(frame, self.device.clock_offset_ms)
+                    self.device.pcm_consumer = observe_echo
+            await asyncio.sleep(.5)
             self.device.playback = player
             self.test["phase"] = "playing through the Voice PE jack"
             requested_at = time.monotonic()
-            sender = asyncio.create_task(player.send(pcm))
+            sender = asyncio.create_task(player.send(pcm, prime_packets=5 if live_echo else 1))
             if kind == "stop":
                 done, _ = await asyncio.wait({sender}, timeout=2)
                 if done:
@@ -784,6 +801,16 @@ class Bench:
                         result["echo"] = await asyncio.to_thread(
                             measure_echo_reduction, captured, capture_start, reference,
                             accepted_start, summary["median_ms"])
+                        if live_echo and live_echo.finished and not live_echo.error:
+                            render_start = (player.first_rendered_ms + offset_ms) / 1000
+                            result["live_echo"] = await asyncio.to_thread(
+                                measure_echo_reduction, captured, capture_start, reference,
+                                render_start, alignment, precleaned=np.frombuffer(cleaned, dtype="<i2"))
+                if live_echo:
+                    live = result.setdefault("live_echo", {"status": "unavailable",
+                        "reason": live_echo.error or "Live echo analysis needs a measured pilot and a complete render"})
+                    live["processed_during_playback_samples"] = live_echo.processed_during_playback
+                    live["maximum_waiting_ms"] = round(live_echo.max_waiting_samples * 1000 / RATE, 1)
                 if kind == "echo" and "echo" not in result:
                     result["echo"] = {"status": "unavailable",
                                       "reason": "Echo analysis needs a measured pilot and confirmed output of every reference frame"}

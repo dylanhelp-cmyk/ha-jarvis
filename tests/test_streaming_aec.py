@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.streaming_aec import StreamingEcho, check_opening_reference, compare_opening_prefix
+from jarvis.streaming_aec import ConfirmedRenderInput, StreamingEcho, check_opening_reference, compare_opening_prefix
 
 
 class ReferenceRecorder:
@@ -18,6 +18,47 @@ class ReferenceRecorder:
 
 
 class StreamingEchoTests(unittest.TestCase):
+    def test_live_dma_prefix_holds_capture_and_stops_on_a_discontinuity(self):
+        player = SimpleNamespace(first_rendered_ms=None, last_rendered_ms=None, frames_rendered=None,
+                                 render_clock_invalid=False, schedule_rebases=0,
+                                 max_render_discontinuity_us=0, terminal_confirmed=False)
+        pcm = np.full(9600 * 2, 500, dtype="<i2").tobytes()
+        samples = np.arange(256 * 11, dtype="<i2")
+        frames = [PCMFrame(i, i * 256, 1000 + 16 * i, samples[i * 256:(i + 1) * 256])
+                  for i in range(11)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
+            stream = ConfirmedRenderInput(player, pcm, 35)
+        self.assertTrue(all(not stream.offer(frame, 0) for frame in frames[:6]))
+        player.first_rendered_ms, player.last_rendered_ms, player.frames_rendered = 1040, 1140, 4800
+        clean = b"".join(stream.offer(frame, 0) for frame in frames[6:10])
+        self.assertEqual(clean, samples[:1760].tobytes())
+        self.assertEqual(stream.processed_during_playback, 1760)
+        self.assertEqual(stream.waiting_samples, 768)
+
+        player.max_render_discontinuity_us = 20_000
+        player.last_rendered_ms, player.frames_rendered = 1260, 9600
+        self.assertEqual(stream.offer(frames[-1], 0), b"")
+        self.assertIn("Discontinuous speaker output", stream.error)
+
+    def test_live_dma_terminal_releases_the_remaining_capture(self):
+        player = SimpleNamespace(first_rendered_ms=1000, last_rendered_ms=1100, frames_rendered=4800,
+                                 render_clock_invalid=False, schedule_rebases=0,
+                                 max_render_discontinuity_us=0, terminal_confirmed=False,
+                                 frames_sent=4800, reason=None)
+        pcm = np.full(4800 * 2, 500, dtype="<i2").tobytes()
+        samples = np.arange(256 * 8, dtype="<i2")
+        frames = [PCMFrame(i, i * 256, 1000 + 16 * i, samples[i * 256:(i + 1) * 256])
+                  for i in range(8)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
+            stream = ConfirmedRenderInput(player, pcm, 35)
+        clean = b"".join(stream.offer(frame, 0) for frame in frames[:7])
+        self.assertEqual(len(clean), 1280 * 2)
+        player.terminal_confirmed, player.reason = True, "drained"
+        clean += stream.offer(frames[7], 0)
+        self.assertTrue(stream.finished)
+        self.assertEqual(clean, samples[:1920].tobytes())
+        self.assertEqual(stream.waiting_samples, 0)
+
     def test_first_report_prefix_excludes_capture_beyond_proven_render(self):
         pcm = np.tile((3000 * np.sin(2 * np.pi * 350 * np.arange(22080) / 48000))[:, None], (1, 2))
         frames = [PCMFrame(i, i * 256, 1000 + i * 16, np.zeros(256, dtype="<i2")) for i in range(40)]

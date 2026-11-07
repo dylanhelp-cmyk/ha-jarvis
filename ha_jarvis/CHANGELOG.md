@@ -1,3 +1,7 @@
+# 0.2.34
+
+- Add live DMA-reference echo measurement to the quiet-room echo test. Run Echo reference alignment first. The result measures speaker-only echo reduction and keeps room audio local.
+
 # 0.2.33
 
 - Refill the existing playback buffer after a recoverable reply delivery stall. Keep the samples in order and continue at the regular playback rate.

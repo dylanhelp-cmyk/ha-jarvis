@@ -201,6 +201,9 @@ function showResults(results) {
     }
     if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
       'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
+    if (result.live_echo) add(card, 'p', result.live_echo.status === 'measured' ?
+      'Live DMA-reference pilot suppression ' + result.live_echo.pilot_band_reduction_db + ' dB' :
+      'Live echo measurement unavailable. ' + result.live_echo.reason);
     for (const warning of result.warnings || []) add(card, 'p', warning);
   }
 }

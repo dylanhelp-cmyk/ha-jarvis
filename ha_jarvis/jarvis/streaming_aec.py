@@ -144,6 +144,71 @@ class StreamingEcho:
         return b"".join(cleaned)
 
 
+class ConfirmedRenderInput:
+    """Release microphone samples only when the matching DMA reference is known."""
+
+    def __init__(self, player, pcm, delay_ms):
+        self.player, self.pcm = player, pcm
+        self.echo = StreamingEcho(delay_ms)
+        self.waiting = deque()
+        self.waiting_samples = self.max_waiting_samples = 0
+        self.rendered_frames = self.processed_during_playback = 0
+        self.finished = False
+        self.error = None
+
+    def offer(self, frame, offset_ms):
+        if self.error:
+            return b""
+        self.waiting.append(frame)
+        self.waiting_samples += len(frame.samples)
+        self.max_waiting_samples = max(self.max_waiting_samples, self.waiting_samples)
+        try:
+            if self.waiting_samples > SAMPLE_RATE // 2:
+                raise RuntimeError("No reliable render report within the half-second microphone window")
+            return self._release(offset_ms)
+        except (RuntimeError, ValueError) as exc:
+            self.error = str(exc)
+            self.waiting.clear()
+            return b""
+
+    def _release(self, offset_ms):
+        player = self.player
+        first, last = player.first_rendered_ms, player.last_rendered_ms
+        count = player.frames_rendered or 0
+        if (player.render_clock_invalid or player.schedule_rebases
+                or (player.max_render_discontinuity_us or 0) > 15_000):
+            raise RuntimeError("Discontinuous speaker output invalidated the live echo reference")
+        if first is None or offset_ms is None:
+            if player.terminal_confirmed:
+                raise RuntimeError("Playback ended without a timed DMA reference")
+            return b""
+        if abs(last - first - count / 48) > 15 or count * 4 > len(self.pcm):
+            raise RuntimeError("DMA timestamps do not match the available reference samples")
+        if count > self.rendered_frames:
+            self.echo.render(bytes(self.pcm[self.rendered_frames * 4:count * 4]),
+                             (first + offset_ms) / 1000, first_frame=self.rendered_frames)
+            self.rendered_frames = count
+        if player.terminal_confirmed and not self.finished:
+            if player.reason != "drained" or count != player.frames_sent:
+                raise RuntimeError("Playback stopped before the reference could be confirmed")
+            self.echo.finish_render(count, (last + offset_ms) / 1000)
+            self.finished = True
+
+        # Leave room for millisecond quantization and the resampler's filter tail.
+        horizon = math.inf if self.finished else first + count / 48 - 20
+        clean = bytearray()
+        while self.waiting:
+            frame = self.waiting[0]
+            if frame.capture_ms + len(frame.samples) * 1000 / SAMPLE_RATE > horizon:
+                break
+            self.waiting.popleft()
+            self.waiting_samples -= len(frame.samples)
+            clean.extend(self.echo.capture(frame, offset_ms))
+        if not self.finished:
+            self.processed_during_playback += len(clean) // 2
+        return bytes(clean)
+
+
 def check_confirmed_references(frames, renders, clock_offset_ms, delay_ms):
     """Process a short local capture using confirmed render bursts and known gaps."""
     scope = "offline render alignment and sample accounting"
