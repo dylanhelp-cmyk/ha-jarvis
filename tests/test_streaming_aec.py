@@ -1,10 +1,11 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.streaming_aec import StreamingEcho, check_opening_reference
+from jarvis.streaming_aec import StreamingEcho, check_opening_reference, compare_opening_prefix
 
 
 class ReferenceRecorder:
@@ -17,6 +18,19 @@ class ReferenceRecorder:
 
 
 class StreamingEchoTests(unittest.TestCase):
+    def test_first_report_prefix_excludes_capture_beyond_proven_render(self):
+        pcm = np.tile((3000 * np.sin(2 * np.pi * 350 * np.arange(22080) / 48000))[:, None], (1, 2))
+        frames = [PCMFrame(i, i * 256, 1000 + i * 16, np.zeros(256, dtype="<i2")) for i in range(40)]
+        with patch("jarvis.streaming_aec.HostAEC3",
+                   side_effect=lambda **_: SimpleNamespace(process=lambda _capture, render: render)):
+            compared = compare_opening_prefix(frames, pcm.astype("<i2").tobytes(), 0, 1040, 1500, 4800, 30)
+            short = compare_opening_prefix(frames, pcm.astype("<i2").tobytes(), 0, 1040, 1500, 960, 30)
+        self.assertEqual(compared["status"], "compared", compared)
+        self.assertEqual(compared["capture_samples"], 1760)
+        self.assertEqual(compared["overlapping_capture_ms"], 72)
+        self.assertLess(compared["rms_difference_pcm"], 1)
+        self.assertEqual(short["status"], "unavailable")
+
     def test_render_delay_and_partial_capture_frames_preserve_samples(self):
         recorder = ReferenceRecorder()
         echo = StreamingEcho(500, processor=recorder)

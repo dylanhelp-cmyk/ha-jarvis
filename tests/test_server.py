@@ -356,6 +356,25 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeviceTests(unittest.TestCase):
+    def test_wake_render_progress_rejects_stale_generation_and_invalid_sample_clock(self):
+        device = Device()
+        device.wake_details = {"ack_playback_id": "wake", "ack_generation": 4,
+                               "ack_cache_id": "yes-sir", "ack_samples": 4800}
+        report = {"type": "play_clock", "source": "wake_ack", "playback_id": "wake", "generation": 4,
+                  "ack_cache_id": "yes-sir",
+                  "rendered_samples": 3840, "first_rendered_ms": 1000, "last_rendered_ms": 1080}
+        device.receive_json({**report, "generation": 3})
+        device.receive_json({**report, "ack_cache_id": "old-clip"})
+        device.receive_json({**report, "last_rendered_ms": 1140})
+        device.receive_json({**report, "rendered_samples": 960, "last_rendered_ms": 1020})
+        self.assertIsNone(device.wake_render_progress)
+        device.receive_json(report)
+        self.assertEqual(device.wake_render_progress[:2], (3840, 1000))
+        self.assertFalse(device.wake_terminal_event.is_set())
+        device.receive_json({**report, "type": "play_drained", "rendered_samples": 4800, "last_rendered_ms": 1100})
+        self.assertTrue(device.wake_terminal_event.is_set())
+        self.assertGreaterEqual(device.wake_render_terminal_at, device.wake_render_progress[2])
+
     def test_sample_gap_invalidates_capture(self):
         device = Device()
         device.capture_id = 'test'

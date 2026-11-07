@@ -1,3 +1,8 @@
+# 0.2.21
+
+- Compare echo cancellation using the first confirmed portion of the cached wake clip with the full playback reference in the local Wake acknowledgment test. Keep this comparison on the App.
+- App-only update. Run Wake acknowledgment with cloud startup disabled. After the test is armed, say “Hey Jarvis” and immediately speak a short question.
+
 # 0.2.20
 
 - Lower live preview reply output by 6 dB before sending audio to the jack.

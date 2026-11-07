@@ -104,6 +104,8 @@ class Device:
         self.wake_event = asyncio.Event()
         self.wake_details = {}
         self.wake_playback_terminal = {}
+        self.wake_render_progress = None
+        self.wake_render_terminal_at = None
         self.wake_terminal_event = asyncio.Event()
 
     def snapshot(self):
@@ -136,13 +138,27 @@ class Device:
         if kind in ("play_started", "play_render", "play_clock", "play_stopped", "play_drained"):
             if self.playback is not None:
                 self.playback.receive(message)
-            if (kind in ("play_stopped", "play_drained") and message.get("source") == "wake_ack"
+            if (message.get("source") == "wake_ack" and self.wake_details.get("ack_playback_id")
                     and message.get("playback_id") == self.wake_details.get("ack_playback_id")
                     and message.get("generation") == self.wake_details.get("ack_generation")):
-                self.wake_playback_terminal = {key: message[key] for key in
-                    ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
-                self.wake_playback_terminal["drained"] = kind == "play_drained"
-                self.wake_terminal_event.set()
+                if kind == "play_clock" and self.wake_render_progress is None and not self.wake_terminal_event.is_set():
+                    samples, first, last = (message.get(key) for key in
+                                            ("rendered_samples", "first_rendered_ms", "last_rendered_ms"))
+                    expected = self.wake_details.get("ack_samples")
+                    cache_id = self.wake_details.get("ack_cache_id")
+                    # Use at least 80 ms of confirmed 48 kHz output so the
+                    # prefix can cover microphone audio after speaker onset.
+                    if (cache_id and message.get("ack_cache_id") == cache_id
+                            and all(type(value) is int for value in (samples, first, last, expected))
+                            and 3840 <= samples < expected and 0 <= first < last <= 0xFFFFFFFF
+                            and abs(last - first - samples / 48) <= 15):
+                        self.wake_render_progress = (samples, first, time.monotonic())
+                elif kind in ("play_stopped", "play_drained"):
+                    self.wake_playback_terminal = {key: message[key] for key in
+                        ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
+                    self.wake_playback_terminal["drained"] = kind == "play_drained"
+                    self.wake_render_terminal_at = time.monotonic()
+                    self.wake_terminal_event.set()
         elif kind in ("ack_cache_ready", "ack_cache_progress", "ack_cache_committed", "ack_cache_error"):
             if self.wake_cache_upload is not None:
                 self.wake_cache_upload.receive(message)
@@ -183,6 +199,8 @@ class Device:
                         ("device_time_ms", "capture_id", "ack_playback_id", "ack_generation", "ack_cache_id",
                          "ack_samples", "ack_reason") if key in message}
                     self.wake_playback_terminal = {}
+                    self.wake_render_progress = None
+                    self.wake_render_terminal_at = None
                     self.wake_event.set()
         elif kind == "capture_stopped" and message.get("capture_id") == self.capture_id:
             self.stop_info = {key: message[key] for key in ("reason", "samples_seen", "dropped_frames") if key in message}

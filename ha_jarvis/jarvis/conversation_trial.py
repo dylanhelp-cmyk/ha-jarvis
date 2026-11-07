@@ -280,6 +280,14 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         if (not terminal.get("drained") or terminal.get("rendered_samples") != len(pcm) // 4
                 or type(first) is not int or type(last) is not int):
             raise RuntimeError("wake_echo_reference_incomplete")
+        progress = getattr(device, "wake_render_progress", None)
+        terminal_at = getattr(device, "wake_render_terminal_at", None)
+        if progress and terminal_at is not None and progress[1] == first:
+            samples, _, received_at = progress
+            result["wake_render_report"] = {
+                "first_report_rendered_samples": samples,
+                "first_report_to_terminal_ms": round((terminal_at - received_at) * 1000, 1),
+            }
         buffered, result["opening_audio"] = opening.release(time.monotonic())
         if not buffered or device.errors:
             raise RuntimeError(result["opening_audio"]["reason"] or "opening_capture_failed")

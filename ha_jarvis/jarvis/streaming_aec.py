@@ -173,3 +173,39 @@ def check_opening_reference(frames, pcm, clock_offset_ms, first_rendered_ms, las
     delay_ms = (acoustic_onset - rendered_at - voiced_start / SAMPLE_RATE) * 1000
     return check_confirmed_references(frames, [(pcm, first_rendered_ms, last_rendered_ms)],
                                       clock_offset_ms, delay_ms)
+
+
+def compare_opening_prefix(frames, pcm, clock_offset_ms, first_ms, last_ms, confirmed_frames, delay_ms):
+    """Replay the first proven portion locally and compare it with the full reference."""
+    if not 0 < confirmed_frames <= len(pcm) // 4:
+        return {"status": "unavailable", "reason": "Invalid confirmed render length"}
+    # Leave room for resampler lookahead and quantized device timestamps.
+    horizon_ms = first_ms + confirmed_frames / 48 - 20
+    eligible = []
+    for frame in frames:
+        if frame.capture_ms + len(frame.samples) * 1000 / SAMPLE_RATE > horizon_ms:
+            break
+        eligible.append(frame)
+    if not eligible:
+        return {"status": "unavailable", "reason": "The first report covered no overlapping microphone frames"}
+    last_frame = eligible[-1]
+    covered_until_ms = last_frame.capture_ms + len(last_frame.samples) * 1000 / SAMPLE_RATE
+    if covered_until_ms <= first_ms:
+        return {"status": "unavailable", "reason": "The first report covered no overlapping microphone frames"}
+
+    def clean(reference, terminal_ms=None):
+        echo = StreamingEcho(delay_ms)
+        echo.render(reference, (first_ms + clock_offset_ms) / 1000, first_frame=0)
+        if terminal_ms is not None:
+            echo.finish_render(len(reference) // 4, (terminal_ms + clock_offset_ms) / 1000)
+        return np.frombuffer(b"".join(echo.capture(frame, clock_offset_ms) for frame in eligible), dtype="<i2")
+
+    try:
+        early = clean(pcm[:confirmed_frames * 4])
+        complete = clean(pcm, last_ms)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        return {"status": "unavailable", "reason": str(exc) or type(exc).__name__}
+    difference = early.astype(np.float64) - complete
+    return {"status": "compared", "capture_samples": len(early),
+            "overlapping_capture_ms": round(covered_until_ms - first_ms, 1),
+            "rms_difference_pcm": round(float(np.sqrt(np.mean(difference ** 2))), 2)}

@@ -383,12 +383,26 @@ class Bench:
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
         if result.get("wake_capture_mode") == "device_armed":
-            from .streaming_aec import check_opening_reference
+            from .streaming_aec import check_opening_reference, compare_opening_prefix
 
+            frames = tuple(device.frames)
             result["opening_echo"] = await asyncio.to_thread(
-                check_opening_reference, tuple(device.frames), pcm, device.clock_offset_ms,
+                check_opening_reference, frames, pcm, device.clock_offset_ms,
                 terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
                 match.get("audible_onset_at"), bounds[0])
+            progress = device.wake_render_progress
+            if (progress and progress[1] == terminal.get("first_rendered_ms")
+                    and result["opening_echo"]["status"] == "processed"):
+                count, first, received_at = progress
+                comparison = await asyncio.to_thread(
+                    compare_opening_prefix, frames, pcm, device.clock_offset_ms, first,
+                    terminal["last_rendered_ms"], count, result["opening_echo"]["estimated_delay_ms"])
+                comparison["first_report_to_terminal_ms"] = round(
+                    (device.wake_render_terminal_at - received_at) * 1000, 1)
+                result["opening_prefix_echo"] = comparison
+            else:
+                result["opening_prefix_echo"] = {"status": "unavailable",
+                    "reason": "No usable partial render report matched the completed acknowledgment"}
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect):
         from .conversation_trial import run_voice_turn
@@ -576,6 +590,8 @@ class Bench:
                 self.device.wake_event.clear()
                 self.device.wake_details = {}
                 self.device.wake_playback_terminal = {}
+                self.device.wake_render_progress = None
+                self.device.wake_render_terminal_at = None
                 self.device.wake_terminal_event.clear()
                 result["wake_capture_mode"] = "device_armed" if armed else "prestarted_bench_capture"
             if armed:
