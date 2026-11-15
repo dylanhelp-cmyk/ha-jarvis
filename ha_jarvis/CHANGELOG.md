@@ -1,3 +1,7 @@
+# 0.2.50
+
+- Reject greeting references with a playback clock gap before matching. Require the strongest acoustic matches for calibration.
+
 # 0.2.49
 
 - Require strong acoustic matches when calibrating against the known greeting. Keep the usual confidence threshold for reply timing.

@@ -519,7 +519,10 @@ class Bench:
         for index, player in enumerate(plays, 1):
             span = player.confirmed_span()
             match = {"status": "unavailable", "reason": "Voice PE did not confirm a DMA span"}
-            if span is not None:
+            if span is not None and (abs(span[1] - span[0] - len(reference) / RATE * 1000) > 15
+                                     or (player.max_render_discontinuity_us or 0) > 15_000):
+                match["reason"] = "Playback clock gap invalidated this echo reference"
+            elif span is not None:
                 started = (span[0] + offset) / 1000
                 lo = max(0, round((started - .06 - capture_start) * RATE))
                 hi = min(len(captured), round((started + len(reference) / RATE + .44 - capture_start) * RATE))
@@ -530,7 +533,7 @@ class Bench:
                     match_response, captured[lo:hi], capture_start + lo / RATE, reference,
                     bounds[0], started, started, handoff_at=lambda sample: started + sample / RATE,
                     acoustic_delay_range=(-margin, .3 + margin),
-                    window_seconds=.14, allow_late_outlier=True, min_window_confidence=.8)
+                    window_seconds=.14, allow_late_outlier=True, min_window_confidence=.9)
                 if match["status"] == "detected":
                     delays.append((match["audible_onset_at"] - started - bounds[0] / RATE) * 1000)
                     renders.append((pcm, *span))
