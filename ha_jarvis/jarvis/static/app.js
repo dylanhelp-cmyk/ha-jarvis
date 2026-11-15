@@ -154,6 +154,22 @@ function showResults(results) {
           (lead >= 0 ? 'before' : 'after') + ' cloud readiness.');
       }
     }
+    const greeting = result.wake_acknowledgment;
+    const wakeReady = result.wake_detection_to_ready_ms;
+    if (greeting) {
+      add(card, 'p', greeting.status === 'detected' ?
+        'Cached greeting became audible ' + greeting.latency_ms + ' ms after wake detection.' :
+        'Cached greeting timing unavailable. ' + greeting.reason);
+    }
+    if (wakeReady != null) {
+      add(card, 'p', 'GPT-Live was ready ' + Math.abs(wakeReady) + ' ms ' +
+        (wakeReady < 0 ? 'before' : 'after') + ' wake detection.');
+      if (greeting?.estimated_end_ms != null) {
+        const gap = Math.round(wakeReady - greeting.estimated_end_ms);
+        add(card, 'p', 'GPT-Live was ready about ' + Math.abs(gap) + ' ms ' +
+          (gap > 0 ? 'after' : 'before') + ' the estimated end of the greeting.');
+      }
+    }
     if (result.interruption) add(card, 'p', 'Interrupted by ' + result.interruption.reason.replaceAll('_', ' '));
     if (result.kind === 'voice_turn' && result.digital_first_voice_ms != null) {
       add(card, 'p', 'First returned speech ' + result.digital_first_voice_ms + ' ms after input streaming began.');
@@ -189,7 +205,7 @@ function showResults(results) {
     }
     if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after 10 seconds without detected speech.');
     if (result.conversation_end === 'session_limit') add(card, 'p', 'Conversation reached the preview session limit.');
-    if (result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
+    if (wakeReady == null && result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;
       add(card, 'p', 'GPT-Live ready ' + Math.abs(lead) + ' ms ' + (lead <= 0 ? 'before' : 'after') + ' wake receipt.');
     }

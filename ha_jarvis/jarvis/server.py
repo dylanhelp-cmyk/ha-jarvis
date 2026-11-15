@@ -351,8 +351,6 @@ class Bench:
                 "scope": "startup only; no room microphone samples connected to GPT-Live"}
 
     async def measure_wake_audio(self, result, wake, ident, pcm, opening_ready, handoff):
-        from .live_bench import match_response, render_reference, voiced_bounds
-
         device = self.device
         ws = device.ws
         try:
@@ -377,24 +375,55 @@ class Bench:
         terminal = dict(device.wake_playback_terminal)
         result["wake_playback"] = terminal
         result["metric"] = "firmware_wake_detection_to_audible_acknowledgment"
+        match, detected_at, voiced_start = await self.match_wake_audio(wake, terminal, ident, pcm, captured, capture_start)
+        if result.get("wake_capture_mode") == "device_armed" and detected_at is not None:
+            result["wake_to_first_capture_sample_ms"] = round((capture_start - detected_at) * 1000, 1)
+        if voiced_start is None:
+            result.update(status="unavailable", reason=match["reason"])
+            return
+        result["trials"] = [{"trial": 1, **match}]
+        result["status"] = "measured" if match["status"] == "detected" else "unavailable"
+        result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
+        if result.get("wake_capture_mode") == "device_armed":
+            from .streaming_aec import check_opening_reference, compare_opening_prefix
+
+            frames = tuple(device.frames)
+            result["opening_echo"] = await asyncio.to_thread(
+                check_opening_reference, frames, pcm, device.clock_offset_ms,
+                terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
+                match.get("audible_onset_at"), voiced_start)
+            progress = device.wake_render_progress
+            if (progress and progress[1] == terminal.get("first_rendered_ms")
+                    and result["opening_echo"]["status"] == "processed"):
+                count, first, received_at = progress
+                comparison = await asyncio.to_thread(
+                    compare_opening_prefix, frames, pcm, device.clock_offset_ms, first,
+                    terminal["last_rendered_ms"], count, result["opening_echo"]["estimated_delay_ms"])
+                comparison["first_report_to_terminal_ms"] = round(
+                    (device.wake_render_terminal_at - received_at) * 1000, 1)
+                result["opening_prefix_echo"] = comparison
+            else:
+                result["opening_prefix_echo"] = {"status": "unavailable",
+                    "reason": "No usable partial render report matched the completed acknowledgment"}
+
+    async def match_wake_audio(self, wake, terminal, ident, pcm, captured, capture_start):
+        from .live_bench import match_response, render_reference, voiced_bounds
+
+        device = self.device
         stamp = wake.get("device_time_ms")
         if (wake.get("ack_cache_id") != ident or terminal.get("drained") is not True
                 or terminal.get("rendered_samples") != len(pcm) // 4
                 or type(stamp) is not int or not 0 <= stamp <= 0xFFFFFFFF):
-            result.update(status="unavailable", reason="Voice PE did not confirm a complete playback for this wake")
-            return
+            return {"status": "unavailable", "reason": "Voice PE did not confirm a complete playback for this wake"}, None, None
         detected_at = (stamp + device.clock_offset_ms) / 1000
-        if result.get("wake_capture_mode") == "device_armed":
-            result["wake_to_first_capture_sample_ms"] = round((capture_start - detected_at) * 1000, 1)
         if not capture_start - .08 <= detected_at <= capture_start + len(captured) / RATE:
-            result.update(status="unavailable", reason="Wake timing is outside the captured interval")
-            return
+            return {"status": "unavailable", "reason": "Wake timing is outside the captured interval"}, detected_at, None
         reference = await asyncio.to_thread(render_reference, pcm)
         bounds = voiced_bounds(reference)
         if bounds is None:
-            result.update(status="unavailable", reason="The wake clip reference contains no usable speech")
-            return
+            return {"status": "unavailable", "reason": "The wake clip reference contains no usable speech"}, detected_at, None
         index = max(0, round((detected_at - .04 - capture_start) * RATE))
+        end = round((detected_at - capture_start + len(reference) / RATE + .9) * RATE)
         match_options = {}
         alignment_ms = self.alignment_delay()
         first = terminal.get("first_rendered_ms")
@@ -412,35 +441,14 @@ class Bench:
                     "min_window_confidence": .9,
                 }
         match = await asyncio.to_thread(
-            match_response, captured[index:], capture_start + index / RATE,
+            match_response, captured[index:end], capture_start + index / RATE,
             reference, bounds[0], detected_at, detected_at, window_seconds=.14, **match_options)
         match["acoustic_search_clock"] = ("confirmed wake playback and current echo alignment"
                                           if match_options else "wake detection timestamp")
         match.pop("fixture_end_to_audible_ms", None)
-        result["trials"] = [{"trial": 1, **match}]
-        result["status"] = "measured" if match["status"] == "detected" else "unavailable"
-        result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
-        if result.get("wake_capture_mode") == "device_armed":
-            from .streaming_aec import check_opening_reference, compare_opening_prefix
-
-            frames = tuple(device.frames)
-            result["opening_echo"] = await asyncio.to_thread(
-                check_opening_reference, frames, pcm, device.clock_offset_ms,
-                terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms"),
-                match.get("audible_onset_at"), bounds[0])
-            progress = device.wake_render_progress
-            if (progress and progress[1] == terminal.get("first_rendered_ms")
-                    and result["opening_echo"]["status"] == "processed"):
-                count, first, received_at = progress
-                comparison = await asyncio.to_thread(
-                    compare_opening_prefix, frames, pcm, device.clock_offset_ms, first,
-                    terminal["last_rendered_ms"], count, result["opening_echo"]["estimated_delay_ms"])
-                comparison["first_report_to_terminal_ms"] = round(
-                    (device.wake_render_terminal_at - received_at) * 1000, 1)
-                result["opening_prefix_echo"] = comparison
-            else:
-                result["opening_prefix_echo"] = {"status": "unavailable",
-                    "reason": "No usable partial render report matched the completed acknowledgment"}
+        if match_options and match["status"] == "detected":
+            match["estimated_end_ms"] = round(match["latency_ms"] + (bounds[1] - bounds[0]) * 1000 / RATE, 1)
+        return match, detected_at, bounds[0]
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False,
                                  assist_delegation=None, after_greeting=False):
@@ -476,6 +484,11 @@ class Bench:
         await device.end()
         captured, capture_start = device.recording()
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
+        wake_match, detected_at, _ = await self.match_wake_audio(
+            device.wake_details, device.wake_playback_terminal, ident, pcm, captured, capture_start)
+        result["wake_acknowledgment"] = wake_match
+        if detected_at is not None and result.get("wake_capture_mode") == "device_armed":
+            result["wake_to_first_capture_sample_ms"] = round((capture_start - detected_at) * 1000, 1)
         turns = [result, result.get("warm_reply"), *result.get("additional_warm_replies", [])]
         for index, (reply, turn) in enumerate(zip(replies, turns)):
             output = np.frombuffer(reply.pcm, dtype="<i2")[::2]

@@ -1,3 +1,7 @@
+# 0.2.60
+
+- Report the cached greeting's acoustic onset and GPT-Live readiness from the same voice preview. Estimate the greeting's ending when the playback reference is continuous.
+
 # 0.2.59
 
 - Replay echo calibration captures in time order so valid reference clips separated by retries stay usable.

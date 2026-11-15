@@ -39,6 +39,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_wake_match_reports_greeting_end_only_with_timed_render(self):
+        device = self.bench.device
+        device.clock_offset_ms = 0
+        device.clock_rtt_ms = 4
+        wake = {"device_time_ms": 1000, "ack_cache_id": "clip"}
+        terminal = {"drained": True, "rendered_samples": 24_000, "first_rendered_ms": 1030,
+                    "last_rendered_ms": 1530, "max_render_discontinuity_us": 0}
+        pcm = bytes(24_000 * 4)
+        capture = np.zeros(3 * RATE, dtype=np.int16)
+        reference = np.zeros(RATE // 2, dtype=np.int16)
+        with (patch.object(self.bench, "alignment_delay", return_value=32),
+              patch("jarvis.live_bench.render_reference", return_value=reference),
+              patch("jarvis.live_bench.voiced_bounds", return_value=(RATE // 10, 4 * RATE // 10)),
+              patch("jarvis.live_bench.match_response",
+                    side_effect=lambda *_args, **_kwargs: {"status": "detected", "latency_ms": 162}) as match):
+            result, detected_at, _ = await self.bench.match_wake_audio(wake, terminal, "clip", pcm, capture, 1)
+            self.assertEqual((detected_at, result["estimated_end_ms"]), (1, 462))
+            self.assertLess(len(match.call_args.args[0]), len(capture))
+            terminal["max_render_discontinuity_us"] = 20_000
+            result, _, _ = await self.bench.match_wake_audio(wake, terminal, "clip", pcm, capture, 1)
+            self.assertNotIn("estimated_end_ms", result)
+
     async def test_realtime_benchmark_uses_neither_microphone_nor_speaker(self):
         from types import SimpleNamespace
 

@@ -437,6 +437,10 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             return []
         wake_received_at = getattr(device, "last_wake_at", None) or started
         result["wake_receipt_to_ready_ms"] = round((ready_at - wake_received_at) * 1000, 1)
+        wake_stamp = device.wake_details.get("device_time_ms")
+        if type(wake_stamp) is int and 0 <= wake_stamp <= 0xFFFFFFFF and device.clock_offset_ms is not None:
+            detected_at = (wake_stamp + device.clock_offset_ms) / 1000
+            result["wake_detection_to_ready_ms"] = round((ready_at - detected_at) * 1000, 1)
         if not device.wake_terminal_event.is_set():
             async with asyncio.timeout(3):
                 await device.wake_render_changed.wait()
