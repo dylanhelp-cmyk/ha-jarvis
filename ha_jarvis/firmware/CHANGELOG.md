@@ -1,3 +1,7 @@
+# 0.2.6
+
+- Cache up to three seconds of local wake audio and report the capacity to the App.
+
 # 0.2.5
 
 - Report the first and last DMA render timestamps and the largest timing break for streamed playback. App 0.2.33 can use these reports to avoid aligning a follow-up to a discontinuous render.

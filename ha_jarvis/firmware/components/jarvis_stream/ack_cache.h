@@ -10,7 +10,7 @@ namespace esphome::jarvis_stream {
 // Mutated only on the ESPHome loop. A failed upload cannot change the committed clip.
 class AckCache {
  public:
-  static constexpr uint32_t MAX_FRAMES = 48000;
+  static constexpr uint32_t MAX_FRAMES = 3 * 48000;
   using Pcm = std::unique_ptr<uint8_t, decltype(&std::free)>;
 
   static bool valid_manifest(uint32_t generation, const std::string &id, uint32_t frames) {

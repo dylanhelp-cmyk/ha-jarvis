@@ -57,8 +57,10 @@ class WakeCacheUpload:
     async def send(self, identity, pcm):
         frame_bytes = CHANNELS * 2
         frames = len(pcm) // frame_bytes
-        if not 0 < frames <= RATE or len(pcm) % frame_bytes:
-            raise ValueError("The wake clip must be at most one second")
+        max_frames = self.device.info.get("ack_cache_max_frames", RATE)
+        if (type(max_frames) is not int or not 0 < frames <= min(max_frames, 3 * RATE)
+                or len(pcm) % frame_bytes):
+            raise ValueError("The wake clip exceeds this Voice PE firmware's cache capacity")
         try:
             async with asyncio.timeout(15):
                 await self._command("ack_cache_start", cache_id=identity, samples=frames)

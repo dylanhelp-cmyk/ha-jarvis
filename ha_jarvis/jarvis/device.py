@@ -193,7 +193,7 @@ class Device:
                     self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
-            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol", "capture_gain"):
+            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id", "ack_cache_max_frames", "wake_capture_protocol", "capture_gain"):
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")

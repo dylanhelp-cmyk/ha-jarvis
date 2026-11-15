@@ -24,7 +24,7 @@ from aiohttp import web, WSMsgType
 import numpy as np
 
 from . import __version__
-from .acknowledgment import (approval_path, cache_path, candidate_identity, candidate_wav,
+from .acknowledgment import (PHRASE, approval_path, cache_path, candidate_identity, candidate_wav,
                              generate_acknowledgment, read_candidate, verified_render)
 from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
@@ -32,7 +32,7 @@ from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, 
 from .device import Device
 from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
-from .playback import JackPlayback, WakeCacheUpload, stereo_pcm
+from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
@@ -181,7 +181,8 @@ class Bench:
         approval = approval_path(self.data_dir)
         verified = bool(ident and approval.is_file() and approval.read_text(encoding="ascii").strip() == ident)
         return {**self.acknowledgment, "cached_on_host": pcm is not None, "candidate_id": ident,
-                "verified": verified, "cached_on_device": bool(verified and self.device.info.get("ack_cache_id") == ident)}
+                "phrase": PHRASE, "verified": verified,
+                "cached_on_device": bool(verified and self.device.info.get("ack_cache_id") == ident)}
 
     def maybe_preload_wake_cache(self):
         device = self.device
@@ -352,7 +353,8 @@ class Bench:
         device = self.device
         ws = device.ws
         try:
-            await asyncio.sleep(1.35)
+            clip_seconds = len(pcm) / (4 * PLAYBACK_RATE)
+            await asyncio.sleep(max(1.35, clip_seconds + .65))
             if opening_ready is not None and self.opening_audio is not None:
                 try:
                     await asyncio.wait_for(opening_ready.wait(), 1.6)
@@ -518,7 +520,7 @@ class Bench:
             if span is not None:
                 started = (span[0] + offset) / 1000
                 lo = max(0, round((started - .06 - capture_start) * RATE))
-                hi = min(len(captured), round((started + .9 - capture_start) * RATE))
+                hi = min(len(captured), round((started + len(reference) / RATE + .44 - capture_start) * RATE))
                 match = await asyncio.to_thread(
                     match_response, captured[lo:hi], capture_start + lo / RATE, reference,
                     bounds[0], started, started, window_seconds=.14, allow_late_outlier=True)
@@ -1087,9 +1089,7 @@ def create_ui(bench):
         ident = candidate_identity(pcm)
         if (not isinstance(data, dict) or data.get("clip") != ident
                 or data.get("heard_exact_phrase") is not True):
-            raise ValueError("Listen to the current clip and confirm that it says only Yes sir")
-        if len(pcm) > RATE * 2:
-            raise ValueError("The wake clip must be at most one second")
+            raise ValueError(f"Listen to the current clip and confirm it says {PHRASE}")
         path = approval_path(bench.data_dir)
         temporary = path.with_suffix(".verified.tmp")
         temporary.write_text(ident + "\n", encoding="ascii")

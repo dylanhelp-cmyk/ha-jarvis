@@ -1,3 +1,7 @@
+# 0.2.43
+
+- Generate and cache “Yes sir. How can I help?” in the GPT-Live voice. Add a 250 ms pause after wake and ask for a natural pause between sentences. Update Voice PE firmware to 0.2.6, then generate and verify the new clip in Jarvis.
+
 # 0.2.42
 
 - Clean opening microphone audio as it is sent, so a slow cloud connection does not also have to wait for a full batch of echo processing.

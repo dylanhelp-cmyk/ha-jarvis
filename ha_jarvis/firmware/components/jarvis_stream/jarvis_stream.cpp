@@ -434,6 +434,7 @@ bool JarvisStream::send_capture_started_(uint32_t started_ms) {
 
 void JarvisStream::ack_cache_state_(JsonObject out) {
   out["ack_cache_protocol"] = 1;
+  out["ack_cache_max_frames"] = AckCache::MAX_FRAMES;
   if (ack_cache_.frames()) out["ack_cache_id"] = ack_cache_.id();
 }
 

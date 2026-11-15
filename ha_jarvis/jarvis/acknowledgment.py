@@ -15,18 +15,21 @@ from .live_session import LiveSession, MODEL, RATE, VOICE
 from .playback import stereo_pcm
 
 
-PHRASE = "Yes sir"
-GREETING = 'Say exactly "Yes sir" once, then stay silent. Do not add any other words.'
+PHRASE = "Yes sir. How can I help?"
+GREETING = (f'Say exactly "{PHRASE}" once. Use a calm, natural cadence with a short pause '
+            'after "sir", then stay silent. Do not add any other words.')
+WAKE_PAUSE_MS = 250
+MAX_CLIP_SECONDS = 3
 
 
 def cache_path(data_dir):
-    return data_dir / f"ack-{MODEL}-{VOICE}-yes-sir.pcm"
+    return data_dir / f"ack-{MODEL}-{VOICE}-how-can-i-help.pcm"
 
 
 def read_candidate(data_dir):
     with cache_path(data_dir).open("rb") as file:
-        pcm = file.read(5 * RATE)
-    if not RATE // 4 <= len(pcm) <= 9 * RATE // 2 or len(pcm) % 2:
+        pcm = file.read(2 * RATE * MAX_CLIP_SECONDS + 1)
+    if not RATE // 4 <= len(pcm) <= 2 * RATE * MAX_CLIP_SECONDS or len(pcm) % 2:
         raise ValueError("Cached acknowledgment has an invalid length")
     return pcm
 
@@ -96,14 +99,17 @@ async def generate_acknowledgment(settings, data_dir):
     if not metrics.finalization_confirmed or metrics.error:
         raise RuntimeError("Greeting session did not close cleanly")
     words = re.findall(r"[a-z]+", "".join(transcript).casefold())
-    if words != ["yes", "sir"]:
-        raise ValueError("Generated greeting transcript did not match Yes sir")
+    if words != re.findall(r"[a-z]+", PHRASE.casefold()):
+        raise ValueError(f"Generated greeting transcript did not match {PHRASE}")
     samples = np.frombuffer(received, dtype="<i2")
     bounds = voiced_bounds(samples)
-    if bounds is None or not RATE // 8 <= bounds[1] - bounds[0] <= 2 * RATE:
+    if bounds is None or bounds[1] - bounds[0] < RATE // 8:
         raise ValueError("Generated greeting did not contain a usable short clip")
     start, end = bounds
-    pcm = samples[max(0, start - RATE // 50):end + RATE // 25].tobytes()
+    lead_in = bytes(2 * (RATE * WAKE_PAUSE_MS // 1000))
+    pcm = lead_in + samples[max(0, start - RATE // 50):end + RATE // 25].tobytes()
+    if len(pcm) > 2 * RATE * MAX_CLIP_SECONDS:
+        raise ValueError("Generated greeting was too long for the Voice PE cache")
     path = cache_path(data_dir)
     temporary = path.with_suffix(".tmp")
     temporary.write_bytes(pcm)
