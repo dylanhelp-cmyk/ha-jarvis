@@ -1,3 +1,7 @@
+# 0.2.59
+
+- Replay echo calibration captures in time order so valid reference clips separated by retries stay usable.
+
 # 0.2.58
 
 - Process newly confirmed microphone audio as soon as the Voice PE reports playback progress during the interruption test. Report capture-to-decision and decision-to-stop-request timing separately.

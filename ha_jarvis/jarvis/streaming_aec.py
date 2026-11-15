@@ -9,6 +9,8 @@ import numpy as np
 
 from .aec import FRAME_SAMPLES, HostAEC3, SAMPLE_RATE
 
+MAX_CAPTURE_DRIFT_PPM = 5000
+
 
 class RenderBurst:
     """One continuous I2S render generation with an explicit terminal report."""
@@ -127,7 +129,7 @@ class StreamingEcho:
         elif frame.first_sample >= 5 * SAMPLE_RATE:
             elapsed_ms = (frame.capture_ms - self._capture_stamp) % (2 ** 32)
             estimate_ppm = (elapsed_ms * SAMPLE_RATE / (1000 * frame.first_sample) - 1) * 1e6
-            if abs(estimate_ppm) > 5000:
+            if abs(estimate_ppm) > MAX_CAPTURE_DRIFT_PPM:
                 raise RuntimeError("Microphone clock changed during live echo alignment")
             self.capture_drift_ppm += .02 * (estimate_ppm - self.capture_drift_ppm)
         period = (1 + self.capture_drift_ppm / 1e6) / SAMPLE_RATE
@@ -248,14 +250,25 @@ class ConfirmedRenderInput:
 def check_confirmed_references(frames, renders, clock_offset_ms, delay_ms):
     """Process a short local capture using confirmed render bursts and known gaps."""
     scope = "offline render alignment and sample accounting"
-    if not frames or not renders or not 0 <= delay_ms <= 300:
+    if not frames or not renders or clock_offset_ms is None or not 0 <= delay_ms <= 300:
         return {"status": "unavailable", "scope": scope, "reason": "Unreliable render-to-microphone alignment"}
     try:
         echo = StreamingEcho(delay_ms)
-        for pcm, first_ms, last_ms in renders:
-            echo.render(pcm, (first_ms + clock_offset_ms) / 1000, first_frame=0)
-            echo.finish_render(len(pcm) // 4, (last_ms + clock_offset_ms) / 1000)
-        processed = sum(len(echo.capture(frame, clock_offset_ms)) // 2 for frame in frames)
+        pending = deque(renders)
+        capture_start_ms = frames[0].capture_ms
+        max_period_ms = (1 + MAX_CAPTURE_DRIFT_PPM / 1e6) * 1000 / SAMPLE_RATE
+        processed = 0
+        for frame in frames:
+            # Add references before capture can reach them, while letting the
+            # live processor retire old bursts on its usual bounded timeline.
+            horizon_ms = capture_start_ms + (frame.first_sample + len(frame.samples)) * max_period_ms
+            while pending and pending[0][1] <= horizon_ms:
+                pcm, first_ms, last_ms = pending.popleft()
+                echo.render(pcm, (first_ms + clock_offset_ms) / 1000, first_frame=0)
+                echo.finish_render(len(pcm) // 4, (last_ms + clock_offset_ms) / 1000)
+            processed += len(echo.capture(frame, clock_offset_ms)) // 2
+        if pending:
+            raise ValueError("The microphone capture ended before a confirmed reference began")
     except (ImportError, RuntimeError, ValueError) as exc:
         return {"status": "unavailable", "scope": scope, "reason": str(exc) or type(exc).__name__}
     total = sum(len(frame.samples) for frame in frames)

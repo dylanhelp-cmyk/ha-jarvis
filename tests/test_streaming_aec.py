@@ -5,8 +5,8 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.streaming_aec import (ConfirmedRenderInput, StreamingEcho, check_opening_reference,
-                                 compare_opening_prefix, residual_echo_similarity)
+from jarvis.streaming_aec import (ConfirmedRenderInput, StreamingEcho, check_confirmed_references,
+                                 check_opening_reference, compare_opening_prefix, residual_echo_similarity)
 
 
 class ReferenceRecorder:
@@ -123,6 +123,22 @@ class StreamingEchoTests(unittest.TestCase):
         self.assertEqual(int(np.median(recorder.references[0])), 1000)
         self.assertFalse(any(np.any(ref) for ref in recorder.references[2:5]))
         self.assertEqual(int(np.median(recorder.references[5])), 2000)
+
+    def test_offline_alignment_replays_references_separated_by_multiple_retries(self):
+        recorder = ReferenceRecorder()
+        pcm1 = np.full((960, 2), 1000, dtype="<i2").tobytes()
+        pcm2 = np.full((960, 2), 2000, dtype="<i2").tobytes()
+        samples = np.zeros(160, dtype="<i2")
+        frames = [PCMFrame(i, i * 160, 1000 + i * 10, samples) for i in range(610)]
+        renders = [(pcm1, 1020, 1040), (pcm2, 7020, 7040)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=recorder):
+            result = check_confirmed_references(frames, renders, 0, 0)
+        self.assertEqual(result["status"], "processed", result)
+        self.assertEqual(result["processed_samples"], 610 * 160)
+        self.assertEqual(result["confirmed_bursts"], 2)
+        self.assertEqual(int(np.median(recorder.references[2])), 1000)
+        self.assertFalse(np.any(recorder.references[300]))
+        self.assertEqual(int(np.median(recorder.references[602])), 2000)
 
     def test_missing_render_frames_invalidate_the_reference(self):
         echo = StreamingEcho(100, processor=ReferenceRecorder())
