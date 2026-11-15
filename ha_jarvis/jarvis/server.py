@@ -225,6 +225,8 @@ class Bench:
             self.acknowledgment = {"phase": "preloaded"}
         except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
             self.acknowledgment = {"phase": "preload_failed", "error_type": type(exc).__name__}
+            if str(exc).startswith("Voice PE rejected the wake cache: "):
+                self.acknowledgment["reason"] = str(exc)
         finally:
             self.device.wake_cache_upload = None
 

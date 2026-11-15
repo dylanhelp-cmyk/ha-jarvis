@@ -1,3 +1,7 @@
+# 0.2.45
+
+- Upload the longer greeting in bounded groups to finish within the device's transfer window.
+
 # 0.2.44
 
 - Read the longer wake cache capacity as soon as the Voice PE connects. Show failed transfers separately from a firmware update requirement.

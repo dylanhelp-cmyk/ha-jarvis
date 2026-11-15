@@ -17,6 +17,7 @@ HEADER = struct.Struct("<4sBBHIIQ")
 MAX_IN_FLIGHT = 6 * PACKET_FRAMES
 MAX_SEND_LAG_MS = 100
 MAX_REPLY_RECOVERY_LAG_MS = 500
+WAKE_CACHE_WINDOW = 4
 
 
 def stereo_pcm(samples):
@@ -37,15 +38,20 @@ class WakeCacheUpload:
         self.device = device
         self.ws = device.ws
         self.generation = secrets.randbelow(0xFFFFFFFF) + 1
-        self.replies = asyncio.Queue(maxsize=1)
+        self.replies = asyncio.Queue(maxsize=WAKE_CACHE_WINDOW)
 
     def receive(self, message):
-        if message.get("generation") == self.generation and self.replies.empty():
+        if message.get("generation") == self.generation and not self.replies.full():
             self.replies.put_nowait(message)
 
     async def _expect(self, kind):
         reply = await asyncio.wait_for(self.replies.get(), 2)
         if reply.get("type") != kind:
+            if reply.get("type") == "ack_cache_error":
+                reason = reply.get("reason")
+                if reason in ("invalid_manifest", "busy", "no_memory", "unknown_generation",
+                              "incomplete_upload", "queue_overflow", "upload_timeout", "invalid_sequence"):
+                    raise RuntimeError(f"Voice PE rejected the wake cache: {reason}")
             raise RuntimeError("Voice PE rejected the wake cache")
         return reply
 
@@ -65,14 +71,19 @@ class WakeCacheUpload:
             async with asyncio.timeout(15):
                 await self._command("ack_cache_start", cache_id=identity, samples=frames)
                 await self._expect("ack_cache_ready")
-                for sequence, first in enumerate(range(0, frames, PACKET_FRAMES)):
-                    count = min(PACKET_FRAMES, frames - first)
-                    header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, first)
-                    payload = pcm[first * frame_bytes:(first + count) * frame_bytes]
-                    await asyncio.wait_for(self.ws.send_bytes(header + payload), 2)
-                    reply = await self._expect("ack_cache_progress")
-                    if reply.get("samples") != first + count:
-                        raise RuntimeError("Voice PE reported an unexpected wake cache offset")
+                window_frames = WAKE_CACHE_WINDOW * PACKET_FRAMES
+                for window_start in range(0, frames, window_frames):
+                    offsets = range(window_start, min(window_start + window_frames, frames), PACKET_FRAMES)
+                    for first in offsets:
+                        count = min(PACKET_FRAMES, frames - first)
+                        header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation,
+                                             first // PACKET_FRAMES, first)
+                        payload = pcm[first * frame_bytes:(first + count) * frame_bytes]
+                        await asyncio.wait_for(self.ws.send_bytes(header + payload), 2)
+                    for first in offsets:
+                        reply = await self._expect("ack_cache_progress")
+                        if reply.get("samples") != min(first + PACKET_FRAMES, frames):
+                            raise RuntimeError("Voice PE reported an unexpected wake cache offset")
                 await self._command("ack_cache_commit")
                 reply = await self._expect("ack_cache_committed")
                 if reply.get("cache_id") != identity:
