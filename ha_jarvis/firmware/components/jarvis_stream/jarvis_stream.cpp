@@ -317,6 +317,7 @@ void JarvisStream::send_state_() {
     root["capturing"] = active_.load();
     root["raw_ready"] = hardware_ready_;
     root["jack_plugged"] = jack_plugged_;
+    root["output_route"] = output_route_();
     root["playback_protocol"] = 1;
     root["wake_capture_protocol"] = 1;
     root["capture_gain"] = capture_gain_;
@@ -535,8 +536,22 @@ void JarvisStream::ack_cache_loop_(uint32_t now) {
   }
 }
 
+void JarvisStream::set_jack_plugged(bool plugged) {
+  if (jack_state_known_ && jack_plugged_ == plugged) return;
+  stop_playback_("output_route_changed");
+  jack_plugged_ = plugged;
+  jack_state_known_ = true;
+  if (authenticated_) send_state_();
+}
+
+const char *JarvisStream::output_route_() const {
+  if (!jack_state_known_) return "unavailable";
+  if (jack_plugged_) return "voice_pe_jack";
+  return internal_speaker_amp_ ? "voice_pe_internal" : "unavailable";
+}
+
 const char *JarvisStream::speaker_blocked_() const {
-  if (!jack_plugged_) return "jack_unplugged";
+  if (!jack_plugged_ && (!jack_state_known_ || !internal_speaker_amp_)) return "output_unavailable";
   if (muted_) return "muted";
   if (!playback_id_.empty() || !speaker_->is_stopped()) return "speaker_busy";
   if (ack_cache_.generation()) return "cache_upload";
@@ -587,6 +602,7 @@ void JarvisStream::start_playback_(const std::string &id, uint32_t generation, b
   render_clock_ = {};
   playback_clock_lock_.exit();
   playback_loop_request_.start();
+  if (!jack_plugged_ && internal_speaker_amp_) internal_speaker_amp_->turn_on();
   speaker_->start();
   if (!send_json_(json::build_json([&](JsonObject out) {
     out["type"] = "play_started";
@@ -597,6 +613,7 @@ void JarvisStream::start_playback_(const std::string &id, uint32_t generation, b
 
 void JarvisStream::stop_playback_(const char *reason, bool drained) {
   if (playback_id_.empty()) return;
+  if (!jack_plugged_ && internal_speaker_amp_) internal_speaker_amp_->turn_off();
   if (!drained) speaker_->stop();
   xQueueReset(playback_queue_);
   playback_loop_request_.stop();
@@ -629,7 +646,6 @@ void JarvisStream::playback_loop_(uint32_t now) {
   if (playback_id_.empty()) return;
   if (!connected_ || !authenticated_) { stop_playback_("disconnected"); return; }
   if (muted_) { stop_playback_("muted"); return; }
-  if (!jack_plugged_) { stop_playback_("jack_unplugged"); return; }
   if (playback_overflow_.exchange(false) && !local_ack_playback_) { stop_playback_("queue_overflow"); return; }
   if (now - playback_activity_ >= 2000) { stop_playback_("playback_timeout"); return; }
   if (!reported_samples_ || now - last_play_clock_report_ >= 100) {
@@ -852,6 +868,7 @@ void JarvisStream::loop() {
         out["xmos_version"] = xmos_version_;
         out["muted"] = muted_.load(); out["raw_stage"] = "NONE";
         out["playback_protocol"] = 1; out["jack_plugged"] = jack_plugged_;
+        out["output_route"] = output_route_();
         out["wake_capture_protocol"] = 1;
         out["capture_gain"] = capture_gain_;
         ack_cache_state_(out);
@@ -860,7 +877,6 @@ void JarvisStream::loop() {
     } else command_(control.text, control.epoch);
   }
   if (muted_ != previous_mute_) { previous_mute_ = muted_; if (authenticated_) send_state_(); }
-  if (jack_plugged_ != previous_jack_) { previous_jack_ = jack_plugged_; if (authenticated_) send_state_(); }
   ack_cache_loop_(now_ms_());
   playback_loop_(now_ms_());
   if (wake_capture_arm_.pending()) {

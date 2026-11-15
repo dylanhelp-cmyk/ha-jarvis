@@ -11,6 +11,7 @@ import time
 import numpy as np
 
 from .audio import RATE
+from .device import output_route
 from .lifecycle import ConversationPolicy
 from .live_bench import BenchReply
 from .live_session import LiveSession
@@ -307,8 +308,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
             now = time.monotonic()
-            if device.errors or session.metrics.error or sender.done() or not device.info.get("jack_plugged"):
-                raise RuntimeError("The microphone, cloud session or jack playback failed")
+            if device.errors or session.metrics.error or sender.done() or output_route(device.info) is None:
+                raise RuntimeError("The microphone, cloud session or speaker playback failed")
             if input_deadline is not None and now >= input_deadline:
                 raise FollowUpEnded("session_limit", "The conversation reached the preview session limit")
             if warm_follow_up and inactivity.should_close(now):
@@ -348,7 +349,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         device.pcm_consumer = None
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
         result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
-        phase("playing the GPT-Live reply through the jack")
+        phase("playing the GPT-Live reply")
         async with asyncio.timeout(REPLY_DRAIN_SECONDS):
             while not reply.ready_to_drain(time.monotonic()):
                 if sender.done():

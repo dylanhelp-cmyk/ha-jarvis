@@ -10,6 +10,15 @@ import numpy as np
 from .audio import capture_health, decode_frame, RATE
 
 
+def output_route(info):
+    route = info.get("output_route")
+    if route in ("voice_pe_jack", "voice_pe_internal"):
+        return route
+    if "output_route" not in info and info.get("jack_plugged") is True:
+        return "voice_pe_jack"
+    return None
+
+
 def parse_diagnostics(value):
     """Only retain the bounded, credential-free firmware telemetry schema."""
     if not isinstance(value, dict) or value.get("schema") != 1:
@@ -193,7 +202,7 @@ class Device:
                     self.capture_session[key] = number
             self.started.set()
         elif kind in ("mute", "status", "muted"):
-            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "playback_protocol", "ack_cache_protocol", "ack_cache_id", "ack_cache_max_frames", "wake_capture_protocol", "capture_gain"):
+            for key in ("muted", "capturing", "raw_ready", "xmos_version", "jack_plugged", "output_route", "playback_protocol", "ack_cache_protocol", "ack_cache_id", "ack_cache_max_frames", "wake_capture_protocol", "capture_gain"):
                 if key in message: self.info[key] = message[key]
             if self.capture_id and self.info.get("muted"):
                 self.errors.append("Physical mute interrupted capture")

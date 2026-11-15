@@ -2,7 +2,7 @@
 
 1. Add the [HA Jarvis repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdylanhelp-cmyk%2Fha-jarvis) in Home Assistant and open the App through its ingress panel.
 2. Reuse the existing ESPHome Builder entry and local secrets. Follow the [firmware instructions](ha_jarvis/firmware/INSTALL.md) to validate, compile and update the paired Voice PE. Keep port 8099 private on the LAN.
-3. Connect powered speakers to the Voice PE's 3.5 mm jack. Start at a low, comfortable speaker level. Confirm the App reports the device and output ready, then run one local playback test. Review the acoustic result separately from transport timing and export diagnostics if a measurement is unavailable.
+3. Connect powered speakers to the 3.5 mm jack or leave the jack unplugged to use the Voice PE's internal speaker with App 0.2.46 and firmware 0.2.7. Check the active output in Jarvis and run one local playback test. Run Echo reference alignment on the selected output before a voice preview.
 
 Local tests make no OpenAI calls. API credentials stay in the App's local data and audio and transcript retention default off.
 

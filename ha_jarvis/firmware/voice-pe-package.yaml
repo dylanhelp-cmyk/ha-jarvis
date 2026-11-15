@@ -9,7 +9,7 @@ esphome:
   min_version: 2026.10.0
   project:
     name: jarvis.voice_pe_testbench
-    version: "0.2.6"
+    version: "0.2.7"
   on_boot:
     priority: -100
     then:
@@ -40,6 +40,7 @@ jarvis_stream:
   i2c_id: internal_i2c
   device_id: ${name}
   speaker: jack_speaker
+  internal_speaker_amp: internal_speaker_amp
   microphone:
     microphone: i2s_mics
     channels: [0]

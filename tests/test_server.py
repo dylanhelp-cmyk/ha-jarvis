@@ -237,11 +237,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bench.task)
         await ws.close()
 
-    async def test_wired_bench_uses_paired_socket_for_pcm_and_drain(self):
+    async def test_internal_speaker_bench_uses_paired_socket_for_pcm_and_drain(self):
         ws = await self.audio.ws_connect('/device')
         await ws.send_json({'type':'hello','protocol':1,'token':self.bench.config['device_token'],
                             'sample_rate':RATE,'channels':1,'raw_ready':True,'muted':False,
-                            'playback_protocol':1,'jack_plugged':True})
+                            'playback_protocol':1,'jack_plugged':False,'output_route':'voice_pe_internal'})
         await ws.receive_json()
         generation = None
         sent = 0
@@ -285,6 +285,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(self.bench.task, 4)
                 await asyncio.wait_for(simulator, 2)
             result = self.bench.results[0]
+            self.assertEqual(result['route'], 'voice_pe_internal')
             self.assertEqual(result['playback']['frames_rendered'], 960)
             self.assertEqual(result['status'], 'unavailable')
             self.assertIsNone(self.bench.device.playback)

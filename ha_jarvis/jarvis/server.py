@@ -29,7 +29,7 @@ from .acknowledgment import (PHRASE, approval_path, cache_path, candidate_identi
 from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
-from .device import Device
+from .device import Device, output_route
 from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
 from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, stereo_pcm
@@ -260,8 +260,8 @@ class Bench:
     def alignment_delay(self):
         if self.echo_alignment is None:
             return None
-        boot, ident, delay = self.echo_alignment
-        if (self.device.info.get("jack_plugged") is True
+        boot, ident, route, delay = self.echo_alignment
+        if (route is not None and output_route(self.device.info) == route
                 and self.device.info.get("diagnostics", {}).get("boot_id") == boot
                 and self.device.info.get("ack_cache_id") == ident):
             return delay
@@ -538,7 +538,7 @@ class Bench:
         result["render_alignment"] = outcome
         boot = device.info.get("diagnostics", {}).get("boot_id")
         if outcome["status"] == "processed" and boot and device.info.get("ack_cache_id") == ident:
-            self.echo_alignment = (boot, ident, outcome["estimated_delay_ms"])
+            self.echo_alignment = (boot, ident, result["route"], outcome["estimated_delay_ms"])
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
@@ -776,7 +776,8 @@ class Bench:
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False, *, standby=False, assist_preview=None):
         started = time.monotonic()
-        result = {"id": self.test["id"], "kind": kind, "route": "voice_pe_jack",
+        route = output_route(self.device.info)
+        result = {"id": self.test["id"], "kind": kind, "route": route,
                   "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
                   "trials": [], "warnings": [
                       "Speaker API acceptance is a software milestone. Acoustic estimates include microphone processing delay."]}
@@ -793,6 +794,8 @@ class Bench:
                 result["warnings"].clear()
                 await self.measure_synthetic_replies(result, startup_transport, reply_profile)
                 return
+            if kind != "connection":
+                self.test["output_route"] = route
             if assist_preview is not None:
                 token, domain, name = assist_preview
                 result["assist_preview"] = True
@@ -876,7 +879,7 @@ class Bench:
                 cleaned.extend(live_echo.prime_capture(self.device.frames, self.device.clock_offset_ms))
                 self.device.pcm_consumer = observe_echo
             self.device.playback = player
-            self.test["phase"] = "playing through the Voice PE jack"
+            self.test["phase"] = "playing through the selected Voice PE output"
             requested_at = time.monotonic()
             sender = asyncio.create_task(player.send(pcm, prime_packets=5 if live_echo else 1))
             if kind == "stop":
@@ -1140,8 +1143,8 @@ def create_ui(bench):
         device = bench.device.snapshot()
         if transport != "realtime" and (not device["connected"] or device.get("muted")
                 or device.get("raw_ready") is not True or device.get("playback_protocol") != 1
-                or device.get("jack_plugged") is not True):
-            raise ValueError("Connect the paired Voice PE and speakers before starting")
+                or output_route(device) is None):
+            raise ValueError("A paired Voice PE with an available speaker output is required")
         settings = bench.cloud_settings.public()
         if not settings["api_key_configured"] or settings["paid_retry_blocked"]:
             raise ValueError("A configured key and a settled budget ledger are required")
@@ -1175,8 +1178,8 @@ def create_ui(bench):
         if kind != "connection":
             if data.get("comfortable_volume_confirmed") is not True:
                 raise ValueError("Confirm comfortable speaker volume before starting")
-            if device.get("playback_protocol") != 1 or device.get("jack_plugged") is not True:
-                raise ValueError("Install compatible playback firmware and connect the 3.5 mm jack")
+            if device.get("playback_protocol") != 1 or output_route(device) is None:
+                raise ValueError("Install compatible Voice PE firmware or connect the 3.5 mm jack")
         follow_up = data.get("follow_up", False)
         if type(follow_up) is not bool or (follow_up and kind != "voice_turn"):
             raise ValueError("A warm follow-up is available only in the voice preview")
@@ -1320,7 +1323,7 @@ def create_audio(bench):
             bench.device.ws = ws
             accepted = True
             bench.device.info = {k: message[k] for k in ("device_id", "sample_rate", "muted", "raw_ready",
-                                "firmware", "xmos_version", "playback_protocol", "jack_plugged",
+                                "firmware", "xmos_version", "playback_protocol", "jack_plugged", "output_route",
                                 "ack_cache_protocol", "ack_cache_id", "ack_cache_max_frames",
                                 "wake_capture_protocol", "capture_gain") if k in message}
             bench.device.receive_json(message)
@@ -1333,15 +1336,14 @@ def create_audio(bench):
                 elif frame.type == WSMsgType.TEXT:
                     message = json.loads(frame.data)
                     bench.device.receive_json(message)
-                    if bench.device.info.get("jack_plugged") is False:
-                        bench.echo_alignment = None
                     if message.get("type") == "status":
                         bench.maybe_preload_wake_cache()
                     bench.observe_firmware()
                     if bench.device.info.get("muted") and bench.test.get("id") and bench.test["running"]:
                         asyncio.create_task(bench.cancel("device_muted"))
-                    elif (bench.device.playback or bench.test.get("standby")) and bench.device.info.get("jack_plugged") is False:
-                        asyncio.create_task(bench.cancel("jack_unplugged"))
+                    elif (bench.test.get("output_route") is not None
+                          and bench.test["output_route"] != output_route(bench.device.info)):
+                        asyncio.create_task(bench.cancel("output_route_changed"))
         except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:
             disconnect_details = {"protocol_error": str(exc), "exception_type": type(exc).__name__, "server_close_code": 1008}
             await ws.close(code=1008, message=b"Invalid device protocol")

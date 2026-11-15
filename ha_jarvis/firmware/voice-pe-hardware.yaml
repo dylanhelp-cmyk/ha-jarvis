@@ -101,7 +101,7 @@ light:
     default_transition_length: 0ms
     power_supply: led_power
 
-# Keep the internal amplifier disabled during acoustic input measurements.
+# Jarvis enables the amplifier during playback when the jack is unplugged.
 switch:
   - platform: gpio
     pin: GPIO47

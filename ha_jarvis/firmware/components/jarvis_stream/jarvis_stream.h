@@ -6,6 +6,7 @@
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/speaker/speaker.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/components/json/json_util.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
@@ -30,7 +31,8 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void set_capture_gain(uint8_t gain) { capture_gain_ = gain; }
   void set_microphone(microphone::MicrophoneSource *mic) { mic_ = mic; }
   void set_speaker(speaker::Speaker *speaker) { speaker_ = speaker; }
-  void set_jack_plugged(bool plugged) { jack_plugged_ = plugged; }
+  void set_internal_speaker_amp(switch_::Switch *amp) { internal_speaker_amp_ = amp; }
+  void set_jack_plugged(bool plugged);
   void set_server_url(const std::string &value) { server_url_ = value; }
   void set_device_id(const std::string &value) { device_id_ = value; }
   void set_token(const std::string &value) { token_ = value; }
@@ -73,6 +75,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void ack_cache_error_(uint32_t generation, const char *reason);
   void ack_cache_state_(JsonObject out);
   const char *speaker_blocked_() const;
+  const char *output_route_() const;
   void playback_command_(const std::string &type, JsonObject root);
   void start_playback_(const std::string &id, uint32_t generation, bool local_ack = false);
   void playback_identity_(JsonObject out);
@@ -113,7 +116,8 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   size_t playback_offset_{0};
   bool playback_pending_{false}, playback_drain_{false}, playback_finishing_{false};
   bool local_ack_playback_{false};
-  bool jack_plugged_{false}, previous_jack_{false};
+  bool jack_plugged_{false}, jack_state_known_{false};
+  switch_::Switch *internal_speaker_amp_{nullptr};
   std::atomic<uint32_t> epoch_{0}, dropped_{0}, generation_{0}, acknowledged_generation_{0};
   std::atomic<uint32_t> connection_generation_{0};
   FaultHistory<FaultLock> fault_history_;

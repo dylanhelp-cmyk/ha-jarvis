@@ -26,6 +26,10 @@ function notice(message) {
   $('notice').textContent = message;
 }
 
+function speakerRoute(device) {
+  return device?.output_route ?? (device?.jack_plugged ? 'voice_pe_jack' : 'unavailable');
+}
+
 function readiness() {
   const device = state?.device;
   const running = Boolean(state?.test.running);
@@ -44,7 +48,7 @@ function readiness() {
   let reason = '';
   if (!device?.connected) reason = 'Connect the paired Voice PE.';
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
-  else if (speaker && (device.playback_protocol !== 1 || !device.jack_plugged)) reason = 'Install compatible playback firmware and connect the 3.5 mm jack.';
+  else if (speaker && (device.playback_protocol !== 1 || speakerRoute(device) === 'unavailable')) reason = 'Install compatible Voice PE firmware or connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
   else if (kind === 'interrupt' && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
   else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
@@ -64,7 +68,7 @@ function readiness() {
   const ack = state?.acknowledgment;
   $('verify-ack').disabled = running || busy || !ack?.candidate_id || listenedClip !== ack.candidate_id;
   $('run-synthetic-replies').disabled = running || busy || !device?.connected || device.muted ||
-    !device.raw_ready || device.playback_protocol !== 1 || !device.jack_plugged ||
+    !device.raw_ready || device.playback_protocol !== 1 || speakerRoute(device) === 'unavailable' ||
     !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked ||
     !$('volume-confirmed').checked || !$('idle-confirmed').checked;
   $('generate-ack').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
@@ -76,8 +80,12 @@ function showStatus(data) {
   $('connection-label').textContent = device.connected ? 'Voice PE connected' : 'Waiting for Voice PE';
   $('device-status').textContent = device.connected ? (device.muted ? 'Muted' : (device.raw_ready ? 'Ready' : 'Checking microphone')) : 'Disconnected';
   $('device-detail').textContent = device.firmware ? 'Firmware ' + device.firmware : 'Connect the bench firmware';
-  $('route-status').textContent = 'Voice PE 3.5 mm';
-  $('route-detail').textContent = !device.connected ? 'Waiting for device' : device.playback_protocol !== 1 ? 'Playback firmware needed' : device.jack_plugged ? 'Jack connected' : 'Jack unplugged';
+  const route = speakerRoute(device);
+  $('route-status').textContent = route === 'voice_pe_jack' ? 'Voice PE 3.5 mm' :
+    route === 'voice_pe_internal' ? 'Voice PE internal speaker' : 'Speaker unavailable';
+  $('route-detail').textContent = !device.connected ? 'Waiting for device' :
+    route === 'voice_pe_internal' ? 'Jack unplugged' : route === 'voice_pe_jack' ? 'Jack connected' :
+    'Check firmware or connect the 3.5 mm jack';
   $('test-status').textContent = data.test.running ? 'Running' : 'Standby';
   const activeGain = data.test.input_gain_db;
   $('test-detail').textContent = data.test.phase + (activeGain == null ? '' :

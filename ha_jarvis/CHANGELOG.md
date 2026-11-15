@@ -1,3 +1,7 @@
+# 0.2.46
+
+- Use the Voice PE internal speaker automatically when the 3.5 mm jack is unplugged. Show the active output and require matching echo alignment for voice tests.
+
 # 0.2.45
 
 - Upload the longer greeting in bounded groups to finish within the device's transfer window.

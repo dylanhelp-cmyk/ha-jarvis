@@ -6,7 +6,7 @@ Add the keys in `secrets.example.yaml` to Builder's `secrets.yaml`: Wi-Fi, fresh
 
 Secrets stay in the local entry and Builder's local `secrets.yaml`; the remotely downloaded package and hardware YAML contain no secret lookups. Keep the device name stable across updates. For a fixed-source fallback, copy this complete firmware directory, preserving `components/jarvis_stream/`, and open `voice-pe-testbench.yaml` instead.
 
-Connect powered speakers to the 3.5 mm jack and set a comfortable level. Validate and compile, then install through Builder. Check that the matching App reports the jack connected before starting a local test. Native API, OTA, mute, LEDs and local Hey Jarvis remain available. The internal amplifier stays off.
+Validate, compile and install through Builder. Firmware 0.2.7 enables the internal amplifier for playback when the jack is unplugged. With external speakers connected, set their level before testing. Check the selected output in Jarvis before starting.
 
 Playback uses 48 kHz stereo PCM16LE over the paired connection. The device expands PCM to the board’s 32-bit I²S format. An eight-frame input queue and a 40 ms ESPHome speaker buffer bound the initial configuration. The firmware reports speaker-buffer acceptance and I²S DMA completion separately. Measure audible delay and stop-to-silence with the microphone. Unplug, mute, disconnect, and cancellation clear the playback queue.
 

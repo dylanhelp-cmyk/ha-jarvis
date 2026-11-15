@@ -1,3 +1,7 @@
+# 0.2.7
+
+- Enable the onboard speaker amplifier during playback when the jack is unplugged. Stop current playback if the output changes.
+
 # 0.2.6
 
 - Cache up to three seconds of local wake audio and report the capacity to the App.

@@ -3,7 +3,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import json
 from urllib.parse import urlsplit
-from esphome.components import esp32, i2c, microphone, speaker, wifi
+from esphome.components import esp32, i2c, microphone, speaker, switch, wifi
 from esphome.const import CONF_ID, CONF_MICROPHONE
 
 DEPENDENCIES = ["esp32", "wifi", "i2c"]
@@ -37,6 +37,7 @@ CONFIG_SCHEMA = cv.All(
         cv.GenerateID(): cv.declare_id(JarvisStream),
         cv.Required(CONF_MICROPHONE): raw_microphone,
         cv.Required("speaker"): cv.use_id(speaker.Speaker),
+        cv.Optional("internal_speaker_amp"): cv.use_id(switch.Switch),
         cv.Required("server_url"): server_url,
         cv.Required("device_id"): cv.All(cv.string_strict, cv.Length(min=1, max=64)),
         cv.Required("token"): cv.All(cv.string_strict, cv.Length(min=32, max=256)),
@@ -61,6 +62,8 @@ async def to_code(config):
     cg.add(var.set_microphone(source))
     cg.add(var.set_capture_gain(config[CONF_MICROPHONE].get("gain_factor", 1)))
     cg.add(var.set_speaker(await cg.get_variable(config["speaker"])))
+    if "internal_speaker_amp" in config:
+        cg.add(var.set_internal_speaker_amp(await cg.get_variable(config["internal_speaker_amp"])))
     for key in ("server_url", "device_id", "token"):
         cg.add(getattr(var, "set_" + key)(config[key]))
     # RX and heartbeat work can wait up to network_timeout_ms. Keep it from
