@@ -602,6 +602,8 @@ class Bench:
         trigger = asyncio.get_running_loop().create_future()
         cleaned = bytearray()
         recent = deque(maxlen=5)
+        early_candidate = None
+        injection_window = False
         rejected = 0
         monitor_start_ms, inject_at_ms = 500, 1400
 
@@ -612,7 +614,7 @@ class Bench:
         processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
 
         def observe(frame, offset):
-            nonlocal processed, rejected
+            nonlocal detector, early_candidate, injection_window, processed, rejected
             first_ms = player.first_rendered_ms
             if first_ms is not None:
                 # Inject only into the AEC input. Leave the original microphone
@@ -630,8 +632,13 @@ class Bench:
                 del cleaned[:640]
                 processed += 320
                 end_ms = capture_start_ms + processed * 1000 / RATE
-                recent.append(packet)
                 if first_ms is not None and end_ms >= first_ms + monitor_start_ms:
+                    relative_ms = end_ms - first_ms
+                    if relative_ms >= inject_at_ms and not injection_window:
+                        injection_window = True
+                        detector = SpeechEndpoint()
+                        recent.clear()
+                    recent.append(packet)
                     voiced = detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic())
                     if not voiced or len(recent) < recent.maxlen:
                         continue
@@ -642,8 +649,11 @@ class Bench:
                     similarity = residual_echo_similarity(b"".join(recent), reference[lo:hi])
                     if similarity is None or similarity >= .65:
                         rejected += 1
+                    elif not injection_window:
+                        if early_candidate is None:
+                            early_candidate = (relative_ms - inject_at_ms, similarity)
                     else:
-                        trigger.set_result((end_ms - first_ms, similarity))
+                        trigger.set_result((relative_ms, similarity))
 
         self.test["phase"] = "testing a local speech-triggered stop"
         device.pcm_consumer = observe
@@ -677,8 +687,12 @@ class Bench:
         report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
                                                 "injection_after_render_ms": inject_at_ms,
                                                 "echo_like_candidates_rejected": rejected}
+        if early_candidate is not None:
+            early_ms, early_similarity = early_candidate
+            report["early_candidate_relative_to_injection_ms"] = round(early_ms, 1)
+            report["early_candidate_render_similarity"] = round(early_similarity, 3)
         if stop_at is None or not trigger.done() or trigger.cancelled():
-            result.update(status="unavailable", reason=echo.error or "No speech-triggered stop was detected")
+            result.update(status="unavailable", reason=echo.error or "No stop was triggered after the speech injection")
             return
         trigger_ms, similarity = trigger.result()
         report["trigger_relative_to_injection_ms"] = round(trigger_ms - inject_at_ms, 1)
@@ -693,7 +707,10 @@ class Bench:
         captured, capture_start = device.recording()
         acoustic = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
         result["trials"].append({"trial": 1, **acoustic})
-        result["status"] = "measured" if acoustic["status"] == "detected" else "unavailable"
+        if early_candidate is not None:
+            result.update(status="unavailable", reason="A stop candidate preceded the injected speech")
+        else:
+            result["status"] = "measured" if acoustic["status"] == "detected" else "unavailable"
 
     async def measure_reply_stall(self, result):
         from .live_bench import SYNTHETIC_PROMPTS, match_response, render_reference, synthesize_fixture

@@ -218,8 +218,13 @@ function showResults(results) {
     }
     if (result.echo) add(card, 'p', result.echo.status === 'measured' ?
       'Offline pilot suppression ' + result.echo.pilot_band_reduction_db + ' dB' : result.echo.reason);
-    if (result.interruption_probe?.injection_to_stop_request_ms != null) {
-      add(card, 'p', result.interruption_probe.injection_to_stop_request_ms + ' ms from generated speech to requesting a stop.');
+    const interrupt = result.interruption_probe;
+    if (interrupt?.early_candidate_relative_to_injection_ms != null) {
+      add(card, 'p', 'First stop candidate appeared ' + Math.abs(interrupt.early_candidate_relative_to_injection_ms) +
+        ' ms before the injected test speech.');
+    }
+    if (interrupt?.injection_to_stop_request_ms != null) {
+      add(card, 'p', 'A stop was requested ' + interrupt.injection_to_stop_request_ms + ' ms after speech injection.');
     }
     if (result.live_echo) add(card, 'p', result.live_echo.status === 'measured' ?
       'Live DMA-reference pilot suppression ' + result.live_echo.pilot_band_reduction_db + ' dB' :

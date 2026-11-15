@@ -1,3 +1,7 @@
+# 0.2.55
+
+- Record premature interruption candidates and continue the local test to measure the stop after speech injection. A premature candidate still disqualifies the run.
+
 # 0.2.54
 
 - Retry discontinuous echo calibration playback within the same test, up to four clips total. Two continuous renders and agreeing acoustic measurements are still required.
