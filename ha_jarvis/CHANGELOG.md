@@ -1,3 +1,7 @@
+# 0.2.51
+
+- Use confirmed wake playback and the current speaker alignment to measure when the cached greeting became audible.
+
 # 0.2.50
 
 - Reject greeting references with a playback clock gap before matching. Require the strongest acoustic matches for calibration.

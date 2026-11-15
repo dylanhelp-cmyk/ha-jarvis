@@ -172,7 +172,8 @@ class Device:
                             self.wake_render_changed.set()
                 elif kind in ("play_stopped", "play_drained"):
                     self.wake_playback_terminal = {key: message[key] for key in
-                        ("rendered_samples", "first_rendered_ms", "last_rendered_ms", "reason") if key in message}
+                        ("rendered_samples", "first_rendered_ms", "last_rendered_ms",
+                         "max_render_discontinuity_us", "reason") if key in message}
                     self.wake_playback_terminal["drained"] = kind == "play_drained"
                     self.wake_render_terminal_at = time.monotonic()
                     self.wake_terminal_event.set()

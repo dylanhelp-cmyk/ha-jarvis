@@ -394,9 +394,27 @@ class Bench:
             result.update(status="unavailable", reason="The wake clip reference contains no usable speech")
             return
         index = max(0, round((detected_at - .04 - capture_start) * RATE))
+        match_options = {}
+        alignment_ms = self.alignment_delay()
+        first = terminal.get("first_rendered_ms")
+        last = terminal.get("last_rendered_ms")
+        discontinuity = terminal.get("max_render_discontinuity_us")
+        if (alignment_ms is not None and type(first) is int and type(last) is int
+                and type(discontinuity) is int and 0 <= discontinuity <= 15_000):
+            span_error = abs(last - first - len(reference) * 1000 / RATE)
+            if span_error <= 15:
+                start = (first + device.clock_offset_ms) / 1000
+                margin = device.clock_rtt_ms / 2 + span_error + 15
+                match_options = {
+                    "handoff_at": lambda sample: start + sample / RATE,
+                    "acoustic_delay_range": ((alignment_ms - margin) / 1000, (alignment_ms + margin) / 1000),
+                    "min_window_confidence": .9,
+                }
         match = await asyncio.to_thread(
             match_response, captured[index:], capture_start + index / RATE,
-            reference, bounds[0], detected_at, detected_at, window_seconds=.14)
+            reference, bounds[0], detected_at, detected_at, window_seconds=.14, **match_options)
+        match["acoustic_search_clock"] = ("confirmed wake playback and current echo alignment"
+                                          if match_options else "wake detection timestamp")
         match.pop("fixture_end_to_audible_ms", None)
         result["trials"] = [{"trial": 1, **match}]
         result["status"] = "measured" if match["status"] == "detected" else "unavailable"
