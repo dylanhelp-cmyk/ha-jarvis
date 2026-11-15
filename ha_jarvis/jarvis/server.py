@@ -1319,7 +1319,8 @@ def create_audio(bench):
             accepted = True
             bench.device.info = {k: message[k] for k in ("device_id", "sample_rate", "muted", "raw_ready",
                                 "firmware", "xmos_version", "playback_protocol", "jack_plugged",
-                                "ack_cache_protocol", "ack_cache_id", "wake_capture_protocol", "capture_gain") if k in message}
+                                "ack_cache_protocol", "ack_cache_id", "ack_cache_max_frames",
+                                "wake_capture_protocol", "capture_gain") if k in message}
             bench.device.receive_json(message)
             bench.observe_firmware()
             await ws.send_json({"type": "hello_ok", "protocol": 1})

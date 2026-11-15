@@ -99,7 +99,10 @@ function showStatus(data) {
   $('generate-ack').hidden = ack.verified;
   $('generate-ack').textContent = ack.cached_on_host ? 'Replace clip (paid API test)' : 'Generate clip (paid API test)';
   $('ack-state').textContent = ack.cached_on_device ? 'Verified clip cached on Voice PE.' :
-    ack.verified ? 'Verified clip saved. Waiting for compatible Voice PE firmware to preload it.' :
+    ack.phase === 'preload_failed' ? 'Verified clip saved. Upload to the Voice PE failed.' :
+    ack.verified && data.device.connected && (data.device.ack_cache_max_frames || 48000) <= 48000 ?
+      'Verified clip saved. Update the Voice PE to firmware 0.2.6 to cache the longer greeting.' :
+    ack.verified ? 'Verified clip saved. Waiting for it to upload to the Voice PE.' :
     ack.cached_on_host ? 'Play the clip and confirm it says “Yes sir. How can I help?”' :
     ack.phase === 'failed' ? 'Generation failed. Check the API budget and key before retrying.' :
     'Generate the cached greeting in the selected GPT-Live voice.';

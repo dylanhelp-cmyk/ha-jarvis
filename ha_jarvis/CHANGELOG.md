@@ -1,3 +1,7 @@
+# 0.2.44
+
+- Read the longer wake cache capacity as soon as the Voice PE connects. Show failed transfers separately from a firmware update requirement.
+
 # 0.2.43
 
 - Generate and cache “Yes sir. How can I help?” in the GPT-Live voice. Add a 250 ms pause after wake and ask for a natural pause between sentences. Update Voice PE firmware to 0.2.6, then generate and verify the new clip in Jarvis.
