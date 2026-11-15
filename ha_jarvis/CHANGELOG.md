@@ -1,3 +1,7 @@
+# 0.2.53
+
+- Make the optional wait-for-greeting setting available in wake standby and preserve it when standby rearms.
+
 # 0.2.52
 
 - Add an optional voice preview that skips audio captured before the end of the greeting. Use it when you wait for Jarvis to finish asking how it can help.

@@ -783,10 +783,11 @@ class Bench:
         result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
                                              for x in result["trials"]) else "unavailable"
 
-    async def run_standby(self, gain_db):
+    async def run_standby(self, gain_db, *, after_greeting):
         """Keep local wake available until explicitly stopped or the setup changes."""
         while True:
-            await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True)
+            await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
+                           after_greeting=after_greeting)
             result = self.results[0]
             if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
                 self.results.pop(0)
@@ -1221,8 +1222,6 @@ def create_ui(bench):
             raise ValueError("Wake standby uses the voice preview and connects only after wake")
         if standby and data.get("allow_repeated_wake_audio") is not True:
             raise ValueError("Explicitly authorize cleaned microphone audio after each wake while standby is enabled")
-        if standby and after_greeting:
-            raise ValueError("The wait-for-greeting option is for a single preview")
         assist_preview = data.get("assist_preview")
         if assist_preview is not None:
             if (kind != "voice_turn" or standby or follow_up or preconnect
@@ -1266,7 +1265,7 @@ def create_ui(bench):
             bench.test["input_gain_db"] = gain_db
         if standby:
             bench.test["standby"] = True
-            bench.task = asyncio.create_task(bench.run_standby(gain_db))
+            bench.task = asyncio.create_task(bench.run_standby(gain_db, after_greeting=after_greeting))
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
                                                       follow_up=follow_up, preconnect=preconnect,

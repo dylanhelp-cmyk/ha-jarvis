@@ -45,7 +45,6 @@ function readiness() {
   $('voice-standby').disabled = assist;
   $('voice-preconnect').disabled = standby || assist;
   $('voice-follow-up').disabled = standby || assist;
-  $('voice-after-greeting').disabled = standby;
   let reason = '';
   if (!device?.connected) reason = 'Connect the paired Voice PE.';
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
@@ -293,7 +292,7 @@ $('run-test').addEventListener('click', () => {
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true, standby,
       allow_repeated_wake_audio: standby, input_gain_db: Number($('voice-input-gain').value),
       follow_up: !assist && (standby || $('voice-follow-up').checked),
-      after_greeting: !standby && $('voice-after-greeting').checked,
+      after_greeting: $('voice-after-greeting').checked,
       preconnect: !assist && !standby && $('voice-preconnect').checked});
     if (assist) {
       body.allow_assist_power_action = true;

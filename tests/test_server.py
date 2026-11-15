@@ -84,6 +84,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         async def voice_turn(_device, _settings, result, *_args, **kwargs):
             self.assertTrue(device.wake_event.is_set())
             self.assertTrue(kwargs["follow_up"])
+            self.assertTrue(kwargs["after_greeting"])
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
             result["cloud"] = {"finalization_confirmed": True}
             result["status"] = "unavailable"
@@ -99,7 +100,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch.object(self.bench, "acknowledgment_status", return_value={"cached_on_device": True}),
               patch("jarvis.server.verified_render", return_value=("clip", b"pcm")),
               patch("jarvis.conversation_trial.run_voice_turn", side_effect=voice_turn) as cloud):
-            body = {"kind": "voice_turn", "standby": True, "confirm_paid": True,
+            body = {"kind": "voice_turn", "standby": True, "after_greeting": True, "confirm_paid": True,
                     "allow_room_audio_to_openai": True, "comfortable_volume_confirmed": True}
             response = await self.ui.post("/api/tests", json=body)
             self.assertEqual(response.status, 400)
