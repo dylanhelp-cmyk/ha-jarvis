@@ -26,7 +26,7 @@ import numpy as np
 
 from . import __version__
 from .acknowledgment import (PHRASE, approval_path, cache_path, candidate_identity, candidate_wav,
-                             generate_acknowledgment, read_candidate, verified_render)
+                             generate_acknowledgment, greeting_playback_identity, read_candidate, verified_render)
 from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
@@ -181,9 +181,10 @@ class Bench:
         ident = candidate_identity(pcm) if pcm else None
         approval = approval_path(self.data_dir)
         verified = bool(ident and approval.is_file() and approval.read_text(encoding="ascii").strip() == ident)
+        playback_id = greeting_playback_identity(ident) if ident else None
         return {**self.acknowledgment, "cached_on_host": pcm is not None, "candidate_id": ident,
-                "phrase": PHRASE, "verified": verified,
-                "cached_on_device": bool(verified and self.device.info.get("ack_cache_id") == ident)}
+                "playback_id": playback_id, "phrase": PHRASE, "verified": verified,
+                "cached_on_device": bool(verified and self.device.info.get("ack_cache_id") == playback_id)}
 
     def maybe_preload_wake_cache(self):
         device = self.device
@@ -1216,7 +1217,7 @@ def create_ui(bench):
         pcm = read_candidate(bench.data_dir)
         if request.query.get("clip") != candidate_identity(pcm):
             raise web.HTTPConflict(text="The greeting changed. Reload the preview.")
-        return web.Response(body=candidate_wav(pcm), content_type="audio/wav")
+        return web.Response(body=candidate_wav(pcm), content_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     async def verify_acknowledgment(request):
         data = await request.json()

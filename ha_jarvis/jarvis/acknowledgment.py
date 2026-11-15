@@ -12,7 +12,7 @@ import numpy as np
 
 from .live_bench import voiced_bounds
 from .live_session import LiveSession, MODEL, RATE, VOICE
-from .playback import stereo_pcm
+from .playback import VOICE_OUTPUT_GAIN_DB, stereo_pcm
 
 
 PHRASE = "Yes sir. How can I help?"
@@ -38,12 +38,21 @@ def candidate_wav(pcm):
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-        wav.writeframes(pcm)
+        wav.writeframes(greeting_playback_samples(pcm).tobytes())
     return output.getvalue()
 
 
 def candidate_identity(pcm):
     return hashlib.sha256(pcm).hexdigest()
+
+
+def greeting_playback_identity(candidate_id):
+    return hashlib.sha256(f"{candidate_id}:gain:{VOICE_OUTPUT_GAIN_DB}".encode("ascii")).hexdigest()
+
+
+def greeting_playback_samples(pcm):
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
+    return np.rint(samples * 10 ** (VOICE_OUTPUT_GAIN_DB / 20)).astype("<i2")
 
 
 def approval_path(data_dir):
@@ -58,7 +67,7 @@ def verified_render(data_dir):
     ident = candidate_identity(pcm)
     if path.read_text(encoding="ascii").strip() != ident:
         return None
-    return ident, stereo_pcm(np.frombuffer(pcm, dtype="<i2"))
+    return greeting_playback_identity(ident), stereo_pcm(greeting_playback_samples(pcm))
 
 
 async def generate_acknowledgment(settings, data_dir):

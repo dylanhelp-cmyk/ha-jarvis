@@ -16,6 +16,7 @@ from .lifecycle import ConversationPolicy
 from .live_bench import BenchReply
 from .live_session import LiveSession
 from .playback import RATE as RENDER_RATE
+from .playback import VOICE_OUTPUT_GAIN_DB
 from .streaming_aec import StreamingEcho
 
 INSTRUCTIONS = (
@@ -287,7 +288,7 @@ class FollowUpEnded(TimeoutError):
 
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None):
-    output_gain_db = -6
+    output_gain_db = VOICE_OUTPUT_GAIN_DB
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
     sender = None

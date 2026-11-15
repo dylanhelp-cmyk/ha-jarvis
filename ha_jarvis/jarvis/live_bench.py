@@ -13,6 +13,7 @@ import numpy as np
 
 from .audio import RATE, detect_probe
 from .playback import JackPlayback, RATE as RENDER_RATE
+from .playback import VOICE_OUTPUT_GAIN_DB
 from .live_session import INSTRUCTIONS, LiveSession
 
 
@@ -278,7 +279,7 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         stage("connecting to OpenAI Realtime" if transport == "realtime" else "connecting to GPT-Live")
         await session.start()
         for index, (fixture, endpoint) in enumerate(fixtures, 1):
-            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=-6,
+            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=VOICE_OUTPUT_GAIN_DB,
                                output_buffer_seconds=8 if transport == "realtime" else 1)
             current = reply
             sender = None
@@ -353,7 +354,8 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
         metrics = await session.close()
     return {"transport": transport, "model": metrics.model, "profile": profile,
             "playback_enabled": transport != "realtime", "playback_prime_ms": 50, "source_reserve_ms": 120,
-            "output_gain_db": -6, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+            "output_gain_db": VOICE_OUTPUT_GAIN_DB,
+            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             **metrics.websocket_startup_breakdown(),
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}

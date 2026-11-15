@@ -1,3 +1,7 @@
+# 0.2.62
+
+- Lower the cached greeting by 6 dB to use the live reply playback gain. Update the Voice PE cache from the existing approved clip.
+
 # 0.2.61
 
 - Show how long it took to connect the WebSocket and how much longer GPT-Live took to become ready.

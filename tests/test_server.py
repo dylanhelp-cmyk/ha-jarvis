@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+import wave
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -468,13 +469,16 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await ws.close()
 
     async def test_verified_greeting_retries_a_timed_out_transfer_without_playing_it(self):
-        from jarvis.acknowledgment import cache_path, candidate_identity
+        from jarvis.acknowledgment import cache_path, candidate_identity, greeting_playback_identity
         pcm = np.full(RATE * 2, 900, dtype="<i2").tobytes()
         cache_path(self.bench.data_dir).write_bytes(pcm)
         identity = candidate_identity(pcm)
+        playback_id = greeting_playback_identity(identity)
         preview = await self.ui.get("/api/acknowledgment/preview", params={"clip": identity})
         self.assertEqual(preview.status, 200)
-        self.assertTrue((await preview.read()).startswith(b"RIFF"))
+        with wave.open(io.BytesIO(await preview.read()), "rb") as wav:
+            self.assertEqual(wav.getnframes(), RATE * 2)
+            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 451)
         bad = await self.ui.post("/api/acknowledgment/verify",
                                  json={"clip": "stale", "heard_exact_phrase": True})
         self.assertEqual(bad.status, 400)
@@ -485,7 +489,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         try:
             await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
                                 "sample_rate": RATE, "channels": 1, "ack_cache_protocol": 1,
-                                "ack_cache_max_frames": 144000})
+                                "ack_cache_id": identity, "ack_cache_max_frames": 144000})
             self.assertEqual((await ws.receive_json(timeout=2))["type"], "hello_ok")
             first_start = await ws.receive_json(timeout=2)
             self.assertEqual(first_start["type"], "ack_cache_start")
@@ -495,7 +499,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bench.acknowledgment_status()["cached_on_device"])
             start = await ws.receive_json(timeout=2)
             self.assertEqual(start["type"], "ack_cache_start")
-            self.assertEqual(start["cache_id"], identity)
+            self.assertNotEqual(start["cache_id"], identity)
+            self.assertEqual(start["cache_id"], playback_id)
             generation = start["generation"]
             self.assertNotEqual(generation, first_start["generation"])
             await ws.send_json({"type": "ack_cache_ready", "generation": first_start["generation"]})
@@ -506,11 +511,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 magic, _, _, count, packet_generation, packet_sequence, first = HEADER.unpack_from(frame)
                 self.assertEqual((magic, packet_generation, packet_sequence, first),
                                  (b"JPLY", generation, sequence, sent))
+                if sequence == 0:
+                    self.assertEqual(int(np.median(np.frombuffer(frame[HEADER.size:], dtype="<i2"))), 451)
                 sent += count
                 sequence += 1
                 await ws.send_json({"type": "ack_cache_progress", "generation": generation, "samples": sent})
             self.assertEqual((await ws.receive_json(timeout=2))["type"], "ack_cache_commit")
-            await ws.send_json({"type": "ack_cache_committed", "generation": generation, "cache_id": identity})
+            await ws.send_json({"type": "ack_cache_committed", "generation": generation, "cache_id": playback_id})
             await asyncio.wait_for(self.bench.task, 2)
             self.assertTrue(self.bench.acknowledgment_status()["cached_on_device"])
             self.assertIsNone(self.bench.device.capture_id)

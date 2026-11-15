@@ -11,6 +11,7 @@ import numpy as np
 
 
 RATE = 48000
+VOICE_OUTPUT_GAIN_DB = -6
 CHANNELS = 2
 PACKET_FRAMES = 480
 HEADER = struct.Struct("<4sBBHIIQ")

@@ -100,7 +100,8 @@ function showStatus(data) {
   if (preview.dataset.clip !== (ack.candidate_id || '')) {
     preview.dataset.clip = ack.candidate_id || '';
     listenedClip = undefined;
-    if (ack.candidate_id) preview.src = 'api/acknowledgment/preview?clip=' + encodeURIComponent(ack.candidate_id);
+    if (ack.candidate_id) preview.src = 'api/acknowledgment/preview?' +
+      new URLSearchParams({clip: ack.candidate_id, render: ack.playback_id});
     else preview.removeAttribute('src');
   }
   preview.hidden = !ack.cached_on_host;
