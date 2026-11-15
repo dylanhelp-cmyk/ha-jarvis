@@ -1,3 +1,7 @@
+# 0.2.41
+
+- Configure the API test cap in Home Assistant's App settings and display it in Jarvis. Keep existing usage and pending reservations.
+
 # 0.2.40
 
 - In the two-turn voice preview, use confirmed playback timing to capture a prompt follow-up. Keep the quiet guard when the render reference is uncertain.

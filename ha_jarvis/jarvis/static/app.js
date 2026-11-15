@@ -84,7 +84,8 @@ function showStatus(data) {
     ' · ' + activeGain + ' dB App mic gain' +
     (device.capture_gain ? ' · ' + device.capture_gain + '× firmware mic gain' : ''));
   $('version').textContent = 'App ' + data.version;
-  $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') + ' Synthetic reply timing uses the local jack.';
+  $('cloud-state').textContent = (data.cloud.api_key_configured ? 'Key saved locally.' : 'No key saved.') +
+    ' API test cap is US$' + data.cloud.budget_usd + '.';
   const ack = data.acknowledgment;
   const preview = $('ack-preview');
   if (preview.dataset.clip !== (ack.candidate_id || '')) {

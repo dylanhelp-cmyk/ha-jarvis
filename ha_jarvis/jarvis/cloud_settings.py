@@ -35,11 +35,13 @@ class CloudBudgetError(ValueError):
 
 
 class CloudSettings:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, budget_usd=5):
+        if type(budget_usd) is not int or budget_usd < 0:
+            raise CloudBudgetError("The API test cap must be a nonnegative whole US dollar amount")
         self.path = Path(data_dir) / "openai-private.json"
         self.api_key = ""
         self.spent_usd = 0.0
-        self.budget_usd = 5.0
+        self.budget_usd = budget_usd
         self.pending = None
         self.attempt_count = 0
         if self.path.exists():
@@ -125,7 +127,7 @@ class CloudSettings:
             # client receives the event that triggers shutdown.
             reserved += (BACKEND_RESPONSE_LIMIT + 1) * _backend_allowance(backend_model)
         if self.spent_usd + reserved > self.budget_usd + 1e-12:
-            raise CloudBudgetError("Cloud test would exceed the US$5 budget")
+            raise CloudBudgetError(f"Cloud test would exceed the US${self.budget_usd} budget")
         self.pending = {"id": secrets.token_hex(12), "transport": transport,
                         "reserved_usd": reserved, "usage_seconds": 0.0,
                         "status": "reserved"}

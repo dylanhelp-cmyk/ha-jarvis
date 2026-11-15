@@ -70,6 +70,17 @@ class CloudBudgetTests(unittest.TestCase):
         with self.assertRaises(CloudBudgetError):
             self.settings.finalize("different-attempt", 5)
 
+    def test_configured_cap_preserves_existing_usage_and_limits_new_attempts(self):
+        self.settings.spent_usd = 9.94
+        self.settings._save()
+        settings = CloudSettings(self.folder.name, budget_usd=10)
+        self.assertEqual(settings.public()["spent_usd"], 9.94)
+        self.assertEqual(settings.public()["budget_usd"], 10)
+        attempt = settings.reserve_attempt(transport="websocket")
+        settings.finalize(attempt, 60)
+        with self.assertRaisesRegex(CloudBudgetError, r"US\$10 budget"):
+            settings.reserve_attempt(transport="websocket")
+
     def test_delegation_reserves_before_start_and_debits_each_response_once(self):
         model = "gpt-6-luna"
         attempt = self.settings.reserve_attempt(transport="websocket", backend_model=model)

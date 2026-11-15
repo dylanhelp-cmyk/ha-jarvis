@@ -1,5 +1,5 @@
 name: HA Jarvis Audio Bench
-version: "0.2.40"
+version: "0.2.41"
 slug: ha_jarvis
 description: Local acoustic tests through the Voice PE speaker jack.
 url: https://github.com/dylanhelp-cmyk/ha-jarvis
@@ -14,5 +14,7 @@ ingress: true
 ingress_port: 8098
 panel_icon: mdi:waveform
 panel_title: Jarvis
-options: {}
-schema: {}
+options:
+  api_test_budget_usd: 5
+schema:
+  api_test_budget_usd: int

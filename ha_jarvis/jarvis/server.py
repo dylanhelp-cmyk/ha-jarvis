@@ -94,10 +94,10 @@ def pilot(t):
 
 
 class Bench:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, budget_usd=5):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.cloud_settings = CloudSettings(self.data_dir)
+        self.cloud_settings = CloudSettings(self.data_dir, budget_usd=budget_usd)
         self.cloud_fixture = b""
         self.acknowledgment = {"phase": "idle"}
         self.ack_cache_attempted_on = None
@@ -1361,7 +1361,10 @@ async def serve():
     for signum in (signal.SIGTERM, signal.SIGINT):
         with suppress(NotImplementedError):
             loop.add_signal_handler(signum, shutdown.set)
-    bench = Bench(os.environ.get("JARVIS_DATA_DIR", "/data"))
+    data_dir = Path(os.environ.get("JARVIS_DATA_DIR", "/data"))
+    options_path = data_dir / "options.json"
+    options = json.loads(options_path.read_text()) if options_path.is_file() else {}
+    bench = Bench(data_dir, budget_usd=options.get("api_test_budget_usd", 5))
     ui_runner, audio_runner = web.AppRunner(create_ui(bench)), web.AppRunner(create_audio(bench))
     await ui_runner.setup()
     await audio_runner.setup()
