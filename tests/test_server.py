@@ -188,17 +188,21 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         device.frames.append(PCMFrame(0, 0, start_ms, samples))
         reference = np.tile(samples, 4)
         result = {"id": "interrupt", "trials": []}
+        control = {"id": "interrupt-control", "trials": []}
+        playback_only = False
 
         async def send(_pcm, **_options):
+            loud_start = 1520 if playback_only else 720
             for index in range(115):
                 observe = device.pcm_consumer
-                frame_samples = samples * 3 if 720 <= index * 16 < 880 else samples
+                frame_samples = samples * 3 if loud_start <= index * 16 < loud_start + 160 else samples
                 observe(PCMFrame(index, index * 256, start_ms + index * 16, frame_samples), 0)
-            await asyncio.Future()
+            if not playback_only:
+                await asyncio.Future()
 
-        player = SimpleNamespace(first_rendered_ms=start_ms, reason="requested",
+        player = SimpleNamespace(first_rendered_ms=start_ms, last_rendered_ms=start_ms + 1730, reason="requested",
                                  send=send, stop=AsyncMock(), snapshot=lambda: {})
-        echo = SimpleNamespace(error=None, rendered_frames=192000, prime_capture=lambda *_: b"",
+        echo = SimpleNamespace(error=None, finished=True, rendered_frames=192000, prime_capture=lambda *_: b"",
                                offer=lambda frame, _: frame.samples.tobytes())
         detector = SimpleNamespace(observe=lambda *_: True)
         with (patch.object(self.bench, "alignment_delay", return_value=35),
@@ -208,7 +212,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.server.detect_stop") as pilot_stop,
               patch("jarvis.server.asyncio.sleep", new_callable=AsyncMock),
               patch("jarvis.conversation_trial.SpeechEndpoint", return_value=detector),
-              patch("jarvis.live_bench.synthesize_fixture", return_value=(reference.tobytes(), 0)),
+              patch("jarvis.live_bench.synthesize_fixture", return_value=(reference.tobytes(), 0)) as synthesize,
               patch("jarvis.live_bench.voiced_bounds", return_value=(0, len(reference))),
               patch("jarvis.live_bench.render_reference", return_value=np.zeros(4 * RATE)),
               patch("jarvis.live_bench.match_response", return_value={"status": "detected", "latency_ms": 40}),
@@ -216,6 +220,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.streaming_aec.residual_echo_similarity", return_value=.01)):
             device.clock_offset_ms = 0
             await self.bench.measure_interrupt(result, spoken_reply=True)
+            synthesize.reset_mock()
+            playback_only = True
+            player.reason = "drained"
+            await self.bench.measure_interrupt(control, spoken_reply=True, playback_only=True)
 
         self.assertEqual(result["status"], "unavailable")
         self.assertGreater(result["interruption_probe"]["low_level_candidates_rejected"], 0)
@@ -224,6 +232,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["trials"][0]["latency_ms"], 40)
         self.assertIsNone(result["interruption_probe"]["speaker_stop_acoustic_ms"])
         pilot_stop.assert_not_called()
+        synthesize.assert_awaited_once()
+        self.assertEqual(control["status"], "failed")
+        self.assertGreater(control["interruption_probe"]["first_candidate_after_render_ms"], 1400)
+        self.assertNotIn("injection_to_stop_request_ms", control["interruption_probe"])
 
     async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
         from types import SimpleNamespace

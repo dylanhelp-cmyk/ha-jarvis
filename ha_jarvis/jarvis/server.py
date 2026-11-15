@@ -596,21 +596,22 @@ class Bench:
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
-    async def measure_interrupt(self, result, *, spoken_reply=False):
+    async def measure_interrupt(self, result, *, spoken_reply=False, playback_only=False):
         from .conversation_trial import SpeechEndpoint, gain_packet
-        from .live_bench import (INTERRUPTION_REPLY, SYNTHETIC_PROMPTS, match_response, render_reference,
-                                 synthesize_fixture, voiced_bounds)
+        from .live_bench import INTERRUPTION_REPLY, SYNTHETIC_PROMPTS, render_reference, synthesize_fixture, voiced_bounds
         from .streaming_aec import ConfirmedRenderInput, residual_echo_similarity
 
         alignment = self.alignment_delay()
         if alignment is None:
             raise ValueError("Run Echo reference alignment before the interruption check")
         device = self.device
-        pcm, _ = await synthesize_fixture(SYNTHETIC_PROMPTS[0])
-        speech = np.frombuffer(pcm, dtype="<i2")
-        first, end = voiced_bounds(speech)
-        speech = speech[first:end].astype(np.float64)
-        speech = np.rint(speech * (400 / np.max(np.abs(speech)))).astype("<i2")
+        speech = None
+        if not playback_only:
+            pcm, _ = await synthesize_fixture(SYNTHETIC_PROMPTS[0])
+            speech = np.frombuffer(pcm, dtype="<i2")
+            first, end = voiced_bounds(speech)
+            speech = speech[first:end].astype(np.float64)
+            speech = np.rint(speech * (400 / np.max(np.abs(speech)))).astype("<i2")
         if spoken_reply:
             fixture, _ = await synthesize_fixture(INTERRUPTION_REPLY)
             reply = np.frombuffer(fixture, dtype="<i2").astype(np.float64)
@@ -627,6 +628,7 @@ class Bench:
         cleaned = bytearray()
         recent = deque(maxlen=5)
         early_candidate = None
+        candidate_windows = 0
         injection_window = False
         rejected = level_rejected = 0
         baseline_power = []
@@ -642,7 +644,7 @@ class Bench:
 
         def observe(frame, offset):
             first_ms = player.first_rendered_ms
-            if first_ms is not None:
+            if first_ms is not None and speech is not None:
                 # Inject only into the AEC input. Leave the original microphone
                 # recording untouched for independent acoustic stop detection.
                 start = (frame.capture_ms - first_ms - inject_at_ms) * (RATE // 1000)
@@ -660,6 +662,7 @@ class Bench:
 
         def inspect_cleaned(pcm, offset):
             nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
+            nonlocal candidate_windows
             first_ms = player.first_rendered_ms
             cleaned.extend(pcm)
             while len(cleaned) >= 640 and not trigger.done():
@@ -667,6 +670,8 @@ class Bench:
                 del cleaned[:640]
                 processed += 320
                 end_ms = capture_start_ms + processed * 1000 / RATE
+                if playback_only and echo.finished and end_ms > player.last_rendered_ms + alignment:
+                    continue
                 if first_ms is not None and first_ms + 300 <= end_ms < first_ms + monitor_start_ms:
                     samples = np.frombuffer(packet, dtype="<i2").astype(np.float64)
                     baseline_power.append(float(np.mean(samples ** 2)))
@@ -676,7 +681,7 @@ class Bench:
                             continue
                         noise_power = max(1., float(np.percentile(baseline_power, 75)))
                     relative_ms = end_ms - first_ms
-                    if relative_ms >= inject_at_ms and not injection_window:
+                    if not playback_only and relative_ms >= inject_at_ms and not injection_window:
                         injection_window = True
                         detector = SpeechEndpoint()
                         recent.clear()
@@ -697,13 +702,18 @@ class Bench:
                     excess_db = 10 * math.log10(max(1., float(np.mean(samples ** 2))) / noise_power)
                     if excess_db < min_excess_db:
                         level_rejected += 1
+                    elif playback_only:
+                        candidate_windows += 1
+                        if early_candidate is None:
+                            early_candidate = (relative_ms, similarity, excess_db)
                     elif not injection_window:
                         if early_candidate is None:
                             early_candidate = (relative_ms - inject_at_ms, similarity, excess_db)
                     else:
                         trigger.set_result((relative_ms, similarity, excess_db, (end_ms + offset) / 1000, time.monotonic()))
 
-        self.test["phase"] = "testing a local speech-triggered stop"
+        self.test["phase"] = ("checking for false interruptions during playback" if playback_only
+                              else "testing a local speech-triggered stop")
         device.pcm_consumer = observe
         player.on_render_progress = on_render_progress
         device.playback = player
@@ -723,6 +733,8 @@ class Bench:
                 await player.stop()
             else:
                 await sender
+                if playback_only:
+                    await asyncio.sleep(.35)
         finally:
             device.pcm_consumer = None
             player.on_render_progress = None
@@ -735,20 +747,41 @@ class Bench:
             device.playback = None
             result["playback"] = player.snapshot()
 
-        report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
+        report = result["interruption_probe"] = {"input": "microphone only" if playback_only
+                                                else "generated speech injected before local AEC",
                                                 "speaker_signal": "generated reply" if spoken_reply else "acoustic pilot",
-                                                "injection_after_render_ms": inject_at_ms,
                                                 "echo_like_candidates_rejected": rejected,
                                                 "low_level_candidates_rejected": level_rejected,
                                                 "baseline_packets": len(baseline_power),
                                                 "minimum_excess_db": min_excess_db}
         if early_candidate is not None:
             early_ms, early_similarity, early_excess_db = early_candidate
-            report["early_candidate_relative_to_injection_ms"] = round(early_ms, 1)
+            time_key = "first_candidate_after_render_ms" if playback_only else "early_candidate_relative_to_injection_ms"
+            report[time_key] = round(early_ms, 1)
             report["early_candidate_render_similarity"] = round(early_similarity, 3)
             report["early_candidate_excess_db"] = round(early_excess_db, 1)
         if noise_power is not None:
             report["baseline_dbfs"] = round(10 * math.log10(noise_power / 32768 ** 2), 1)
+        if playback_only:
+            report["playback_candidate_windows"] = candidate_windows
+            if echo.error or noise_power is None or not echo.finished:
+                result.update(status="unavailable", reason=echo.error or "The complete playback could not be observed")
+                return
+            observed_until = capture_start_ms + processed * 1000 / RATE
+            if observed_until < player.last_rendered_ms + alignment:
+                result.update(status="unavailable", reason="The microphone capture ended before the playback tail")
+                return
+            await device.end()
+            captured, capture_start = device.recording()
+            match = await self.match_interruption_reply(player, reference, captured, capture_start)
+            result["trials"].append({"trial": 1, **match})
+            result["status"] = "unavailable"
+            if match["status"] == "detected":
+                result["status"] = "failed" if candidate_windows else "measured"
+                if candidate_windows:
+                    result["reason"] = "The detector flagged a possible interruption during playback"
+            return
+        report["injection_after_render_ms"] = inject_at_ms
         if stop_at is None or not trigger.done() or trigger.cancelled():
             reason = ("No stop was triggered after the speech injection" if noise_power is not None
                       else "No usable playback baseline")
@@ -773,15 +806,7 @@ class Bench:
             # speech to prove the speaker was audible without treating a pause
             # as the acoustic stop time.
             prefix = reference[:inject_at_ms * RATE // 1000]
-            bounds = voiced_bounds(prefix)
-            started = (player.first_rendered_ms + device.clock_offset_ms) / 1000
-            if bounds is not None:
-                acoustic = await asyncio.to_thread(match_response, captured, capture_start, prefix, bounds[0],
-                                                    started, started, window_seconds=.14,
-                                                    handoff_at=lambda sample: started + sample / RATE,
-                                                    acoustic_delay_range=(-.04, .22))
-            else:
-                acoustic = {"status": "unavailable", "reason": "The reply prefix had no usable speech"}
+            acoustic = await self.match_interruption_reply(player, prefix, captured, capture_start)
             report["speaker_stop_acoustic_ms"] = None
         else:
             acoustic = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
@@ -790,6 +815,18 @@ class Bench:
             result.update(status="unavailable", reason="A stop candidate preceded the injected speech")
         else:
             result["status"] = "measured" if acoustic["status"] == "detected" else "unavailable"
+
+    async def match_interruption_reply(self, player, reference, captured, capture_start):
+        from .live_bench import match_response, voiced_bounds
+
+        bounds = voiced_bounds(reference)
+        if bounds is None:
+            return {"status": "unavailable", "reason": "The reply reference had no usable speech"}
+        started = (player.first_rendered_ms + self.device.clock_offset_ms) / 1000
+        return await asyncio.to_thread(match_response, captured, capture_start, reference, bounds[0],
+                                       started, started, window_seconds=.14,
+                                       handoff_at=lambda sample: started + sample / RATE,
+                                       acoustic_delay_range=(-.04, .22))
 
     async def measure_reply_stall(self, result):
         from .live_bench import SYNTHETIC_PROMPTS, match_response, render_reference, synthesize_fixture
@@ -978,8 +1015,9 @@ class Bench:
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
                 return
-            if kind in ("interrupt", "interrupt_speech"):
-                await self.measure_interrupt(result, spoken_reply=kind == "interrupt_speech")
+            if kind in ("interrupt", "interrupt_speech", "interrupt_control"):
+                await self.measure_interrupt(result, spoken_reply=kind != "interrupt",
+                                             playback_only=kind == "interrupt_control")
                 return
             if kind == "reply_stall":
                 await self.measure_reply_stall(result)
@@ -1304,7 +1342,7 @@ def create_ui(bench):
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
         if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment",
-                        "reply_stall", "interrupt", "interrupt_speech", "voice_turn"):
+                        "reply_stall", "interrupt", "interrupt_speech", "interrupt_control", "voice_turn"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
@@ -1355,7 +1393,7 @@ def create_ui(bench):
                 raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
         if kind in ("wake_ack", "voice_turn") and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
-        if kind in ("interrupt", "interrupt_speech") and bench.alignment_delay() is None:
+        if kind in ("interrupt", "interrupt_speech", "interrupt_control") and bench.alignment_delay() is None:
             raise ValueError("Run Echo reference alignment before the interruption check")
         if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
             raise ValueError("Verify the wake clip before testing its render alignment")

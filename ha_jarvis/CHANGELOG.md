@@ -1,3 +1,7 @@
+# 0.2.63
+
+- Add a local playback-only control that records possible false interruptions through a complete spoken reply.
+
 # 0.2.62
 
 - Lower the cached greeting by 6 dB to use the live reply playback gain. Update the Voice PE cache from the existing approved clip.
