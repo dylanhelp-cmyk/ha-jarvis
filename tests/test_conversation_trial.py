@@ -29,7 +29,8 @@ class LocalEcho:
 class SimulatedSession:
     def __init__(self, settings, *, on_audio, **kwargs):
         self.on_audio = on_audio
-        self.metrics = SimpleNamespace(error=None, ready_ms=5, finalization_confirmed=True, usage_seconds=0)
+        self.metrics = SimpleNamespace(error=None, ready_ms=5, finalization_confirmed=True, usage_seconds=0,
+                                       close_reason="close_requested", local_close_reason=None)
         self.sent = settings
 
     async def start(self):

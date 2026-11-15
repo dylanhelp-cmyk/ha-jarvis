@@ -313,6 +313,20 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.finalization_confirmed)
         self.assertTrue(session._pc.closed)
 
+    async def test_remote_close_during_input_preserves_reason_and_final_usage(self):
+        ws = FakeWS()
+        session = self.session(transport="websocket")
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        ws.event({"type": "session.closed", "reason": "remote_hangup", "usage": {"seconds": 8}})
+        await asyncio.wait_for(session._final.wait(), 1)
+        with self.assertRaisesRegex(LiveSessionError, "closed during input \\(remote_hangup\\)"):
+            await session.send_audio(bytes(640))
+        metrics = await session.close()
+        self.assertEqual(metrics.close_reason, "remote_hangup")
+        self.assertEqual(metrics.usage_seconds, 8)
+        self.assertFalse(any(event["type"] == "session.close" for event in ws.sent))
+
     async def test_no_terminal_event_blocks_retry_after_restart(self):
         ws = FakeWS(finalize=False)
         session = self.session(transport="websocket")

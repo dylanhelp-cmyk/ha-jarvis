@@ -44,6 +44,7 @@ class LiveMetrics:
     usage_seconds: float = 0.0
     finalization_confirmed: bool = False
     close_reason: str | None = None
+    local_close_reason: str | None = None
     error: str | None = None
     http_status: int | None = None
     acoustic_measurement: bool = False
@@ -352,6 +353,12 @@ class LiveSession:
 
     async def send_audio(self, pcm):
         if not self._ready.is_set() or self._closing or self._final.is_set() or self._failed.is_set():
+            if self.metrics.error:
+                raise LiveSessionError(self.metrics.error)
+            if self.metrics.local_close_reason == "preview_limit":
+                raise LiveSessionError("The GPT-Live preview reached its time limit")
+            if self.metrics.close_reason is not None:
+                raise LiveSessionError(f"GPT-Live closed during input ({self.metrics.close_reason})")
             raise LiveSessionError("Cloud session is not accepting audio")
         if not isinstance(pcm, bytes) or not pcm or len(pcm) % 2 or len(pcm) > 3200:
             raise ValueError("Supply up to 100 ms of complete PCM16LE mono samples at 16 kHz")
@@ -377,7 +384,9 @@ class LiveSession:
 
     async def _watchdog(self):
         await asyncio.sleep(max(0, self.media_deadline() - time.monotonic()))
-        await self.close()
+        if self._close_task is None:
+            self.metrics.local_close_reason = "preview_limit"
+            await self.close()
 
     async def close(self):
         if self._close_task is None:

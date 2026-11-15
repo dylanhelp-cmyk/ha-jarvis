@@ -1,3 +1,7 @@
+# 0.2.47
+
+- Report why a GPT-Live session stopped accepting input, including the local preview deadline or the provider's close reason when available.
+
 # 0.2.46
 
 - Use the Voice PE internal speaker automatically when the 3.5 mm jack is unplugged. Show the active output and require matching echo alignment for voice tests.

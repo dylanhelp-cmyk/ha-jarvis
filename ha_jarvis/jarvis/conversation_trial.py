@@ -308,8 +308,10 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
             now = time.monotonic()
-            if device.errors or session.metrics.error or sender.done() or output_route(device.info) is None:
-                raise RuntimeError("The microphone, cloud session or speaker playback failed")
+            if session.metrics.error:
+                raise RuntimeError(session.metrics.error)
+            if device.errors or sender.done() or output_route(device.info) is None:
+                raise RuntimeError("The microphone or speaker playback failed")
             if input_deadline is not None and now >= input_deadline:
                 raise FollowUpEnded("session_limit", "The conversation reached the preview session limit")
             if warm_follow_up and inactivity.should_close(now):
@@ -509,4 +511,6 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         result["cloud"] = {"transport": "websocket", "profile": profile,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
                            "finalization_confirmed": metrics.finalization_confirmed,
-                           "usage_seconds": metrics.usage_seconds}
+                           "usage_seconds": metrics.usage_seconds,
+                           "close_reason": metrics.close_reason,
+                           "local_close_reason": metrics.local_close_reason}
