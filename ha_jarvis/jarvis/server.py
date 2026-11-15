@@ -581,9 +581,10 @@ class Bench:
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
-    async def measure_interrupt(self, result):
+    async def measure_interrupt(self, result, *, spoken_reply=False):
         from .conversation_trial import SpeechEndpoint, gain_packet
-        from .live_bench import SYNTHETIC_PROMPTS, render_reference, synthesize_fixture, voiced_bounds
+        from .live_bench import (INTERRUPTION_REPLY, SYNTHETIC_PROMPTS, match_response, render_reference,
+                                 synthesize_fixture, voiced_bounds)
         from .streaming_aec import ConfirmedRenderInput, residual_echo_similarity
 
         alignment = self.alignment_delay()
@@ -595,10 +596,17 @@ class Bench:
         first, end = voiced_bounds(speech)
         speech = speech[first:end].astype(np.float64)
         speech = np.rint(speech * (400 / np.max(np.abs(speech)))).astype("<i2")
-        pilot_pcm = await asyncio.to_thread(stereo_pcm, pilot(np.arange(4 * RATE) / RATE))
-        reference = await asyncio.to_thread(render_reference, pilot_pcm)
+        if spoken_reply:
+            fixture, _ = await synthesize_fixture(INTERRUPTION_REPLY)
+            reply = np.frombuffer(fixture, dtype="<i2").astype(np.float64)
+            peak = np.max(np.abs(reply))
+            speaker_signal = np.rint(reply * (3200 / peak)).astype("<i2")
+        else:
+            speaker_signal = pilot(np.arange(4 * RATE) / RATE)
+        speaker_pcm = await asyncio.to_thread(stereo_pcm, speaker_signal)
+        reference = await asyncio.to_thread(render_reference, speaker_pcm)
         player = JackPlayback(device, result["id"])
-        echo = ConfirmedRenderInput(player, pilot_pcm, alignment)
+        echo = ConfirmedRenderInput(player, speaker_pcm, alignment)
         detector = SpeechEndpoint()
         trigger = asyncio.get_running_loop().create_future()
         cleaned = bytearray()
@@ -675,7 +683,7 @@ class Bench:
         self.test["phase"] = "testing a local speech-triggered stop"
         device.pcm_consumer = observe
         device.playback = player
-        sender = asyncio.create_task(player.send(pilot_pcm, prime_packets=5))
+        sender = asyncio.create_task(player.send(speaker_pcm, prime_packets=5))
         stop_at = None
         try:
             await asyncio.wait((sender, trigger), return_when=asyncio.FIRST_COMPLETED)
@@ -702,6 +710,7 @@ class Bench:
             result["playback"] = player.snapshot()
 
         report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
+                                                "speaker_signal": "generated reply" if spoken_reply else "acoustic pilot",
                                                 "injection_after_render_ms": inject_at_ms,
                                                 "echo_like_candidates_rejected": rejected,
                                                 "low_level_candidates_rejected": level_rejected,
@@ -731,7 +740,23 @@ class Bench:
         await asyncio.sleep(.75)
         await device.end()
         captured, capture_start = device.recording()
-        acoustic = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
+        if spoken_reply:
+            # The rendered reply has natural pauses. Match its pre-injection
+            # speech to prove the speaker was audible without treating a pause
+            # as the acoustic stop time.
+            prefix = reference[:inject_at_ms * RATE // 1000]
+            bounds = voiced_bounds(prefix)
+            started = (player.first_rendered_ms + device.clock_offset_ms) / 1000
+            if bounds is not None:
+                acoustic = await asyncio.to_thread(match_response, captured, capture_start, prefix, bounds[0],
+                                                    started, started, window_seconds=.14,
+                                                    handoff_at=lambda sample: started + sample / RATE,
+                                                    acoustic_delay_range=(-.04, .22))
+            else:
+                acoustic = {"status": "unavailable", "reason": "The reply prefix had no usable speech"}
+            report["speaker_stop_acoustic_ms"] = None
+        else:
+            acoustic = await asyncio.to_thread(detect_stop, captured, capture_start, stop_at)
         result["trials"].append({"trial": 1, **acoustic})
         if early_candidate is not None:
             result.update(status="unavailable", reason="A stop candidate preceded the injected speech")
@@ -925,8 +950,8 @@ class Bench:
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
                 return
-            if kind == "interrupt":
-                await self.measure_interrupt(result)
+            if kind in ("interrupt", "interrupt_speech"):
+                await self.measure_interrupt(result, spoken_reply=kind == "interrupt_speech")
                 return
             if kind == "reply_stall":
                 await self.measure_reply_stall(result)
@@ -1250,7 +1275,8 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "reply_stall", "interrupt", "voice_turn"):
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment",
+                        "reply_stall", "interrupt", "interrupt_speech", "voice_turn"):
             raise ValueError("Unsupported local test")
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
@@ -1301,7 +1327,7 @@ def create_ui(bench):
                 raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
         if kind in ("wake_ack", "voice_turn") and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
-        if kind == "interrupt" and bench.alignment_delay() is None:
+        if kind in ("interrupt", "interrupt_speech") and bench.alignment_delay() is None:
             raise ValueError("Run Echo reference alignment before the interruption check")
         if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
             raise ValueError("Verify the wake clip before testing its render alignment")

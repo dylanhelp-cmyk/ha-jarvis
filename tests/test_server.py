@@ -182,22 +182,25 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch.object(device, "end", new_callable=AsyncMock),
               patch.object(device, "recording", return_value=(reference, 0)),
               patch("jarvis.server.JackPlayback", return_value=player),
-              patch("jarvis.server.detect_stop", return_value={"status": "detected", "latency_ms": 40}),
+              patch("jarvis.server.detect_stop") as pilot_stop,
               patch("jarvis.server.asyncio.sleep", new_callable=AsyncMock),
               patch("jarvis.conversation_trial.SpeechEndpoint", return_value=detector),
               patch("jarvis.live_bench.synthesize_fixture", return_value=(reference.tobytes(), 0)),
               patch("jarvis.live_bench.voiced_bounds", return_value=(0, len(reference))),
               patch("jarvis.live_bench.render_reference", return_value=np.zeros(4 * RATE)),
+              patch("jarvis.live_bench.match_response", return_value={"status": "detected", "latency_ms": 40}),
               patch("jarvis.streaming_aec.ConfirmedRenderInput", return_value=echo),
               patch("jarvis.streaming_aec.residual_echo_similarity", return_value=.01)):
             device.clock_offset_ms = 0
-            await self.bench.measure_interrupt(result)
+            await self.bench.measure_interrupt(result, spoken_reply=True)
 
         self.assertEqual(result["status"], "unavailable")
         self.assertGreater(result["interruption_probe"]["low_level_candidates_rejected"], 0)
         self.assertLess(result["interruption_probe"]["early_candidate_relative_to_injection_ms"], 0)
         self.assertGreater(result["interruption_probe"]["trigger_relative_to_injection_ms"], 0)
         self.assertEqual(result["trials"][0]["latency_ms"], 40)
+        self.assertIsNone(result["interruption_probe"]["speaker_stop_acoustic_ms"])
+        pilot_stop.assert_not_called()
 
     async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
         from types import SimpleNamespace

@@ -145,11 +145,12 @@ SYNTHETIC_PROMPTS = (
     "What is the capital of France?",
     "And which river flows through that city?",
 )
+INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows through it is called the Seine."
 
 
 async def synthesize_fixture(prompt):
     """Build a digital test asset on the App. No recording or upload endpoint is used."""
-    if prompt not in SYNTHETIC_PROMPTS:
+    if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY):
         raise ValueError("Unknown built-in synthetic prompt")
     process = await asyncio.create_subprocess_exec(
         "espeak-ng", "--stdout", "-v", "en-gb", "--stdin",

@@ -1,3 +1,7 @@
+# 0.2.57
+
+- Add a local spoken-reply interruption test. It checks acoustic reply onset, flags premature stop candidates and reports the device-confirmed stop separately.
+
 # 0.2.56
 
 - In the local interruption test, reject low-level speech candidates relative to the playback baseline and report how many were rejected.

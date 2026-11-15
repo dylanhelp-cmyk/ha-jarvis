@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: 'Interruption check', stability: 'Stream stability',
+  interrupt_speech: 'Spoken reply interruption',
   reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
@@ -50,7 +51,7 @@ function readiness() {
   else if (device.muted || !device.raw_ready) reason = 'Unmute Voice PE and wait for raw microphone verification.';
   else if (speaker && (device.playback_protocol !== 1 || speakerRoute(device) === 'unavailable')) reason = 'Install compatible Voice PE firmware or connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
-  else if (kind === 'interrupt' && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
+  else if ((kind === 'interrupt' || kind === 'interrupt_speech') && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
   else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
@@ -198,7 +199,8 @@ function showResults(results) {
       const cold = trial.cold_startup_ms;
       add(card, 'p', (trial.turn === 'warm_followup' ? 'Warm follow-up' : trial.turn === 'first' ? 'First reply' : 'Trial ' + trial.trial) + ' / ' +
         (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') :
-          trial.latency_ms + (result.kind === 'voice_turn' ? ' ms from returned voice to audible output' : ' ms')) +
+          trial.latency_ms + (result.kind === 'voice_turn' ? ' ms from returned voice to audible output' :
+            result.kind === 'interrupt_speech' ? ' ms from render start to audible reply' : ' ms')) +
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
@@ -225,6 +227,9 @@ function showResults(results) {
     }
     if (interrupt?.injection_to_stop_request_ms != null) {
       add(card, 'p', 'A stop was requested ' + interrupt.injection_to_stop_request_ms + ' ms after speech injection.');
+    }
+    if (result.kind === 'interrupt_speech' && interrupt?.injection_to_stop_request_ms != null) {
+      add(card, 'p', 'Acoustic stop time unavailable for spoken replies.');
     }
     if (result.live_echo) add(card, 'p', result.live_echo.status === 'measured' ?
       'Live DMA-reference pilot suppression ' + result.live_echo.pilot_band_reduction_db + ' dB' :
