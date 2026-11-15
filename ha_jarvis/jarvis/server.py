@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import io
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -604,7 +605,10 @@ class Bench:
         recent = deque(maxlen=5)
         early_candidate = None
         injection_window = False
-        rejected = 0
+        rejected = level_rejected = 0
+        baseline_power = []
+        noise_power = None
+        min_excess_db = 6
         monitor_start_ms, inject_at_ms = 500, 1400
 
         await asyncio.sleep(.5)
@@ -614,7 +618,7 @@ class Bench:
         processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
 
         def observe(frame, offset):
-            nonlocal detector, early_candidate, injection_window, processed, rejected
+            nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
             first_ms = player.first_rendered_ms
             if first_ms is not None:
                 # Inject only into the AEC input. Leave the original microphone
@@ -632,7 +636,14 @@ class Bench:
                 del cleaned[:640]
                 processed += 320
                 end_ms = capture_start_ms + processed * 1000 / RATE
-                if first_ms is not None and end_ms >= first_ms + monitor_start_ms:
+                if first_ms is not None and first_ms + 300 <= end_ms < first_ms + monitor_start_ms:
+                    samples = np.frombuffer(packet, dtype="<i2").astype(np.float64)
+                    baseline_power.append(float(np.mean(samples ** 2)))
+                elif first_ms is not None and end_ms >= first_ms + monitor_start_ms:
+                    if noise_power is None:
+                        if len(baseline_power) < 5:
+                            continue
+                        noise_power = max(1., float(np.percentile(baseline_power, 75)))
                     relative_ms = end_ms - first_ms
                     if relative_ms >= inject_at_ms and not injection_window:
                         injection_window = True
@@ -646,14 +657,20 @@ class Bench:
                     search_margin = RATE * 45 // 1000
                     lo = max(0, expected_end - 1600 - search_margin)
                     hi = min(echo.rendered_frames // 3, expected_end + search_margin)
-                    similarity = residual_echo_similarity(b"".join(recent), reference[lo:hi])
+                    candidate = b"".join(recent)
+                    similarity = residual_echo_similarity(candidate, reference[lo:hi])
                     if similarity is None or similarity >= .65:
                         rejected += 1
+                        continue
+                    samples = np.frombuffer(candidate, dtype="<i2").astype(np.float64)
+                    excess_db = 10 * math.log10(max(1., float(np.mean(samples ** 2))) / noise_power)
+                    if excess_db < min_excess_db:
+                        level_rejected += 1
                     elif not injection_window:
                         if early_candidate is None:
-                            early_candidate = (relative_ms - inject_at_ms, similarity)
+                            early_candidate = (relative_ms - inject_at_ms, similarity, excess_db)
                     else:
-                        trigger.set_result((relative_ms, similarity))
+                        trigger.set_result((relative_ms, similarity, excess_db))
 
         self.test["phase"] = "testing a local speech-triggered stop"
         device.pcm_consumer = observe
@@ -686,17 +703,26 @@ class Bench:
 
         report = result["interruption_probe"] = {"input": "generated speech injected before local AEC",
                                                 "injection_after_render_ms": inject_at_ms,
-                                                "echo_like_candidates_rejected": rejected}
+                                                "echo_like_candidates_rejected": rejected,
+                                                "low_level_candidates_rejected": level_rejected,
+                                                "baseline_packets": len(baseline_power),
+                                                "minimum_excess_db": min_excess_db}
         if early_candidate is not None:
-            early_ms, early_similarity = early_candidate
+            early_ms, early_similarity, early_excess_db = early_candidate
             report["early_candidate_relative_to_injection_ms"] = round(early_ms, 1)
             report["early_candidate_render_similarity"] = round(early_similarity, 3)
+            report["early_candidate_excess_db"] = round(early_excess_db, 1)
+        if noise_power is not None:
+            report["baseline_dbfs"] = round(10 * math.log10(noise_power / 32768 ** 2), 1)
         if stop_at is None or not trigger.done() or trigger.cancelled():
-            result.update(status="unavailable", reason=echo.error or "No stop was triggered after the speech injection")
+            reason = ("No stop was triggered after the speech injection" if noise_power is not None
+                      else "No usable playback baseline")
+            result.update(status="unavailable", reason=echo.error or reason)
             return
-        trigger_ms, similarity = trigger.result()
+        trigger_ms, similarity, excess_db = trigger.result()
         report["trigger_relative_to_injection_ms"] = round(trigger_ms - inject_at_ms, 1)
         report["trigger_render_similarity"] = round(similarity, 3)
+        report["trigger_excess_db"] = round(excess_db, 1)
         if trigger_ms < inject_at_ms or echo.error or player.reason != "requested":
             result.update(status="unavailable", reason=echo.error or "Stop could not be attributed to the injected speech")
             return

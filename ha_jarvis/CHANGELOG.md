@@ -1,3 +1,7 @@
+# 0.2.56
+
+- In the local interruption test, reject low-level speech candidates relative to the playback baseline and report how many were rejected.
+
 # 0.2.55
 
 - Record premature interruption candidates and continue the local test to measure the stop after speech injection. A premature candidate still disqualifies the run.

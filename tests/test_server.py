@@ -169,7 +169,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         async def send(_pcm, **_options):
             for index in range(115):
                 observe = device.pcm_consumer
-                observe(PCMFrame(index, index * 256, start_ms + index * 16, samples), 0)
+                frame_samples = samples * 3 if 720 <= index * 16 < 880 else samples
+                observe(PCMFrame(index, index * 256, start_ms + index * 16, frame_samples), 0)
             await asyncio.Future()
 
         player = SimpleNamespace(first_rendered_ms=start_ms, reason="requested",
@@ -193,6 +194,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await self.bench.measure_interrupt(result)
 
         self.assertEqual(result["status"], "unavailable")
+        self.assertGreater(result["interruption_probe"]["low_level_candidates_rejected"], 0)
         self.assertLess(result["interruption_probe"]["early_candidate_relative_to_injection_ms"], 0)
         self.assertGreater(result["interruption_probe"]["trigger_relative_to_injection_ms"], 0)
         self.assertEqual(result["trials"][0]["latency_ms"], 40)
