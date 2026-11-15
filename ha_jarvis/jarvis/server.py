@@ -516,32 +516,41 @@ class Bench:
         if bounds is None:
             raise ValueError("The approved clip contains no usable reference")
         plays = []
+        continuous_plays = 0
         await asyncio.sleep(.4)
-        for index in range(2):
-            self.test["phase"] = f"playing reference clip {index + 1} of 2"
+        for index in range(4):
+            self.test["phase"] = f"playing reference clip {index + 1}"
             player = JackPlayback(device, f'{result["id"]}-{index + 1}')
             device.playback = player
             try:
                 await player.send(pcm, prime_packets=5)
-                plays.append(player)
             finally:
                 with suppress(RuntimeError, OSError, TimeoutError):
                     await player.stop()
                 device.playback = None
+            span = player.confirmed_span()
+            reason = None
+            if span is None:
+                reason = "Voice PE did not confirm a DMA span"
+            elif (abs(span[1] - span[0] - len(reference) / RATE * 1000) > 15
+                  or (player.max_render_discontinuity_us or 0) > 15_000):
+                reason = "Playback clock gap invalidated this echo reference"
+            else:
+                continuous_plays += 1
+            plays.append((player, span, reason))
             await asyncio.sleep(.55)
+            if continuous_plays == 2:
+                break
         await device.end()
         captured, capture_start = device.recording()
         offset = device.clock_offset_ms
         renders, delays = [], []
         result["metric"] = "dma_start_to_acoustic_reference"
         result["playback_prime_ms"] = 50
-        for index, player in enumerate(plays, 1):
-            span = player.confirmed_span()
-            match = {"status": "unavailable", "reason": "Voice PE did not confirm a DMA span"}
-            if span is not None and (abs(span[1] - span[0] - len(reference) / RATE * 1000) > 15
-                                     or (player.max_render_discontinuity_us or 0) > 15_000):
-                match["reason"] = "Playback clock gap invalidated this echo reference"
-            elif span is not None:
+        for index, (player, span, reason) in enumerate(plays, 1):
+            if reason is not None:
+                match = {"status": "unavailable", "reason": reason}
+            else:
                 started = (span[0] + offset) / 1000
                 lo = max(0, round((started - .06 - capture_start) * RATE))
                 hi = min(len(captured), round((started + len(reference) / RATE + .44 - capture_start) * RATE))
@@ -557,7 +566,9 @@ class Bench:
                     delays.append((match["audible_onset_at"] - started - bounds[0] / RATE) * 1000)
                     renders.append((pcm, *span))
             result["trials"].append({"trial": index, **match, "playback": player.snapshot()})
-        if len(delays) != 2 or min(delays) < 0 or abs(delays[1] - delays[0]) > 35:
+        if continuous_plays < 2:
+            outcome = {"status": "unavailable", "reason": "Fewer than two continuous reference clips rendered"}
+        elif len(delays) != 2 or min(delays) < 0 or abs(delays[1] - delays[0]) > 35:
             outcome = {"status": "unavailable", "reason": "The two acoustic alignments did not agree"}
         else:
             outcome = await asyncio.to_thread(check_confirmed_references, tuple(device.frames),

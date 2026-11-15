@@ -1,3 +1,7 @@
+# 0.2.54
+
+- Retry discontinuous echo calibration playback within the same test, up to four clips total. Two continuous renders and agreeing acoustic measurements are still required.
+
 # 0.2.53
 
 - Make the optional wait-for-greeting setting available in wake standby and preserve it when standby rearms.

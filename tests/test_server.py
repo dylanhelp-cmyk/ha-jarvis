@@ -119,6 +119,41 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bench.test["running"])
             self.assertEqual(len(set(arms)), 3)
 
+    async def test_alignment_retries_a_discontinuous_render_and_requires_two_matches(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        device = self.bench.device
+        device.clock_offset_ms = 0
+        device.clock_rtt_ms = 2
+        device.info.update(ack_cache_id="clip", diagnostics={"boot_id": "boot"})
+        reference = np.zeros(RATE, dtype=np.int16)
+        players = [SimpleNamespace(send=AsyncMock(), stop=AsyncMock(), confirmed_span=lambda: (1000, 2000),
+                                   max_render_discontinuity_us=gap, snapshot=lambda: {})
+                   for gap in (20_000, 0, 0)]
+        result = {"id": "alignment", "route": "voice_pe_internal", "trials": []}
+
+        def match(_capture, _capture_start, _reference, _voice_start, started, *_args, **_kwargs):
+            return {"status": "detected", "audible_onset_at": started + .033}
+
+        with (patch.object(device, "end", new_callable=AsyncMock),
+              patch.object(device, "recording", return_value=(np.zeros(3 * RATE, dtype=np.int16), 0)),
+              patch("jarvis.server.verified_render", return_value=("clip", b"pcm")),
+              patch("jarvis.server.JackPlayback", side_effect=players) as playback,
+              patch("jarvis.server.asyncio.sleep", new_callable=AsyncMock),
+              patch("jarvis.live_bench.render_reference", return_value=reference),
+              patch("jarvis.live_bench.voiced_bounds", return_value=(0, len(reference))),
+              patch("jarvis.live_bench.match_response", side_effect=match) as acoustic,
+              patch("jarvis.streaming_aec.check_confirmed_references",
+                    return_value={"status": "processed", "estimated_delay_ms": 33}) as alignment):
+            await self.bench.measure_render_alignment(result)
+
+        self.assertEqual(playback.call_count, 3)
+        self.assertEqual(acoustic.call_count, 2)
+        self.assertEqual(len(alignment.call_args.args[1]), 2)
+        self.assertEqual([trial["status"] for trial in result["trials"]], ["unavailable", "detected", "detected"])
+        self.assertEqual(self.bench.echo_alignment, ("boot", "clip", "voice_pe_internal", 33))
+
     async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
