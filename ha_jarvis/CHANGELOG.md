@@ -1,3 +1,7 @@
+# 0.2.58
+
+- Process newly confirmed microphone audio as soon as the Voice PE reports playback progress during the interruption test. Report capture-to-decision and decision-to-stop-request timing separately.
+
 # 0.2.57
 
 - Add a local spoken-reply interruption test. It checks acoustic reply onset, flags premature stop candidates and reports the device-confirmed stop separately.

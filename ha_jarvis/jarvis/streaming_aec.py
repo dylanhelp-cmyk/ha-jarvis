@@ -192,6 +192,12 @@ class ConfirmedRenderInput:
         self.waiting.append(frame)
         self.waiting_samples += len(frame.samples)
         self.max_waiting_samples = max(self.max_waiting_samples, self.waiting_samples)
+        return self.release_confirmed(offset_ms)
+
+    def release_confirmed(self, offset_ms):
+        """Recheck queued capture as soon as a new DMA report arrives."""
+        if self.error or not self.waiting:
+            return b""
         try:
             if self.waiting_samples > SAMPLE_RATE // 2:
                 raise RuntimeError("No reliable render report within the half-second microphone window")

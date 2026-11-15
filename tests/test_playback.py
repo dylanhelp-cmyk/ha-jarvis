@@ -29,6 +29,21 @@ class FakeSocket:
 
 
 class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    def test_render_observer_runs_once_for_new_clock_information(self):
+        player = JackPlayback(SimpleNamespace(ws=FakeSocket()), "observer")
+        player.frames_sent = 960
+        reports = []
+        player.on_render_progress = lambda: reports.append((player.frames_rendered, player.first_rendered_ms))
+        message = {"type": "play_clock", "playback_id": player.id, "generation": player.generation,
+                   "rendered_samples": 480, "first_rendered_ms": 1000, "last_rendered_ms": 1010,
+                   "max_render_discontinuity_us": 0}
+        player.receive({**message, "generation": player.generation + 1})
+        player.receive(message)
+        player.receive(message)
+        player.receive({**message, "rendered_samples": 1440})
+        player.receive({**message, "type": "play_drained", "rendered_samples": 960, "last_rendered_ms": 1020})
+        self.assertEqual(reports, [(480, 1000)])
+
     async def test_fixed_stereo_packets_and_drain(self):
         ws = FakeSocket()
         ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "trial")

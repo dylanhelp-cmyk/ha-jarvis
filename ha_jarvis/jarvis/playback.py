@@ -109,6 +109,7 @@ class JackPlayback:
         self.started = asyncio.Event()
         self.finished = asyncio.Event()
         self.progress = asyncio.Event()
+        self.on_render_progress = None
         self.frames_sent = 0
         self.frames_accepted = 0
         self.frames_rendered = None
@@ -146,8 +147,10 @@ class JackPlayback:
         elif message.get("playback_id") == self.id:
             rendered = message.get("rendered_samples")
             stamp = message.get("last_rendered_ms")
+            advanced = False
             if (type(rendered) is int and (self.frames_rendered or 0) <= rendered <= self.frames_sent
                     and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF):
+                advanced = rendered > (self.frames_rendered or 0)
                 self.frames_rendered = rendered
                 self.last_rendered_ms = stamp
                 if rendered:
@@ -164,6 +167,8 @@ class JackPlayback:
                         else:
                             self.first_rendered_ms = first
                             self.max_render_discontinuity_us = gap
+            if kind == "play_clock" and advanced and self.on_render_progress is not None:
+                self.on_render_progress()
             if kind == "play_started":
                 self.started.set()
             elif kind in ("play_stopped", "play_drained"):

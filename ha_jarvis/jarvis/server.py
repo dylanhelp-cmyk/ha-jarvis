@@ -626,7 +626,6 @@ class Bench:
         processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
 
         def observe(frame, offset):
-            nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
             first_ms = player.first_rendered_ms
             if first_ms is not None:
                 # Inject only into the AEC input. Leave the original microphone
@@ -638,7 +637,16 @@ class Bench:
                     mixed = samples[lo:hi].astype(np.int32) + speech[start + lo:start + hi]
                     samples[lo:hi] = np.clip(mixed, -32768, 32767)
                     frame = replace(frame, samples=samples)
-            cleaned.extend(echo.offer(frame, offset))
+            inspect_cleaned(echo.offer(frame, offset), offset)
+
+        def on_render_progress():
+            offset = device.clock_offset_ms
+            inspect_cleaned(echo.release_confirmed(offset), offset)
+
+        def inspect_cleaned(pcm, offset):
+            nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
+            first_ms = player.first_rendered_ms
+            cleaned.extend(pcm)
             while len(cleaned) >= 640 and not trigger.done():
                 packet = bytes(cleaned[:640])
                 del cleaned[:640]
@@ -678,10 +686,11 @@ class Bench:
                         if early_candidate is None:
                             early_candidate = (relative_ms - inject_at_ms, similarity, excess_db)
                     else:
-                        trigger.set_result((relative_ms, similarity, excess_db))
+                        trigger.set_result((relative_ms, similarity, excess_db, (end_ms + offset) / 1000, time.monotonic()))
 
         self.test["phase"] = "testing a local speech-triggered stop"
         device.pcm_consumer = observe
+        player.on_render_progress = on_render_progress
         device.playback = player
         sender = asyncio.create_task(player.send(speaker_pcm, prime_packets=5))
         stop_at = None
@@ -691,6 +700,7 @@ class Bench:
                 # Stop observing before issuing the intentional abort. Its
                 # terminal report is not an echo-reference failure.
                 device.pcm_consumer = None
+                player.on_render_progress = None
                 stop_at = time.monotonic()
                 sender.cancel()
                 with suppress(asyncio.CancelledError):
@@ -700,6 +710,7 @@ class Bench:
                 await sender
         finally:
             device.pcm_consumer = None
+            player.on_render_progress = None
             trigger.cancel()
             if not sender.done():
                 sender.cancel()
@@ -728,10 +739,12 @@ class Bench:
                       else "No usable playback baseline")
             result.update(status="unavailable", reason=echo.error or reason)
             return
-        trigger_ms, similarity, excess_db = trigger.result()
+        trigger_ms, similarity, excess_db, capture_at, decided_at = trigger.result()
         report["trigger_relative_to_injection_ms"] = round(trigger_ms - inject_at_ms, 1)
         report["trigger_render_similarity"] = round(similarity, 3)
         report["trigger_excess_db"] = round(excess_db, 1)
+        report["capture_to_decision_ms"] = round((decided_at - capture_at) * 1000, 1)
+        report["decision_to_stop_request_ms"] = round((stop_at - decided_at) * 1000, 1)
         if trigger_ms < inject_at_ms or echo.error or player.reason != "requested":
             result.update(status="unavailable", reason=echo.error or "Stop could not be attributed to the injected speech")
             return

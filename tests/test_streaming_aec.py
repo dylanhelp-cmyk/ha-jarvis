@@ -42,7 +42,9 @@ class StreamingEchoTests(unittest.TestCase):
         self.assertEqual(len(pre_roll), 640 * 2)
         self.assertTrue(all(not stream.offer(frame, 0) for frame in frames[3:6]))
         player.first_rendered_ms, player.last_rendered_ms, player.frames_rendered = 1040, 1140, 4800
-        clean = b"".join(stream.offer(frame, 0) for frame in frames[6:10])
+        clean = stream.release_confirmed(0)
+        self.assertEqual(pre_roll + clean, samples[:1440].tobytes())
+        clean += b"".join(stream.offer(frame, 0) for frame in frames[6:10])
         self.assertEqual(pre_roll + clean, samples[:1760].tobytes())
         self.assertEqual(stream.processed_during_playback, 1120)
         self.assertEqual(stream.waiting_samples, 768)
