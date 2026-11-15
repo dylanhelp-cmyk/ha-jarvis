@@ -1,3 +1,7 @@
+# 0.2.61
+
+- Show how long it took to connect the WebSocket and how much longer GPT-Live took to become ready.
+
 # 0.2.60
 
 - Report the cached greeting's acoustic onset and GPT-Live readiness from the same voice preview. Estimate the greeting's ending when the playback reference is continuous.

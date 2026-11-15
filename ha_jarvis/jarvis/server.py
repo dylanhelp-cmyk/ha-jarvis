@@ -347,6 +347,7 @@ class Bench:
             metrics = await session.close()
         return {"transport": transport, "wake_to_ready_ms": ready,
                 "provider_startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+                **metrics.websocket_startup_breakdown(),
                 "finalization_confirmed": metrics.finalization_confirmed,
                 "scope": "startup only; no room microphone samples connected to GPT-Live"}
 

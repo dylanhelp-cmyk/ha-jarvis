@@ -38,6 +38,7 @@ class LiveMetrics:
     model: str = "gpt-live-1"
     session_id: str | None = None
     ready_ms: float | None = None
+    websocket_connect_ms: float | None = None
     first_output_ms: float | None = None
     input_samples: int = 0
     output_samples: int = 0
@@ -48,6 +49,13 @@ class LiveMetrics:
     error: str | None = None
     http_status: int | None = None
     acoustic_measurement: bool = False
+
+    def websocket_startup_breakdown(self):
+        if self.websocket_connect_ms is None:
+            return {}
+        return {"websocket_connect_ms": round(self.websocket_connect_ms, 1),
+                "session_ready_wait_ms": round(self.ready_ms - self.websocket_connect_ms, 1)
+                if self.ready_ms is not None else None}
 
 
 class _PCMTrack(AudioStreamTrack):
@@ -180,6 +188,7 @@ class LiveSession:
 
     async def _start_websocket(self):
         self._ws = await self._http.ws_connect("wss://api.openai.com/v1/live/sessions", max_msg_size=262144)
+        self.metrics.websocket_connect_ms = (time.monotonic() - self._started_at) * 1000
         self._spawn(self._receive_ws())
         await self._ws.send_json({"type": "session.start", "session": self._config()})
 

@@ -524,6 +524,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             profile = "single-device Assist preview"
         result["cloud"] = {"transport": "websocket", "profile": profile,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+                           **metrics.websocket_startup_breakdown(),
                            "finalization_confirmed": metrics.finalization_confirmed,
                            "usage_seconds": metrics.usage_seconds,
                            "close_reason": metrics.close_reason,

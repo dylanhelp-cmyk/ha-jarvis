@@ -354,5 +354,6 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
     return {"transport": transport, "model": metrics.model, "profile": profile,
             "playback_enabled": transport != "realtime", "playback_prime_ms": 50, "source_reserve_ms": 120,
             "output_gain_db": -6, "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
+            **metrics.websocket_startup_breakdown(),
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,
             "failure": failure}

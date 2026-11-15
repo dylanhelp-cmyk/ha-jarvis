@@ -211,6 +211,12 @@ function showResults(results) {
     }
     if (result.cloud?.transport) add(card, 'p', result.cloud.transport + ' / ' + result.cloud.profile + ' startup: ' +
       (result.cloud.startup_ms == null ? 'unavailable' : result.cloud.startup_ms + ' ms'));
+    const startup = result.cloud_readiness || result.cloud;
+    if (startup?.websocket_connect_ms != null) {
+      add(card, 'p', 'WebSocket connected in ' + startup.websocket_connect_ms + ' ms. ' +
+        (startup.session_ready_wait_ms == null ? 'GPT-Live readiness was unavailable.' :
+          'GPT-Live took another ' + startup.session_ready_wait_ms + ' ms to become ready.'));
+    }
     for (const trial of result.trials) {
       const cold = trial.cold_startup_ms;
       add(card, 'p', (trial.turn === 'warm_followup' ? 'Warm follow-up' : trial.turn === 'first' ? 'First reply' : 'Trial ' + trial.trial) + ' / ' +

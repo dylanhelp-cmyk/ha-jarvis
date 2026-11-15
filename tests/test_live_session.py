@@ -267,7 +267,11 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         http = FakeHTTP(ws)
         session = self.session(transport="websocket")
         with patch("jarvis.live_session.aiohttp.ClientSession", return_value=http):
-            await session.start()
+            startup = await session.start()
+        timing = startup.websocket_startup_breakdown()
+        self.assertGreaterEqual(timing["websocket_connect_ms"], 0)
+        self.assertGreaterEqual(timing["session_ready_wait_ms"], 0)
+        self.assertAlmostEqual(sum(timing.values()), startup.ready_ms, delta=.11)
         self.assertEqual(http.url, "wss://api.openai.com/v1/live/sessions")
         config = ws.sent[0]["session"]
         self.assertEqual(config["model"], "gpt-live-1")
@@ -299,7 +303,8 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         session = self.session()
         with patch("jarvis.live_session.aiohttp.ClientSession", return_value=http), \
              patch("jarvis.live_session.RTCPeerConnection", FakePC):
-            await session.start()
+            startup = await session.start()
+        self.assertEqual(startup.websocket_startup_breakdown(), {})
         self.assertEqual(http.request["json"]["transport"], {"type": "webrtc", "sdp": "offline-offer"})
         self.assertNotIn("format", http.request["json"]["session"]["audio"])
         self.assertEqual(session._pc.label, "oai-events")

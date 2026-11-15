@@ -10,6 +10,7 @@ from jarvis.audio import PCMFrame
 from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
                                        run_voice_turn, stream_reply, warm_input_after_render)
 from jarvis.opening_audio import OpeningAudio
+from jarvis.live_session import LiveMetrics
 
 
 class LocalEcho:
@@ -29,8 +30,7 @@ class LocalEcho:
 class SimulatedSession:
     def __init__(self, settings, *, on_audio, **kwargs):
         self.on_audio = on_audio
-        self.metrics = SimpleNamespace(error=None, ready_ms=5, finalization_confirmed=True, usage_seconds=0,
-                                       close_reason="close_requested", local_close_reason=None)
+        self.metrics = LiveMetrics("websocket", ready_ms=5, finalization_confirmed=True, close_reason="close_requested")
         self.sent = settings
 
     async def start(self):
