@@ -1,3 +1,7 @@
+# 0.2.48
+
+- Use confirmed playback timing to search for each part of the greeting during echo alignment. Keep the existing agreement check across windows and both plays.
+
 # 0.2.47
 
 - Report why a GPT-Live session stopped accepting input, including the local preview deadline or the provider's close reason when available.

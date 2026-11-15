@@ -523,9 +523,14 @@ class Bench:
                 started = (span[0] + offset) / 1000
                 lo = max(0, round((started - .06 - capture_start) * RATE))
                 hi = min(len(captured), round((started + len(reference) / RATE + .44 - capture_start) * RATE))
+                # Match each window near its actual render position. A long
+                # greeting can contain a stronger match in an earlier word.
+                margin = (device.clock_rtt_ms / 2 + 15 + 4) / 1000
                 match = await asyncio.to_thread(
                     match_response, captured[lo:hi], capture_start + lo / RATE, reference,
-                    bounds[0], started, started, window_seconds=.14, allow_late_outlier=True)
+                    bounds[0], started, started, handoff_at=lambda sample: started + sample / RATE,
+                    acoustic_delay_range=(-margin, .3 + margin),
+                    window_seconds=.14, allow_late_outlier=True)
                 if match["status"] == "detected":
                     delays.append((match["audible_onset_at"] - started - bounds[0] / RATE) * 1000)
                     renders.append((pcm, *span))
