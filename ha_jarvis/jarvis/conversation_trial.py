@@ -99,12 +99,13 @@ class CleanInput:
 class OpeningEchoInput(CleanInput):
     """Hold capture until the matching speaker report covers its echo reference."""
 
-    def __init__(self, device, pcm, delay_ms, first_ms):
+    def __init__(self, device, pcm, delay_ms, first_ms, *, after_greeting=False):
         offset = device.clock_offset_ms
         super().__init__(delay_ms, passthrough_after=(first_ms + offset) / 1000 + 3)
         self.device = device
         self.delay_ms = delay_ms
         self.first_ms = first_ms
+        self.after_greeting = after_greeting
         self.render_frames = len(pcm) // 4
         self.echo.render(pcm, (first_ms + offset) / 1000, first_frame=0)
         if not device.wake_terminal_event.is_set():
@@ -133,6 +134,12 @@ class OpeningEchoInput(CleanInput):
                 or terminal.get("rendered_samples") != self.render_frames or type(last_ms) is not int):
             raise RuntimeError("wake_echo_reference_incomplete")
         offset = self.device.clock_offset_ms
+        if self.after_greeting:
+            gap = terminal.get("max_render_discontinuity_us")
+            if (type(gap) is not int or not 0 <= gap <= 15_000
+                    or abs(last_ms - self.first_ms - self.render_frames / 48) > 15):
+                raise RuntimeError("The greeting playback clock had a gap. Retry or allow speech during the greeting.")
+            self.release_after = (last_ms + offset + self.delay_ms) / 1000
         self.echo.finish_render(self.render_frames, (last_ms + offset) / 1000)
         self.passthrough_after = (last_ms + offset + self.delay_ms) / 1000 + .18
         self.confirmed = True
@@ -372,6 +379,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         if early_echo and first_sent_at is not None and terminal_at is not None:
             result["first_input_before_ack_terminal_ms"] = round((terminal_at - first_sent_at) * 1000, 1)
         result["input_samples_sent"] = sent
+        if isinstance(stream, OpeningEchoInput) and stream.after_greeting:
+            result["greeting_capture_omitted_ms"] = round(stream.discarded_samples * 1000 / RATE, 1)
         result["input_queue"] = {"first_packet_age_ms": round(first_age, 1) if first_age is not None else None,
                                  "max_packet_age_ms": round(max_age, 1) if max_age is not None else None}
         result["input_signal"] = {"gain_db": gain_db, "peak_before_gain_pcm": peak_before,
@@ -391,7 +400,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
-                         follow_up=False, wait_for_preconnected_wake=None, standby=False, assist_delegation=None):
+                         follow_up=False, wait_for_preconnected_wake=None, standby=False,
+                         assist_delegation=None, after_greeting=False):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -431,7 +441,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             async with asyncio.timeout(3):
                 await device.wake_render_changed.wait()
         progress = getattr(device, "wake_render_progress", None)
-        if progress and opening.frames and not device.wake_terminal_event.is_set():
+        if not after_greeting and progress and opening.frames and not device.wake_terminal_event.is_set():
             stream = OpeningEchoInput(device, pcm, delay_ms, progress[1])
             result["opening_reference_mode"] = "confirmed_prefix"
         else:
@@ -440,9 +450,9 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             first = device.wake_playback_terminal.get("first_rendered_ms")
             if type(first) is not int:
                 raise RuntimeError("wake_echo_reference_incomplete")
-            stream = OpeningEchoInput(device, pcm, delay_ms, first)
+            stream = OpeningEchoInput(device, pcm, delay_ms, first, after_greeting=after_greeting)
             stream.confirm()
-            result["opening_reference_mode"] = "terminal"
+            result["opening_reference_mode"] = "after_greeting" if after_greeting else "terminal"
         buffered, result["opening_audio"] = opening.release(time.monotonic())
         if not buffered or device.errors:
             raise RuntimeError(result["opening_audio"]["reason"] or "opening_capture_failed")

@@ -321,6 +321,22 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         with patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: 10.80)):
             self.assertIsNone(warm_input_after_render(device, reply, delay_ms))
 
+    async def test_wait_for_greeting_retains_first_sample_after_acoustic_boundary(self):
+        terminal = asyncio.Event()
+        terminal.set()
+        device = SimpleNamespace(clock_offset_ms=0, wake_terminal_event=terminal,
+                                 wake_playback_terminal={"drained": True, "first_rendered_ms": 1000,
+                                                         "last_rendered_ms": 1020, "rendered_samples": 960,
+                                                         "max_render_discontinuity_us": 0})
+        samples = np.arange(1024, dtype="<i2")
+        with patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            stream = OpeningEchoInput(device, bytes(960 * 4), 8.03125, 1000, after_greeting=True)
+            for i in range(4):
+                stream.offer(PCMFrame(i, i * 256, 1000 + 16 * i, samples[256 * i:256 * (i + 1)]), 0)
+            packet, _ = await stream.packet()
+        self.assertEqual(stream.discarded_samples, 449)
+        self.assertEqual(packet, samples[449:769].tobytes())
+
     async def test_preconnected_input_can_start_before_ack_drain_but_speaker_cannot(self):
         await self.assert_opening_before_ack_drain(preconnect=True)
 

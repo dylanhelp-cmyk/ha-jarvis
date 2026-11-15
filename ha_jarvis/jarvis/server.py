@@ -441,7 +441,8 @@ class Bench:
                 result["opening_prefix_echo"] = {"status": "unavailable",
                     "reason": "No usable partial render report matched the completed acknowledgment"}
 
-    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False, assist_delegation=None):
+    async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False,
+                                 assist_delegation=None, after_greeting=False):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_streamed_reply
 
@@ -467,7 +468,7 @@ class Bench:
         replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
                                        gain_db=gain_db, follow_up=follow_up,
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
-                                       assist_delegation=assist_delegation)
+                                       assist_delegation=assist_delegation, after_greeting=after_greeting)
         if not replies:
             return
         await asyncio.sleep(.25)
@@ -800,7 +801,7 @@ class Bench:
             self.test = {"running": True, "id": uuid.uuid4().hex, "phase": "rearming for Hey Jarvis", "standby": True}
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
-                  follow_up=False, preconnect=False, *, standby=False, assist_preview=None):
+                  follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -864,7 +865,7 @@ class Bench:
                 return
             if kind == "voice_turn":
                 await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby,
-                                              assist_delegation=assist_delegation)
+                                              assist_delegation=assist_delegation, after_greeting=after_greeting)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -1209,6 +1210,9 @@ def create_ui(bench):
         follow_up = data.get("follow_up", False)
         if type(follow_up) is not bool or (follow_up and kind != "voice_turn"):
             raise ValueError("A warm follow-up is available only in the voice preview")
+        after_greeting = data.get("after_greeting", False)
+        if type(after_greeting) is not bool or (after_greeting and kind != "voice_turn"):
+            raise ValueError("Waiting to speak until the greeting ends is available only in the voice preview")
         preconnect = data.get("preconnect", False)
         if type(preconnect) is not bool or (preconnect and kind != "voice_turn"):
             raise ValueError("Preconnection is available only in the consent-gated voice preview")
@@ -1217,6 +1221,8 @@ def create_ui(bench):
             raise ValueError("Wake standby uses the voice preview and connects only after wake")
         if standby and data.get("allow_repeated_wake_audio") is not True:
             raise ValueError("Explicitly authorize cleaned microphone audio after each wake while standby is enabled")
+        if standby and after_greeting:
+            raise ValueError("The wait-for-greeting option is for a single preview")
         assist_preview = data.get("assist_preview")
         if assist_preview is not None:
             if (kind != "voice_turn" or standby or follow_up or preconnect
@@ -1264,7 +1270,7 @@ def create_ui(bench):
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
                                                       follow_up=follow_up, preconnect=preconnect,
-                                                      assist_preview=assist_preview))
+                                                      assist_preview=assist_preview, after_greeting=after_greeting))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

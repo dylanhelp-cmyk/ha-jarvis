@@ -1,3 +1,7 @@
+# 0.2.52
+
+- Add an optional voice preview that skips audio captured before the end of the greeting. Use it when you wait for Jarvis to finish asking how it can help.
+
 # 0.2.51
 
 - Use confirmed wake playback and the current speaker alignment to measure when the cached greeting became audible.
