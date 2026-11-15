@@ -46,7 +46,8 @@ def render_reference(pcm):
 
 def match_response(captured, capture_start, reference, voiced_start_sample,
                    fixture_end_at, earliest_output_at, *, handoff_at=None,
-                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32, onset_horizon_seconds=4, allow_late_outlier=False):
+                   acoustic_delay_range=(0.0, 2.5), window_seconds=.32, onset_horizon_seconds=4,
+                   allow_late_outlier=False, min_window_confidence=0):
     """Require distinct reply windows to agree before reporting onset."""
     unavailable = {"status": "unavailable", "latency_ms": None,
                    "fixture_end_to_audible_ms": None, "windows": []}
@@ -74,6 +75,8 @@ def match_response(captured, capture_start, reference, voiced_start_sample,
         search_start = max(0, int((start_at - capture_start) * RATE))
         search_end = min(len(captured), int((end_at - capture_start) * RATE))
         detection = detect_probe(captured[search_start:search_end], reference[offset:offset + width])
+        if detection["status"] == "detected" and detection["confidence"] < min_window_confidence:
+            detection = {**detection, "status": "unavailable", "reason": "Acoustic match below confidence threshold"}
         window = {"reference_offset_ms": round(offset * 1000 / RATE, 2), **detection}
         if detection["status"] == "detected":
             onset = capture_start + search_start / RATE + detection["offset_seconds"]

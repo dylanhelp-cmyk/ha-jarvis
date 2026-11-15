@@ -1,3 +1,7 @@
+# 0.2.49
+
+- Require strong acoustic matches when calibrating against the known greeting. Keep the usual confidence threshold for reply timing.
+
 # 0.2.48
 
 - Use confirmed playback timing to search for each part of the greeting during echo alignment. Keep the existing agreement check across windows and both plays.
