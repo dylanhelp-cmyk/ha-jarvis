@@ -1,3 +1,7 @@
+# 0.2.42
+
+- Clean opening microphone audio as it is sent, so a slow cloud connection does not also have to wait for a full batch of echo processing.
+
 # 0.2.41
 
 - Configure the API test cap in Home Assistant's App settings and display it in Jarvis. Keep existing usage and pending reservations.

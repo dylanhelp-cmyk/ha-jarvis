@@ -168,9 +168,23 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirmed_wake_sends_ordered_opening_then_drains_and_closes(self):
         endpoint = SpeechEndpoint(SimpleNamespace(is_speech=lambda *_: False))
-        with (patch("jarvis.conversation_trial.LiveSession", SimulatedSession),
+        echo_frames = []
+
+        class CountingEcho(LocalEcho):
+            def capture(self, frame, offset):
+                echo_frames.append(frame.sequence)
+                return super().capture(frame, offset)
+
+        class ObservingSession(SimulatedSession):
+            async def send_audio(self, pcm):
+                if len(self.sent) == 1:
+                    self_test.assertEqual(echo_frames, [0, 1])
+                await super().send_audio(pcm)
+
+        self_test = self
+        with (patch("jarvis.conversation_trial.LiveSession", ObservingSession),
               patch("jarvis.conversation_trial.BenchReply", SimulatedReply),
-              patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
+              patch("jarvis.conversation_trial.StreamingEcho", CountingEcho),
               patch("jarvis.conversation_trial.SpeechEndpoint", return_value=endpoint),
               patch.object(endpoint, "observe", wraps=endpoint.observe) as observe):
             event = asyncio.Event()

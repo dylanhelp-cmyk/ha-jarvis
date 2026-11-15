@@ -106,7 +106,8 @@ class OpeningEchoInput(CleanInput):
         self.first_ms = first_ms
         self.render_frames = len(pcm) // 4
         self.echo.render(pcm, (first_ms + offset) / 1000, first_frame=0)
-        self.changed = device.wake_render_changed
+        if not device.wake_terminal_event.is_set():
+            self.changed = device.wake_render_changed
         self.waiting_frames = deque()
         self.waiting_samples = 0
         self.confirmed = False
@@ -143,8 +144,7 @@ class OpeningEchoInput(CleanInput):
                 self.confirm()
             elif time.monotonic() >= self.terminal_deadline or self.device.errors:
                 raise RuntimeError("wake_echo_reference_incomplete")
-            report = self.device.wake_render_latest
-            horizon = math.inf if self.confirmed else self.first_ms + report[0] / 48 - 20
+            horizon = math.inf if self.confirmed else self.first_ms + self.device.wake_render_latest[0] / 48 - 20
             while self.waiting_frames and len(self.pending) < 640:
                 frame, offset = self.waiting_frames[0]
                 if frame.capture_ms + len(frame.samples) * 1000 / RATE > horizon:
@@ -281,7 +281,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None):
     output_gain_db = -6
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
-    early_echo = isinstance(stream, OpeningEchoInput)
+    early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
     sender = None
     endpoint = SpeechEndpoint()
     vad_gain_db = min(gain_db, 24)
@@ -434,16 +434,11 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         else:
             async with asyncio.timeout(3):
                 await device.wake_terminal_event.wait()
-            terminal = device.wake_playback_terminal
-            first, last = terminal.get("first_rendered_ms"), terminal.get("last_rendered_ms")
-            if (terminal.get("drained") is not True or terminal.get("rendered_samples") != len(pcm) // 4
-                    or type(first) is not int or type(last) is not int):
+            first = device.wake_playback_terminal.get("first_rendered_ms")
+            if type(first) is not int:
                 raise RuntimeError("wake_echo_reference_incomplete")
-            offset = device.clock_offset_ms
-            tail_cleared_at = (last + offset + delay_ms) / 1000 + .18
-            stream = CleanInput(delay_ms, passthrough_after=tail_cleared_at)
-            stream.echo.render(pcm, (first + offset) / 1000, first_frame=0)
-            stream.echo.finish_render(len(pcm) // 4, (last + offset) / 1000)
+            stream = OpeningEchoInput(device, pcm, delay_ms, first)
+            stream.confirm()
             result["opening_reference_mode"] = "terminal"
         buffered, result["opening_audio"] = opening.release(time.monotonic())
         if not buffered or device.errors:
