@@ -12,13 +12,14 @@ import numpy as np
 
 from .live_bench import voiced_bounds
 from .live_session import LiveSession, MODEL, RATE, VOICE
-from .playback import VOICE_OUTPUT_GAIN_DB, stereo_pcm
+from .playback import stereo_pcm
 
 
 PHRASE = "Yes sir. How can I help?"
 GREETING = (f'Say exactly "{PHRASE}" once. Use a calm, natural cadence with a short pause '
             'after "sir", then stay silent. Do not add any other words.')
 WAKE_PAUSE_MS = 250
+GREETING_OUTPUT_GAIN_DB = -10
 MAX_CLIP_SECONDS = 3
 
 
@@ -47,12 +48,12 @@ def candidate_identity(pcm):
 
 
 def greeting_playback_identity(candidate_id):
-    return hashlib.sha256(f"{candidate_id}:gain:{VOICE_OUTPUT_GAIN_DB}".encode("ascii")).hexdigest()
+    return hashlib.sha256(f"{candidate_id}:gain:{GREETING_OUTPUT_GAIN_DB}".encode("ascii")).hexdigest()
 
 
 def greeting_playback_samples(pcm):
     samples = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
-    return np.rint(samples * 10 ** (VOICE_OUTPUT_GAIN_DB / 20)).astype("<i2")
+    return np.rint(samples * 10 ** (GREETING_OUTPUT_GAIN_DB / 20)).astype("<i2")
 
 
 def approval_path(data_dir):

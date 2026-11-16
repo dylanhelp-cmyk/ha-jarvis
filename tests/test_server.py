@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import io
 from pathlib import Path
@@ -494,11 +495,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         cache_path(self.bench.data_dir).write_bytes(pcm)
         identity = candidate_identity(pcm)
         playback_id = greeting_playback_identity(identity)
+        previous_playback_id = hashlib.sha256(f"{identity}:gain:-6".encode("ascii")).hexdigest()
         preview = await self.ui.get("/api/acknowledgment/preview", params={"clip": identity})
         self.assertEqual(preview.status, 200)
         with wave.open(io.BytesIO(await preview.read()), "rb") as wav:
             self.assertEqual(wav.getnframes(), RATE * 2)
-            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 451)
+            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 285)
         bad = await self.ui.post("/api/acknowledgment/verify",
                                  json={"clip": "stale", "heard_exact_phrase": True})
         self.assertEqual(bad.status, 400)
@@ -509,7 +511,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         try:
             await ws.send_json({"type": "hello", "protocol": 1, "token": self.bench.config["device_token"],
                                 "sample_rate": RATE, "channels": 1, "ack_cache_protocol": 1,
-                                "ack_cache_id": identity, "ack_cache_max_frames": 144000})
+                                "ack_cache_id": previous_playback_id, "ack_cache_max_frames": 144000})
             self.assertEqual((await ws.receive_json(timeout=2))["type"], "hello_ok")
             first_start = await ws.receive_json(timeout=2)
             self.assertEqual(first_start["type"], "ack_cache_start")
@@ -519,7 +521,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bench.acknowledgment_status()["cached_on_device"])
             start = await ws.receive_json(timeout=2)
             self.assertEqual(start["type"], "ack_cache_start")
-            self.assertNotEqual(start["cache_id"], identity)
+            self.assertNotEqual(start["cache_id"], previous_playback_id)
             self.assertEqual(start["cache_id"], playback_id)
             generation = start["generation"]
             self.assertNotEqual(generation, first_start["generation"])
@@ -532,7 +534,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((magic, packet_generation, packet_sequence, first),
                                  (b"JPLY", generation, sequence, sent))
                 if sequence == 0:
-                    self.assertEqual(int(np.median(np.frombuffer(frame[HEADER.size:], dtype="<i2"))), 451)
+                    self.assertEqual(int(np.median(np.frombuffer(frame[HEADER.size:], dtype="<i2"))), 285)
                 sent += count
                 sequence += 1
                 await ws.send_json({"type": "ack_cache_progress", "generation": generation, "samples": sent})

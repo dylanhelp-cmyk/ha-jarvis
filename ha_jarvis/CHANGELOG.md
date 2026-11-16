@@ -1,3 +1,7 @@
+# 0.2.66
+
+- Lower the cached wake greeting by a further 4 dB to bring it closer to the perceived loudness of live replies. The App automatically replaces the cached playback on the Voice PE using the existing approved clip.
+
 # 0.2.65
 
 - Recognise clear sign-offs in wake standby. Wait two seconds after the farewell and keep listening if the user speaks again.
