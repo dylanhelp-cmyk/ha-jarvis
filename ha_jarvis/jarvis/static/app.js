@@ -207,6 +207,7 @@ function showResults(results) {
     }
     if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after ' +
       (result.standby_idle_seconds ?? 10) + ' seconds without detected speech.');
+    if (result.conversation_end === 'signoff') add(card, 'p', 'Conversation closed after your sign-off.');
     if (result.conversation_end === 'session_limit') add(card, 'p', 'Conversation reached the preview session limit.');
     if (wakeReady == null && result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;

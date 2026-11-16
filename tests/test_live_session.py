@@ -397,6 +397,29 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.close()
         self.assertNotIn("private household speech", repr(session.metrics))
 
+    async def test_standby_accepts_one_client_signoff_request_and_finalizes_usage(self):
+        ws = FakeWS()
+        on_transcript = Mock()
+        on_signoff = Mock()
+        session = self.session(transport="websocket", on_input_transcript=on_transcript,
+                               on_signoff_request=on_signoff)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        session._event({"type": "session.input_transcript.delta", "delta": "Goodbye"})
+        requested = {"type": "session.delegation.created", "delegation": {"target": "client", "id": "turn-end"}}
+        session._event({**requested, "delegation": {"target": "responses", "id": "other"}})
+        session._event(requested)
+        session._event(requested)
+        await asyncio.sleep(0)
+        on_transcript.assert_called_once_with("Goodbye")
+        on_signoff.assert_called_once_with()
+        acknowledgement = ws.sent[1].copy()
+        self.assertTrue(acknowledgement.pop("event_id"))
+        self.assertEqual(acknowledgement, {"type": "session.thinking.append", "delegation_id": "turn-end", "content": ""})
+        metrics = await session.close()
+        self.assertTrue(metrics.finalization_confirmed)
+        self.assertNotIn("Goodbye", repr(metrics))
+
     async def test_real_pyav_output_resampling_and_pcm_queue_bound(self):
         session = self.session()
         session._started_at = 0

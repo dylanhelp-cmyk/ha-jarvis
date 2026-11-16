@@ -1,3 +1,7 @@
+# 0.2.65
+
+- Recognise clear sign-offs in wake standby. Wait two seconds after the farewell and keep listening if the user speaks again.
+
 # 0.2.64
 
 - Configure how long wake standby listens for a follow-up after a reply. The default is 10 seconds.

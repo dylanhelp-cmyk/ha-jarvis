@@ -9,6 +9,7 @@ import numpy as np
 from jarvis.audio import PCMFrame
 from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
                                        run_voice_turn, stream_reply, warm_input_after_render)
+from jarvis.lifecycle import ConversationPolicy
 from jarvis.opening_audio import OpeningAudio
 from jarvis.live_session import LiveMetrics
 
@@ -78,11 +79,14 @@ class SimulatedReply:
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_warm_speech_near_idle_deadline_keeps_listening(self):
-        for speaking in (False, True):
-            with self.subTest(speaking=speaking):
+        for signoff, speaking in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(signoff=signoff, speaking=speaking):
                 now = 100.0
                 sent = 0
                 output = None
+                turn_deadline = 100 if signoff else 300
+                policy = ConversationPolicy(idle_seconds=6)
+                policy.request_end(clear_closing_intent=signoff)
 
                 def set_output(reply):
                     nonlocal output
@@ -91,13 +95,13 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 async def packet():
                     nonlocal now
                     now = 100 + sent * .02
-                    pcm = bytes([1, 0]) * 320 if speaking and 295 <= sent < 299 else bytes(640)
+                    pcm = bytes([1, 0]) * 320 if speaking and turn_deadline - 5 <= sent < turn_deadline - 1 else bytes(640)
                     return pcm, now
 
                 async def send_audio(_):
                     nonlocal sent
                     sent += 1
-                    if sent == 303:
+                    if sent == turn_deadline + 3:
                         output.first_voice_at = now
                         output.last_voice_at = now - 1
 
@@ -110,14 +114,17 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                      patch("jarvis.conversation_trial.SpeechEndpoint", lambda: SpeechEndpoint(detector)), \
                      patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: now)):
                     run = stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
-                                       gain_db=0, max_age_ms=250, warm_follow_up=True, idle_seconds=6)
+                                       gain_db=0, max_age_ms=250, warm_follow_up=True, idle_seconds=6,
+                                       closure_policy=policy)
                     if speaking:
                         self.assertIsNotNone(await run)
-                        self.assertEqual(sent, 303)
+                        self.assertEqual(sent, turn_deadline + 3)
+                        self.assertFalse(policy.ending_requested)
                     else:
-                        with self.assertRaisesRegex(TimeoutError, "No detected speech for 6 seconds"):
+                        with self.assertRaises(FollowUpEnded) as ending:
                             await run
-                        self.assertLess(sent, 303)
+                        self.assertEqual(ending.exception.reason, "signoff" if signoff else "inactivity")
+                        self.assertIn(sent, range(turn_deadline, turn_deadline + 3))
 
     def test_echo_guard_keeps_sample_order_across_partial_aec_blocks(self):
         buffered = 0
@@ -254,10 +261,16 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_standby_keeps_multiple_warm_turns_on_one_connection(self):
         for ending in (FollowUpEnded("inactivity", "No detected speech"),
+                       FollowUpEnded("signoff", "Grace period finished"),
                        FollowUpEnded("session_limit", "Preview time limit"),
                        RuntimeError("Jack disconnected")):
             with self.subTest(ending=ending):
                 class StandbySession(SimulatedSession):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, **kwargs)
+                        self.transcript = kwargs["on_input_transcript"]
+                        self.request_end = kwargs["on_signoff_request"]
+
                     def media_deadline(self):
                         return time.monotonic() + 50
 
@@ -271,10 +284,26 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 opening.offer(PCMFrame(0, 0, int(time.monotonic() * 1000), np.zeros(256, dtype="<i2")), 0)
                 messages, result = [], {"id": "standby"}
                 returned = [object() for _ in range(3)]
+                is_signoff = isinstance(ending, FollowUpEnded) and ending.reason == "signoff"
+                turn = 0
+
+                async def fake_reply(_device, session, *_args, closure_policy, **_kwargs):
+                    nonlocal turn
+                    self.assertEqual(closure_policy.ending_requested, is_signoff and turn == len(returned))
+                    if turn == len(returned):
+                        raise ending
+                    if is_signoff and turn == len(returned) - 1:
+                        session.transcript("Good")
+                        session.transcript("bye.")
+                        session.request_end()
+                        self.assertFalse(closure_policy.ending_requested)
+                    turn += 1
+                    return returned[turn - 1]
+
                 with (patch("jarvis.conversation_trial.LiveSession", StandbySession),
                       patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
                       patch("jarvis.conversation_trial.warm_input_after_render", return_value=None),
-                      patch("jarvis.conversation_trial.stream_reply", side_effect=[*returned, ending]) as play):
+                      patch("jarvis.conversation_trial.stream_reply", side_effect=fake_reply) as play):
                     replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4),
                                                    31, lambda _: None, follow_up=True, standby=True, idle_seconds=6)
 

@@ -12,17 +12,24 @@ import numpy as np
 
 from .audio import RATE
 from .device import output_route
-from .lifecycle import ConversationPolicy, DEFAULT_IDLE_SECONDS
+from .lifecycle import ConversationPolicy, DEFAULT_IDLE_SECONDS, SignOffRequest
 from .live_bench import BenchReply
 from .live_session import LiveSession
 from .playback import RATE as RENDER_RATE
 from .playback import VOICE_OUTPUT_GAIN_DB
 from .streaming_aec import StreamingEcho
 
-INSTRUCTIONS = (
+VOICE_STYLE = (
     "You are Jarvis, a concise British-style voice assistant. "
     "Wait for the user to finish their question, then answer briefly. "
-    "Do not greet, delegate work or claim to have controlled any devices."
+    "Do not greet or claim to have controlled any devices. "
+)
+INSTRUCTIONS = VOICE_STYLE + "Do not delegate work."
+STANDBY_INSTRUCTIONS = VOICE_STYLE + (
+    "When the user explicitly ends the conversation, say a brief farewell and then Generate <|SpawnThinking|> "
+    "to request closure. Clear examples include goodbye, that's all for now, and stop listening. "
+    "A thank-you on its own, a request to stop a device, and a pause are not sign-offs. "
+    "Use <|SpawnThinking|> only to request closure."
 )
 
 
@@ -288,7 +295,7 @@ class FollowUpEnded(TimeoutError):
 
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None,
-                       idle_seconds=DEFAULT_IDLE_SECONDS):
+                       idle_seconds=DEFAULT_IDLE_SECONDS, closure_policy=None):
     output_gain_db = VOICE_OUTPUT_GAIN_DB
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
@@ -312,7 +319,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         phase(listening_phase)
         set_output(reply)
         origin = listening_started = time.monotonic()
-        inactivity = ConversationPolicy(idle_seconds=idle_seconds, last_activity=listening_started)
+        policy = closure_policy if closure_policy is not None else ConversationPolicy(idle_seconds=idle_seconds)
+        policy.start_listening(listening_started)
         # Bound the paid preview separately from the conversational idle timer.
         deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
@@ -323,7 +331,9 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 raise RuntimeError("The microphone or speaker playback failed")
             if input_deadline is not None and now >= input_deadline:
                 raise FollowUpEnded("session_limit", "The conversation reached the preview session limit")
-            if warm_follow_up and inactivity.should_close(now):
+            if warm_follow_up and policy.should_close(now):
+                if policy.ending_requested:
+                    raise FollowUpEnded("signoff", "The sign-off grace period finished")
                 raise FollowUpEnded("inactivity", f"No detected speech for {idle_seconds:g} seconds")
             if input_deadline is None and now >= deadline:
                 raise TimeoutError("No spoken reply before the preview time limit")
@@ -355,7 +365,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 clipped += overload
                 vad_pcm = transmitted if vad_gain_db == gain_db else gain_packet(packet, vad_gain_db)[0]
                 if endpoint.observe(vad_pcm, captured_at, sent_at):
-                    inactivity.user_speech(sent_at)
+                    policy.user_speech(sent_at)
                 sent += 320
         device.pcm_consumer = None
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
@@ -409,6 +419,15 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
     preconnect = wait_for_preconnected_wake is not None
     startup = None
     output = None
+    closure_policy = ConversationPolicy(idle_seconds=idle_seconds) if standby else None
+    signoff = SignOffRequest() if standby else None
+
+    def request_signoff():
+        signoff.requested = True
+
+    def finish_turn():
+        if signoff is not None and signoff.finish():
+            closure_policy.request_end(clear_closing_intent=True)
 
     def set_output(reply):
         nonlocal output
@@ -419,14 +438,16 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             await output.receive(audio, rate)
 
     result["connection_start"] = "before_wake" if preconnect else "on_wake"
-    instructions = INSTRUCTIONS
+    instructions = STANDBY_INSTRUCTIONS if standby else INSTRUCTIONS
     if assist_delegation is not None:
         instructions = ("You are Jarvis, a concise British-style voice assistant. Do not greet. "
                         "For an explicit request to turn a named light or switch on or off, Generate <|SpawnThinking|>. "
                         "Wait for the tool result before saying the device changed. Report only verified outcomes.")
     session = LiveSession(settings, on_audio=on_audio, transport="websocket",
                           max_seconds=60 if follow_up or preconnect else 30,
-                          startup_timeout=3, instructions=instructions, assist_delegation=assist_delegation)
+                          startup_timeout=3, instructions=instructions, assist_delegation=assist_delegation,
+                          on_input_transcript=signoff.append if signoff is not None else None,
+                          on_signoff_request=request_signoff if signoff is not None else None)
     try:
         phase("preconnecting to GPT-Live" if preconnect else
               "connecting to GPT-Live while the cached acknowledgment plays")
@@ -468,7 +489,9 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         replies = [await stream_reply(device, session, result, stream, set_output, phase,
                                       "streaming the cleaned opening speech",
                                       gain_db=gain_db, max_age_ms=opening.max_ms,
-                                      source_prime_packets=20 if preconnect else 12)]
+                                      source_prime_packets=20 if preconnect else 12,
+                                      closure_policy=closure_policy)]
+        finish_turn()
         terminal = device.wake_playback_terminal
         terminal_at = getattr(device, "wake_render_terminal_at", None)
         if progress and terminal_at is not None and progress[1] == terminal.get("first_rendered_ms"):
@@ -495,7 +518,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up", gain_db=gain_db,
                                                   max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline,
-                                                  idle_seconds=idle_seconds))
+                                                  idle_seconds=idle_seconds, closure_policy=closure_policy))
+                finish_turn()
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 if standby and isinstance(exc, FollowUpEnded):
                     result["conversation_end"] = exc.reason

@@ -97,18 +97,23 @@ class _PCMTrack(AudioStreamTrack):
 class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
                  startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
-                 output_buffer_seconds=1, assist_delegation=None):
+                 output_buffer_seconds=1, assist_delegation=None,
+                 on_input_transcript=None, on_signoff_request=None):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
         if assist_delegation is not None and (transport != "websocket" or greeting):
             raise ValueError("Assist delegation requires a conversational WebSocket session")
+        if on_signoff_request is not None and (transport != "websocket" or greeting or assist_delegation is not None):
+            raise ValueError("Sign-off requires a voice-only WebSocket session")
         self.assist_delegation = assist_delegation
         self._delegation_task = None
         self._assist_result_submitted = False
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
         self.greeting, self.on_transcript = greeting, on_transcript
+        self.on_input_transcript, self.on_signoff_request = on_input_transcript, on_signoff_request
+        self._signoff_delegation_ids = set()
         self.instructions = instructions
         self.max_seconds, self.startup_timeout, self.close_timeout = max_seconds, startup_timeout, close_timeout
         self.metrics = LiveMetrics(transport)
@@ -144,6 +149,8 @@ class LiveSession:
                   "audio": {"output": {"voice": VOICE}}}
         if self.assist_delegation is not None:
             config["delegation"] = self.assist_delegation.config()
+        elif self.on_signoff_request is not None:
+            config["delegation"]["acknowledgement_delay_ms"] = 800
         if self.greeting:
             config["input"] = [{"role": "developer", "content": [{"type": "input_text", "text": self.greeting}]}]
         if self.transport == "websocket":
@@ -314,10 +321,26 @@ class LiveSession:
             self._queue_audio(base64.b64decode(event["delta"], validate=True))
         elif kind == "session.output_transcript.delta" and self.on_transcript is not None:
             self.on_transcript(event["delta"])
+        elif kind == "session.input_transcript.delta" and self.on_input_transcript is not None and not self._closing:
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                self.on_input_transcript(delta)
         elif kind == "error":
             self._fail("Cloud session reported an error")
         elif kind == "session.delegation.created" and self.assist_delegation is None:
-            self._fail("Unexpected delegation in voice-only benchmark")
+            if self.on_signoff_request is None:
+                self._fail("Unexpected delegation in voice-only benchmark")
+            elif not self._closing and self._ready.is_set():
+                delegation = event.get("delegation")
+                if not isinstance(delegation, dict) or delegation.get("target") != "client":
+                    return
+                ident = delegation.get("id")
+                if (not isinstance(ident, str) or not 0 < len(ident) <= 128
+                        or ident in self._signoff_delegation_ids or len(self._signoff_delegation_ids) >= 32):
+                    return
+                self._signoff_delegation_ids.add(ident)
+                self.on_signoff_request()
+                self._spawn(self._acknowledge_signoff_request(ident))
         elif kind == "response.event" and self.assist_delegation is not None:
             try:
                 nested = event.get("event")
@@ -342,6 +365,15 @@ class LiveSession:
                 self._fail("Could not confirm delegated usage")
             except ValueError:
                 self._fail("Invalid Assist delegation event")
+
+    async def _acknowledge_signoff_request(self, ident):
+        if self._closing or self._final.is_set():
+            return
+        try:
+            await self._ws.send_json({"type": "session.thinking.append", "event_id": uuid.uuid4().hex,
+                                      "delegation_id": ident, "content": ""})
+        except (OSError, RuntimeError):
+            self._fail("Could not acknowledge the sign-off request")
 
     async def _return_assist_results(self, batch):
         try:

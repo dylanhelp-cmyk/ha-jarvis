@@ -12,6 +12,8 @@ To try a voice reply, run **Echo reference alignment** with the speakers in thei
 
 To keep the preview ready between uses, select **Stay ready for “Hey Jarvis”**, review the repeated audio consent and choose **Enable wake standby**. Each wake can start a budgeted conversation with multiple follow-ups. Select **I'll wait for the greeting to finish before speaking** before enabling standby if you prefer to ask your opening question after the greeting. After a reply finishes, standby listens for 10 seconds of inactivity and then returns to local wake detection. To change that interval, set **Wake standby inactivity timeout (seconds)** and select **Save settings** before enabling standby. The preview session time limit still applies. **Stop wake standby** disarms it. An App restart also turns standby off.
 
+In wake standby, try a clear sign-off such as “Goodbye” or “That's all for now.” Jarvis gives you two seconds after the farewell to speak again. If GPT-Live does not confirm the sign-off, the inactivity timeout still applies.
+
 For an Assist test, use a non-admin Home Assistant access token and choose an exposed light or switch by its exact name. In **Voice preview**, enable the one-command option, fill in the device and token, review the microphone consent, and start. When armed, say “Hey Jarvis, turn on [device name]” or ask to turn it off. The token is held in memory for this run.
 
 ## Recovery
