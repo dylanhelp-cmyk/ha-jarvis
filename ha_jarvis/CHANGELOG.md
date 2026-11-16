@@ -1,3 +1,7 @@
+# 0.2.71
+
+- Add a local interruption check using a separate browser speaker. Match the microphone onset and the cleaned opening against the generated test phrase, and time raw and cleaned detector evidence independently.
+
 # 0.2.70
 
 - Match repeated calibrated echo-band evidence with cleaned speech over a 100 ms window in the local interruption tests.

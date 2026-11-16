@@ -147,11 +147,12 @@ SYNTHETIC_PROMPTS = (
     "And which river flows through that city?",
 )
 INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows through it is called the Seine."
+INTERRUPTION_INPUTS = ("Wait, please switch to a different topic.", "Hold on, can you tell me the time?")
 
 
 async def synthesize_fixture(prompt):
     """Build a digital test asset on the App. No recording or upload endpoint is used."""
-    if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY):
+    if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY, *INTERRUPTION_INPUTS):
         raise ValueError("Unknown built-in synthetic prompt")
     process = await asyncio.create_subprocess_exec(
         "espeak-ng", "--stdout", "-v", "en-gb", "--stdin",
@@ -179,6 +180,14 @@ async def synthesize_fixture(prompt):
     if bounds is None or not RATE // 2 <= len(pcm) <= 6 * RATE:
         raise ValueError("Synthetic speech has no usable endpoint or exceeds six seconds")
     return pcm.astype("<i2", copy=False).tobytes(), bounds[1]
+
+
+def fixture_wav(pcm):
+    output = io.BytesIO()
+    with wave.open(output, "wb") as clip:
+        clip.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        clip.writeframes(pcm)
+    return output.getvalue()
 
 
 class BenchReply:

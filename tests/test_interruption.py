@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from jarvis.audio import PCMFrame, RATE
-from jarvis.interruption import HOP, WINDOW, InterruptionEvidence, RenderBands, calibrate_echo_bands
+from jarvis.interruption import HOP, WINDOW, InterruptionEvidence, InterruptionTimeline, RenderBands, calibrate_echo_bands
 
 
 class InterruptionTests(unittest.TestCase):
@@ -47,3 +47,22 @@ class InterruptionTests(unittest.TestCase):
         self.assertGreater(bands.envelope(3 * WINDOW, 3 * WINDOW).sum(), 0)
         silent = np.zeros(RATE, dtype="<i2")
         self.assertIsNone(calibrate_echo_bands(silent, 0, reference, (.2,)))
+
+    def test_timeline_distinguishes_early_events_and_capture_from_decision(self):
+        trace = InterruptionTimeline()
+        trace.record(700, 800, True, True, True)
+        trace.record(980, 1090, True, True, True)
+        trace.record(1020, 1130, True, False, False)
+        trace.record(1040, 1140, True, True, False)
+        trace.record(1060, 1150, True, True, True)
+        trace.record(1550, 1660, True, True, True)
+
+        self.assertEqual(trace.summarize(1000, 1500, uncertainty_ms=25), {
+            "early_candidate_windows": 1,
+            "first_raw_support_ms": 20,
+            "first_sustained_support_ms": 40,
+            "first_cleaned_voice_ms": 60,
+            "first_joint_capture_ms": 60,
+            "first_joint_decision_ms": 150,
+        })
+        self.assertIsNone(trace.summarize(1000, 1050)["first_joint_decision_ms"])

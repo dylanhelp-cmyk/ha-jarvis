@@ -274,6 +274,47 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(control["interruption_probe"]["first_candidate_after_render_ms"], 1400)
         self.assertNotIn("injection_to_stop_request_ms", control["interruption_probe"])
 
+    async def test_acoustic_interruption_requires_match_and_checks_opening_independently(self):
+        from types import SimpleNamespace
+        from jarvis.interruption import InterruptionTimeline
+
+        self.bench.device.clock_offset_ms = 5_000
+        player = SimpleNamespace(first_rendered_ms=1_000, last_rendered_ms=5_000)
+        phrase = np.full(RATE, 800, dtype="<i2")
+        trace = InterruptionTimeline()
+        trace.record(1020, 1140, True, False, False)
+        trace.record(1080, 1190, True, True, True)
+        found = {"status": "detected", "audible_onset_at": 7, "window_spread_ms": 2}
+        for match, prefix, expected in (({"status":"unavailable"}, None, "unavailable"),
+                                        (found, {"status":"unavailable"}, "unavailable"),
+                                        (found, {"status":"detected", "confidence":.9}, "measured")):
+            with self.subTest(expected=expected, match=match, prefix=prefix):
+                result, report = {"status": "unavailable"}, {}
+                with (patch("jarvis.live_bench.match_response", return_value=match),
+                      patch("jarvis.server.detect_probe", return_value=prefix) as cleaned):
+                    await self.bench.measure_acoustic_interruption(result, report, trace, phrase, 6.7,
+                                                                   player, phrase, 6, 31, phrase)
+                self.assertEqual(result["status"], expected)
+                if prefix is None:
+                    cleaned.assert_not_called()
+                    self.assertNotIn("near_end_source_after_render_ms", report)
+                else:
+                    self.assertEqual(report["evidence_timing"]["first_joint_decision_ms"], 190)
+                    self.assertEqual(report["cleaned_opening"]["status"], prefix["status"])
+
+    async def test_browser_fixture_endpoint_serves_generated_pcm_only(self):
+        pcm = bytes(2 * RATE)
+        with patch("jarvis.live_bench.synthesize_fixture", return_value=(pcm, RATE)) as synthesize:
+            response = await self.ui.get("/api/interruption-source/1.wav")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.content_type, "audio/wav")
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            with wave.open(io.BytesIO(await response.read()), "rb") as clip:
+                self.assertEqual((clip.getframerate(), clip.getnframes(), clip.getnchannels()), (RATE, RATE, 1))
+            self.assertEqual((await self.ui.get("/api/interruption-source/9.wav")).status, 404)
+            synthesize.assert_awaited_once_with("Hold on, can you tell me the time?")
+        self.assertFalse(self.bench.device.frames)
+
     async def test_local_speech_recovery_requires_acoustic_evidence_after_the_pause(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

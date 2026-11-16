@@ -6,6 +6,8 @@
 
 Local tests make no OpenAI calls. API credentials stay in the App's local data and audio and transcript retention default off.
 
+To check interruption detection with real sound, run **Echo reference alignment**, then open **Acoustic interruption check** on a browser device playing through a separate speaker near the Voice PE. Confirm both speakers are at a comfortable level, select a test phrase and let both voices finish. Jarvis measures the time from the phrase reaching its microphone and checks whether the opening survives echo cancellation.
+
 For the new greeting, use App 0.2.43 and Voice PE firmware 0.2.6. In **Jarvis → Wake acknowledgment**, generate the new cached clip, play the preview and confirm it says “Yes sir. How can I help?” Wait for the Voice PE cache to show ready. Run **Echo reference alignment** before trying **Voice preview**.
 
 To try a voice reply, run **Echo reference alignment** with the speakers in their usual position. Then select **Voice preview**, review and confirm the per-run room microphone consent, and start. When armed, say “Hey Jarvis” followed by a short question. To measure a warm turn on the same connection, enable the optional follow-up and wait for “listening for your warm follow-up” before speaking again. The preview sends cleaned audio to OpenAI GPT-Live and uses the API test budget. Repeat alignment after moving the speakers or restarting the App or Voice PE. Interruptions during a reply remain a future milestone.

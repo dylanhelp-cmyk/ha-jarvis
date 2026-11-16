@@ -3,12 +3,14 @@
 const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: 'Interruption check', stability: 'Stream stability',
   interrupt_speech: 'Spoken reply interruption',
+  interrupt_acoustic: 'Acoustic interruption check',
   interrupt_control: 'Playback-only interruption check',
   reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
 let listenedClip;
+let acousticSource;
 
 async function api(path, method = 'GET', body) {
   const options = {method, cache: 'no-store'};
@@ -40,6 +42,9 @@ function readiness() {
   const startup = $('wake-startup-transport');
   $('wake-startup-options').hidden = !wakeTest;
   $('voice-turn-consent').hidden = kind !== 'voice_turn';
+  const acoustic = kind === 'interrupt_acoustic';
+  $('interruption-source-options').hidden = !acoustic && kind !== 'interrupt_speech';
+  $('separate-speaker-option').hidden = !acoustic;
   startup.disabled = running || busy;
   const assist = kind === 'voice_turn' && $('voice-assist').checked;
   const standby = kind === 'voice_turn' && $('voice-standby').checked;
@@ -58,6 +63,8 @@ function readiness() {
   else if (speaker && (device.playback_protocol !== 1 || speakerRoute(device) === 'unavailable')) reason = 'Install compatible Voice PE firmware or connect the 3.5 mm jack.';
   else if (speaker && (!$('volume-confirmed').checked || !$('idle-confirmed').checked)) reason = 'Confirm the speaker volume and idle state.';
   else if (kind.startsWith('interrupt') && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
+  else if (kind.startsWith('interrupt_') && !state.interruption_profile_ready) reason = 'Repeat Echo reference alignment in a quiet room.';
+  else if (acoustic && !$('separate-speaker-confirmed').checked) reason = 'Confirm the separate speaker for browser audio.';
   else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
@@ -233,7 +240,7 @@ function showResults(results) {
       add(card, 'p', (trial.turn === 'warm_followup' ? 'Warm follow-up' : trial.turn === 'first' ? 'First reply' : 'Trial ' + trial.trial) + ' / ' +
         (trial.latency_ms == null ? (trial.reason || 'Acoustic measurement unavailable') :
           trial.latency_ms + (result.kind === 'voice_turn' ? ' ms from returned voice to audible output' :
-            ['interrupt_speech', 'interrupt_control'].includes(result.kind) ? ' ms from render start to audible reply' : ' ms')) +
+            ['interrupt_speech', 'interrupt_control', 'interrupt_acoustic'].includes(result.kind) ? ' ms from render start to audible reply' : ' ms')) +
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
@@ -267,6 +274,17 @@ function showResults(results) {
     }
     if (result.kind === 'interrupt_speech' && interrupt?.injection_to_stop_request_ms != null) {
       add(card, 'p', 'Acoustic stop time unavailable for spoken replies.');
+    }
+    if (interrupt?.near_end_source_after_render_ms != null) {
+      add(card, 'p', 'The separate speaker phrase was heard ' + interrupt.near_end_source_after_render_ms +
+        ' ms after the Voice PE began rendering.');
+      if (interrupt.cleaned_opening) add(card, 'p', interrupt.cleaned_opening.status === 'detected'
+        ? 'The beginning of the phrase was detected after echo cancellation.'
+        : 'The beginning of the phrase could not be verified after echo cancellation.');
+    }
+    if (interrupt?.evidence_timing?.first_joint_decision_ms != null) {
+      add(card, 'p', 'The detector qualified speech ' + interrupt.evidence_timing.first_joint_decision_ms +
+        ' ms after the test phrase began.');
     }
     if (result.live_echo) add(card, 'p', result.live_echo.status === 'measured' ?
       'Live DMA-reference pilot suppression ' + result.live_echo.pilot_band_reduction_db + ' dB' :
@@ -304,7 +322,7 @@ for (const button of document.querySelectorAll('.test-option')) {
     readiness();
   });
 }
-for (const id of ['volume-confirmed', 'idle-confirmed', 'wake-startup-transport', 'voice-turn-confirmed', 'voice-standby', 'voice-assist']) $(id).addEventListener('change', readiness);
+for (const id of ['volume-confirmed', 'idle-confirmed', 'separate-speaker-confirmed', 'wake-startup-transport', 'voice-turn-confirmed', 'voice-standby', 'voice-assist']) $(id).addEventListener('change', readiness);
 for (const id of ['voice-assist-name', 'voice-assist-token']) $(id).addEventListener('input', readiness);
 
 $('config-form').addEventListener('submit', (event) => {
@@ -327,10 +345,65 @@ $('reveal-token').addEventListener('click', () => {
 $('copy-token').addEventListener('click', () => {
   navigator.clipboard.writeText($('device-token').value).catch(() => notice('Clipboard access unavailable.'));
 });
+
+async function stopAcousticSource(run = acousticSource) {
+  if (acousticSource === run) acousticSource = undefined;
+  if (run && run.context.state !== 'closed') await run.context.close();
+}
+
+async function playWhenCued(run, clip) {
+  try {
+    for (let count = 0; count < 36 && acousticSource === run; count++) {
+      const {test} = await api('api/status');
+      if (acousticSource !== run || !test.running || test.id !== run.id) break;
+      if (test.acoustic_source_ready) {
+        const source = run.context.createBufferSource();
+        const volume = run.context.createGain();
+        volume.gain.value = .28;
+        source.buffer = clip;
+        source.connect(volume).connect(run.context.destination);
+        source.onended = () => { void stopAcousticSource(run).catch(() => {}); };
+        source.start();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+  } catch (error) {
+    if (acousticSource === run) notice(error.message);
+  }
+  await stopAcousticSource(run);
+}
+
+async function startAcousticTest(body) {
+  const context = new AudioContext();
+  const run = {context};
+  acousticSource = run;
+  try {
+    await context.resume();
+    const response = await fetch('api/interruption-source/' + body.source_variant + '.wav', {cache: 'no-store'});
+    if (!response.ok) throw new Error('The local test phrase could not be prepared.');
+    const clip = await context.decodeAudioData(await response.arrayBuffer());
+    const {test_id} = await api('api/tests', 'POST', body);
+    run.id = test_id;
+    void playWhenCued(run, clip).catch((error) => notice(error.message));
+  } catch (error) {
+    await stopAcousticSource(run);
+    throw error;
+  }
+}
+
 $('run-test').addEventListener('click', () => {
   const startup = kind === 'wake_ack' && $('wake-startup-transport').value;
   if (startup && !window.confirm('Start one budgeted GPT-Live startup test on the next wake? Room microphone audio stays local.')) return;
   const body = {kind, comfortable_volume_confirmed: $('volume-confirmed').checked};
+  if (kind === 'interrupt_acoustic' || kind === 'interrupt_speech') {
+    body.source_variant = Number($('interruption-source-variant').value);
+  }
+  if (kind === 'interrupt_acoustic') {
+    body.confirm_separate_speaker = $('separate-speaker-confirmed').checked;
+    action(() => startAcousticTest(body));
+    return;
+  }
   if (startup) Object.assign(body, {startup_transport: startup, confirm_paid: true});
   if (kind === 'voice_turn') {
     if (!$('voice-turn-confirmed').checked) return;
@@ -356,7 +429,8 @@ $('run-test').addEventListener('click', () => {
   }
   action(() => api('api/tests', 'POST', body));
 });
-$('cancel-test').addEventListener('click', () => action(() => api('api/tests/current', 'DELETE')));
+$('cancel-test').addEventListener('click', () => action(() =>
+  Promise.all([stopAcousticSource(), api('api/tests/current', 'DELETE')])));
 $('cloud-form').addEventListener('submit', (event) => {
   event.preventDefault();
   action(async () => {

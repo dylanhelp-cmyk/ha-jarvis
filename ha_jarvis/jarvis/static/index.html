@@ -53,7 +53,8 @@
             <button class="test-option selected" data-kind="latency" type="button" aria-pressed="true"><span class="test-icon" aria-hidden="true">↗</span><span><strong>Playback latency</strong><small>Playback path: emitted marker → microphone-detected sound.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stop" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Stop response</strong><small>How quickly the speaker falls silent.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="interrupt" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Interruption check</strong><small>Check whether local test speech stops a sound playing through the selected speaker.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
-            <button class="test-option" data-kind="interrupt_speech" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Spoken reply interruption</strong><small>Check for false stops while the speaker plays a generated reply. Runs locally.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
+            <button class="test-option" data-kind="interrupt_speech" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Spoken reply interruption</strong><small>Inject generated speech into local capture while the Voice PE plays a reply.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
+            <button class="test-option" data-kind="interrupt_acoustic" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Acoustic interruption check</strong><small>Use this browser’s speaker to supply speech while the Voice PE plays a full reply.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="interrupt_control" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">□</span><span><strong>Playback-only interruption check</strong><small>Stay quiet while the test checks a complete generated reply for false interruptions.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="stability" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Stream stability</strong><small>Check continuity across repeated playback.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
             <button class="test-option" data-kind="echo" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">≋</span><span><strong>Quiet-room echo test</strong><small>Measure pilot suppression with offline AEC3.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
@@ -64,6 +65,14 @@
             <button class="test-option" data-kind="connection" type="button" aria-pressed="false"><span class="test-icon" aria-hidden="true">·</span><span><strong>Microphone connection</strong><small>60-second silent capture. No speaker playback or cloud calls.</small></span><span class="radio-dot" aria-hidden="true"></span></button>
           </div>
           <div class="preflight"><p class="preflight-title">Before sound enters the room</p><label class="check"><input id="volume-confirmed" type="checkbox"><span>The selected speaker is ready at a comfortable volume.</span></label><label class="check"><input id="idle-confirmed" type="checkbox"><span>The selected speaker is idle.</span></label></div>
+          <div id="interruption-source-options" hidden>
+            <label for="interruption-source-variant">Test phrase</label>
+            <select id="interruption-source-variant">
+              <option value="0">Wait, please switch to a different topic.</option>
+              <option value="1">Hold on, can you tell me the time?</option>
+            </select>
+            <label id="separate-speaker-option" class="check" hidden><input id="separate-speaker-confirmed" type="checkbox"><span>This browser plays through a separate speaker near the Voice PE at a comfortable volume.</span></label>
+          </div>
           <div id="wake-startup-options" hidden>
             <label for="wake-startup-transport">GPT-Live startup measurement</label>
             <select id="wake-startup-transport">

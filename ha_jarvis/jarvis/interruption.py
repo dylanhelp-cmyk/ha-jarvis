@@ -115,3 +115,30 @@ class InterruptionEvidence:
         # second-strongest window long enough for the two signals to agree.
         sustained = sorted(self.recent_ratios)[-2] if len(self.recent_ratios) >= 2 else 0.
         return ratio, sustained
+
+
+class InterruptionTimeline:
+    """Retain timing and detector flags, without retaining speech samples."""
+
+    def __init__(self):
+        self.windows = deque(maxlen=400)
+
+    def record(self, capture_ms, arrival_ms, raw_supported, sustained_supported, voiced):
+        self.windows.append((capture_ms, arrival_ms, raw_supported, sustained_supported, voiced))
+
+    def summarize(self, onset_ms, end_ms, *, uncertainty_ms=0):
+        overlap = [row for row in self.windows if onset_ms <= row[0] <= end_ms]
+        first_joint = next((row for row in overlap if row[3] and row[4]), None)
+
+        def first_time(index):
+            return next((round(row[0] - onset_ms, 1) for row in overlap if row[index]), None)
+
+        return {
+            "early_candidate_windows": sum(row[3] and row[4] for row in self.windows
+                                           if row[0] < onset_ms - uncertainty_ms),
+            "first_raw_support_ms": first_time(2),
+            "first_sustained_support_ms": first_time(3),
+            "first_cleaned_voice_ms": first_time(4),
+            "first_joint_capture_ms": round(first_joint[0] - onset_ms, 1) if first_joint else None,
+            "first_joint_decision_ms": round(first_joint[1] - onset_ms, 1) if first_joint else None,
+        }
