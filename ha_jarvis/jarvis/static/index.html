@@ -35,13 +35,16 @@
             <p class="field-help">Voice PE uses this address for the paired connection. Open this panel through Home Assistant ingress.</p>
             <label for="repetitions">Probe repetitions</label>
             <input id="repetitions" name="repetitions" type="number" min="1" max="20" value="3" required>
+            <label for="standby-idle-seconds">Wake standby inactivity timeout (seconds)</label>
+            <input id="standby-idle-seconds" name="standby_idle_seconds" type="number" min="3" max="30" value="10" required>
+            <p class="field-help">How long Jarvis listens for a follow-up after a reply in wake standby.</p>
             <details class="device-setup"><summary>Microphone pairing & firmware</summary><div class="details-content">
               <label for="device-token">Device token</label><div class="token-row"><input id="device-token" name="device_token" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="token-help"><button class="button subtle" id="reveal-token" type="button" aria-label="Show device token" aria-pressed="false">Show</button><button class="button subtle" id="copy-token" type="button">Copy</button></div>
               <p id="token-help" class="field-help">Use this secret only in your microphone firmware. Keep this panel behind authenticated Home Assistant ingress or on a trusted local network.</p>
               <a class="text-link" href="api/firmware" download>Download one-time ESPHome setup <span aria-hidden="true">↗</span></a>
               <p class="field-help">Keep this local entry in Builder. Future firmware builds fetch source updates from GitHub; no repeated folder copying.</p>
             </div></details>
-            <div class="save-row"><button class="button primary" id="save-config" type="submit">Save connection</button><span id="save-state" class="muted" aria-live="polite">Loading settings…</span></div>
+            <div class="save-row"><button class="button primary" id="save-config" type="submit">Save settings</button><span id="save-state" class="muted" aria-live="polite">Loading settings…</span></div>
           </form>
         </section>
         <section class="panel tests" aria-labelledby="tests-title">

@@ -205,7 +205,8 @@ function showResults(results) {
           ' ms from sending the estimated speech end to receiving voice audio.');
       }
     }
-    if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after 10 seconds without detected speech.');
+    if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after ' +
+      (result.standby_idle_seconds ?? 10) + ' seconds without detected speech.');
     if (result.conversation_end === 'session_limit') add(card, 'p', 'Conversation reached the preview session limit.');
     if (wakeReady == null && result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;
@@ -301,10 +302,11 @@ for (const id of ['voice-assist-name', 'voice-assist-token']) $(id).addEventList
 $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
   action(async () => {
-    const config = {ha_lan_url: $('ha-lan-url').value.trim(), repetitions: Number($('repetitions').value)};
+    const config = {ha_lan_url: $('ha-lan-url').value.trim(), repetitions: Number($('repetitions').value),
+      standby_idle_seconds: Number($('standby-idle-seconds').value)};
     if ($('device-token').value) config.device_token = $('device-token').value;
     await api('api/config', 'PUT', config);
-    $('save-state').textContent = 'Connection saved.';
+    $('save-state').textContent = 'Settings saved.';
   });
 });
 $('reveal-token').addEventListener('click', () => {
@@ -373,8 +375,9 @@ async function initialize() {
   const config = await api('api/config');
   $('ha-lan-url').value = config.ha_lan_url;
   $('repetitions').value = config.repetitions;
+  $('standby-idle-seconds').value = config.standby_idle_seconds;
   $('device-token').value = config.device_token;
-  $('save-state').textContent = 'Connection loaded.';
+  $('save-state').textContent = 'Settings loaded.';
   await poll();
 }
 

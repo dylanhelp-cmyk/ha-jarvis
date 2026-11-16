@@ -31,6 +31,7 @@ from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device, output_route
+from .lifecycle import DEFAULT_IDLE_SECONDS
 from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
 from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, stereo_pcm
@@ -38,7 +39,7 @@ from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, ster
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
 STANDBY_ARM_MS = 120_000
-DEFAULTS = {"ha_lan_url": "", "repetitions": 3}
+DEFAULTS = {"ha_lan_url": "", "repetitions": 3, "standby_idle_seconds": DEFAULT_IDLE_SECONDS}
 LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
                  "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
 
@@ -57,6 +58,9 @@ def validate_config(value):
             raise ValueError("Enter http://HA-LAN-IP:8099 without a path")
     if type(config["repetitions"]) is not int or not 1 <= config["repetitions"] <= 20:
         raise ValueError("Choose 1 to 20 repetitions")
+    idle_seconds = config["standby_idle_seconds"]
+    if type(idle_seconds) is not int or not 3 <= idle_seconds <= 30:
+        raise ValueError("Choose a wake standby timeout from 3 to 30 seconds")
     token = config.get("device_token", "")
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
         raise ValueError("Device token must contain 32 to 128 URL-safe characters")
@@ -476,10 +480,14 @@ class Bench:
         def stage(phase):
             self.test["phase"] = phase
         result["metric"] = "returned_voice_to_audible_reply"
+        idle_seconds = self.config["standby_idle_seconds"] if standby else DEFAULT_IDLE_SECONDS
+        if standby:
+            result["standby_idle_seconds"] = idle_seconds
         replies = await run_voice_turn(device, self.cloud_settings, result, self.opening_audio, pcm, delay, stage,
                                        gain_db=gain_db, follow_up=follow_up,
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
-                                       assist_delegation=assist_delegation, after_greeting=after_greeting)
+                                       assist_delegation=assist_delegation, after_greeting=after_greeting,
+                                       idle_seconds=idle_seconds)
         if not replies:
             return
         await asyncio.sleep(.25)

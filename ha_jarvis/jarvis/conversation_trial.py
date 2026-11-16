@@ -12,7 +12,7 @@ import numpy as np
 
 from .audio import RATE
 from .device import output_route
-from .lifecycle import ConversationPolicy
+from .lifecycle import ConversationPolicy, DEFAULT_IDLE_SECONDS
 from .live_bench import BenchReply
 from .live_session import LiveSession
 from .playback import RATE as RENDER_RATE
@@ -287,7 +287,8 @@ class FollowUpEnded(TimeoutError):
 
 
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
-                       warm_follow_up=False, source_prime_packets=12, input_deadline=None):
+                       warm_follow_up=False, source_prime_packets=12, input_deadline=None,
+                       idle_seconds=DEFAULT_IDLE_SECONDS):
     output_gain_db = VOICE_OUTPUT_GAIN_DB
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
@@ -311,7 +312,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         phase(listening_phase)
         set_output(reply)
         origin = listening_started = time.monotonic()
-        inactivity = ConversationPolicy(last_activity=listening_started)
+        inactivity = ConversationPolicy(idle_seconds=idle_seconds, last_activity=listening_started)
         # Bound the paid preview separately from the conversational idle timer.
         deadline = listening_started + (18 if warm_follow_up else 10)
         while reply.first_voice_at is None:
@@ -323,7 +324,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
             if input_deadline is not None and now >= input_deadline:
                 raise FollowUpEnded("session_limit", "The conversation reached the preview session limit")
             if warm_follow_up and inactivity.should_close(now):
-                raise FollowUpEnded("inactivity", "No spoken reply after 10 seconds without detected speech")
+                raise FollowUpEnded("inactivity", f"No detected speech for {idle_seconds:g} seconds")
             if input_deadline is None and now >= deadline:
                 raise TimeoutError("No spoken reply before the preview time limit")
             packet, captured_at = await stream.packet()
@@ -402,7 +403,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
                          follow_up=False, wait_for_preconnected_wake=None, standby=False,
-                         assist_delegation=None, after_greeting=False):
+                         assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -493,7 +494,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             try:
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up", gain_db=gain_db,
-                                                  max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline))
+                                                  max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline,
+                                                  idle_seconds=idle_seconds))
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 if standby and isinstance(exc, FollowUpEnded):
                     result["conversation_end"] = exc.reason

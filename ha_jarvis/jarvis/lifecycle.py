@@ -4,10 +4,12 @@ No model is called and no cloud session is opened by this module.
 """
 from dataclasses import dataclass
 
+DEFAULT_IDLE_SECONDS = 10
+
 
 @dataclass
 class ConversationPolicy:
-    idle_seconds: float = 10.0
+    idle_seconds: float = DEFAULT_IDLE_SECONDS
     grace_seconds: float = 2.0
     last_activity: float = 0.0
     pending_work: int = 0

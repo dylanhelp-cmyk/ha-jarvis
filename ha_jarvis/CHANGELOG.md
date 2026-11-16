@@ -1,3 +1,7 @@
+# 0.2.64
+
+- Configure how long wake standby listens for a follow-up after a reply. The default is 10 seconds.
+
 # 0.2.63
 
 - Add a local playback-only control that records possible false interruptions through a complete spoken reply.

@@ -108,6 +108,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(device.wake_event.is_set())
             self.assertTrue(kwargs["follow_up"])
             self.assertTrue(kwargs["after_greeting"])
+            self.assertEqual(kwargs["idle_seconds"], 6)
+            self.assertEqual(result["standby_idle_seconds"], 6)
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
             result["cloud"] = {"finalization_confirmed": True}
             result["status"] = "unavailable"
@@ -116,6 +118,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         ready = {"connected": True, "muted": False, "raw_ready": True,
                  "jack_plugged": True, "wake_capture_protocol": 1, "playback_protocol": 1}
         self.bench.cloud_settings.set_key("sk-local-standby-test-key")
+        response = await self.ui.put("/api/config", json={"standby_idle_seconds": 2})
+        self.assertEqual(response.status, 400)
+        response = await self.ui.put("/api/config", json={"standby_idle_seconds": 6})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(Bench(self.folder.name).config["standby_idle_seconds"], 6)
         with (patch.object(device, "snapshot", return_value=ready),
               patch.object(device, "begin", side_effect=begin),
               patch.object(device, "end", new_callable=AsyncMock),
@@ -342,7 +349,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             'route': 'airplay', 'wiim_host': '192.168.1.20', 'repetitions': 5}))
         restarted = Bench(self.folder.name)
         self.assertEqual(restarted.config, {
-            'device_token': original, 'ha_lan_url': 'http://192.168.1.10:8099', 'repetitions': 5})
+            'device_token': original, 'ha_lan_url': 'http://192.168.1.10:8099', 'repetitions': 5,
+            'standby_idle_seconds': 10})
         self.assertEqual(restarted.firmware_secrets, self.bench.firmware_secrets)
 
     async def test_playback_requires_a_connected_jack_and_compatible_firmware(self):

@@ -91,13 +91,13 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 async def packet():
                     nonlocal now
                     now = 100 + sent * .02
-                    pcm = bytes([1, 0]) * 320 if speaking and 495 <= sent < 499 else bytes(640)
+                    pcm = bytes([1, 0]) * 320 if speaking and 295 <= sent < 299 else bytes(640)
                     return pcm, now
 
                 async def send_audio(_):
                     nonlocal sent
                     sent += 1
-                    if sent == 503:
+                    if sent == 303:
                         output.first_voice_at = now
                         output.last_voice_at = now - 1
 
@@ -110,14 +110,14 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                      patch("jarvis.conversation_trial.SpeechEndpoint", lambda: SpeechEndpoint(detector)), \
                      patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: now)):
                     run = stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
-                                       gain_db=0, max_age_ms=250, warm_follow_up=True)
+                                       gain_db=0, max_age_ms=250, warm_follow_up=True, idle_seconds=6)
                     if speaking:
                         self.assertIsNotNone(await run)
-                        self.assertEqual(sent, 503)
+                        self.assertEqual(sent, 303)
                     else:
-                        with self.assertRaisesRegex(TimeoutError, "without detected speech"):
+                        with self.assertRaisesRegex(TimeoutError, "No detected speech for 6 seconds"):
                             await run
-                        self.assertLess(sent, 503)
+                        self.assertLess(sent, 303)
 
     def test_echo_guard_keeps_sample_order_across_partial_aec_blocks(self):
         buffered = 0
@@ -276,11 +276,12 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                       patch("jarvis.conversation_trial.warm_input_after_render", return_value=None),
                       patch("jarvis.conversation_trial.stream_reply", side_effect=[*returned, ending]) as play):
                     replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4),
-                                                   31, lambda _: None, follow_up=True, standby=True)
+                                                   31, lambda _: None, follow_up=True, standby=True, idle_seconds=6)
 
                 self.assertEqual(replies, returned)
                 self.assertEqual(messages, ["ready", "closed"])
                 self.assertEqual(len({id(call.args[1]) for call in play.call_args_list}), 1)
+                self.assertTrue(all(call.kwargs["idle_seconds"] == 6 for call in play.call_args_list[1:]))
                 self.assertEqual(result["warm_reply"]["id"], "standby-warm-2")
                 extra = result["additional_warm_replies"]
                 self.assertEqual(extra[0]["id"], "standby-warm-3")
