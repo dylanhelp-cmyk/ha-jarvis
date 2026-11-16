@@ -93,7 +93,7 @@ class InterruptionEvidence:
         self.first_sample = first_sample
         self.samples = np.zeros(RATE, dtype="<i2")
         self.latest = 0
-        self.recent_votes = deque(maxlen=3)
+        self.recent_ratios = deque(maxlen=5)
 
     def offer_capture(self, frame):
         start = frame.first_sample - self.first_sample
@@ -106,10 +106,12 @@ class InterruptionEvidence:
     def observe(self, capture_end, render_end, confirmed_samples):
         start = capture_end - WINDOW
         if start < max(0, self.latest - len(self.samples)) or capture_end > self.latest:
-            self.recent_votes.clear()
-            return None, False
+            self.recent_ratios.clear()
+            return None, 0.
         mic = self.samples[np.arange(start, capture_end) % len(self.samples)]
         ratio = self.profile.third_band_ratio(mic, self.render.envelope(render_end, confirmed_samples))
-        vote = ratio >= 2
-        self.recent_votes.append(vote)
-        return ratio, vote and sum(self.recent_votes) >= 2
+        self.recent_ratios.append(ratio)
+        # Raw acoustic evidence can precede the AEC/VAD decision. Keep the
+        # second-strongest window long enough for the two signals to agree.
+        sustained = sorted(self.recent_ratios)[-2] if len(self.recent_ratios) >= 2 else 0.
+        return ratio, sustained

@@ -31,8 +31,8 @@ class InterruptionTests(unittest.TestCase):
             for first in range(0, len(track), HOP):
                 end = first + HOP
                 evidence.offer_capture(PCMFrame(first // HOP, first, first // 16, track[first:end]))
-                _, accepted = evidence.observe(end, end, end)
-                if accepted:
+                _, sustained = evidence.observe(end, end, end)
+                if sustained >= 1:
                     detected.append(end)
             return detected
 

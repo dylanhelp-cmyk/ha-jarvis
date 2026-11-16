@@ -241,7 +241,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         echo = SimpleNamespace(error=None, finished=True, rendered_frames=192000,
                                prime_capture=lambda *_: samples.tobytes(),
                                offer=lambda frame, _: frame.samples.tobytes())
-        self.bench.echo_band_profile = SimpleNamespace(third_band_ratio=lambda mic, _: np.mean(abs(mic)) / 140)
+        self.bench.echo_band_profile = SimpleNamespace(third_band_ratio=lambda mic, _: np.mean(abs(mic)) / 175)
         detector = SimpleNamespace(observe=lambda *_: True)
         with (patch.object(self.bench, "alignment_delay", return_value=35),
               patch.object(device, "end", new_callable=AsyncMock),

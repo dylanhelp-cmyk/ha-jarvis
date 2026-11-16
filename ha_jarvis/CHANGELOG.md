@@ -1,3 +1,7 @@
+# 0.2.70
+
+- Match repeated calibrated echo-band evidence with cleaned speech over a 100 ms window in the local interruption tests.
+
 # 0.2.69
 
 - Compare microphone speech with the calibrated speaker echo in multiple frequency bands during the local spoken-interruption tests. Keep acoustic capture local.

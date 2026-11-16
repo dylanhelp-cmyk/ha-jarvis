@@ -655,6 +655,7 @@ class Bench:
         rejected = level_rejected = 0
         band_rejected = 0
         strongest_band_ratio = None
+        strongest_sustained_ratio = None
         baseline_power = []
         noise_power = None
         min_excess_db = 6
@@ -695,7 +696,7 @@ class Bench:
 
         def inspect_cleaned(pcm, offset):
             nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
-            nonlocal candidate_windows, band_rejected, strongest_band_ratio
+            nonlocal candidate_windows, band_rejected, strongest_band_ratio, strongest_sustained_ratio
             first_ms = player.first_rendered_ms
             cleaned.extend(pcm)
             while len(cleaned) >= 640 and not trigger.done():
@@ -710,15 +711,16 @@ class Bench:
                 if evidence is not None:
                     if relative_ms < alignment + 80:
                         continue
-                    ratio, confirmed = evidence.observe(processed, render_end, echo.rendered_frames // 3)
+                    ratio, sustained = evidence.observe(processed, render_end, echo.rendered_frames // 3)
                     voiced = detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic())
                     if ratio is None or not voiced:
                         continue
                     strongest_band_ratio = max(strongest_band_ratio or 0, ratio)
-                    if not confirmed:
+                    strongest_sustained_ratio = max(strongest_sustained_ratio or 0, sustained)
+                    if sustained < 1:
                         band_rejected += 1
                         continue
-                    excess_db = 10 * math.log10(ratio)
+                    excess_db = 10 * math.log10(sustained)
                     similarity = None
                 elif 300 <= relative_ms < monitor_start_ms:
                     samples = np.frombuffer(packet, dtype="<i2").astype(np.float64)
@@ -803,7 +805,9 @@ class Bench:
         if evidence is not None:
             report.update(detector="calibrated_band_power", band_candidates_rejected=band_rejected,
                           maximum_third_band_above_bound_db=(round(10 * math.log10(strongest_band_ratio), 1)
-                              if strongest_band_ratio else None))
+                              if strongest_band_ratio else None),
+                          maximum_persistent_third_band_above_bound_db=(round(10 * math.log10(strongest_sustained_ratio), 1)
+                              if strongest_sustained_ratio else None))
         else:
             report.update(detector="fixed_level_and_correlation", echo_like_candidates_rejected=rejected,
                           low_level_candidates_rejected=level_rejected, baseline_packets=len(baseline_power),
