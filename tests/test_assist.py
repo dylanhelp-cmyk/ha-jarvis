@@ -139,6 +139,25 @@ class AssistDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await bridge.execute("repeat", on, '{"name":"Desk Lamp"}'))["outcome"], "rejected")
         self.assertEqual(client.call_tool.await_count, 3)
 
+    async def test_standby_does_not_repeat_an_unknown_action_under_a_new_call_id(self):
+        on = "HassTurnOn"
+        read = "GetLiveContext"
+        schema = {"type": "object", "properties": {"name": {}, "domain": {}}}
+        catalog = [{"name": name, "inputSchema": schema} for name in (on, read)]
+        unknown = {"outcome": "unknown"}
+        context = {"outcome": "reported", "text": json.dumps({
+            "result": "Live Context: example\n- names: Desk Lamp\n  domain: light\n  state: 'on'\n",
+        })}
+        client = SimpleNamespace(call_tool=AsyncMock(side_effect=[unknown, context]))
+        uncertain = set()
+        first = AssistDelegation(client, catalog, uncertain_actions=uncertain)
+        later = AssistDelegation(client, catalog, uncertain_actions=uncertain)
+        self.assertEqual((await first.execute("old", on, '{"name":"Desk Lamp","domain":"light"}'))["outcome"], "unknown")
+        self.assertEqual((await later.execute("reissued", on, '{"domain":"light","name":"Desk Lamp"}'))["outcome"], "unknown")
+        self.assertEqual(await later.execute("read", read, '{"domain":"light","name":"Desk Lamp"}'),
+                         {"outcome": "verified", "state": "on"})
+        self.assertEqual(client.call_tool.await_count, 2)
+
     async def test_never_follows_a_redirect_to_a_different_api(self):
         followed = False
 

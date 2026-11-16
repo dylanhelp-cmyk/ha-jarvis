@@ -28,12 +28,15 @@ class SignOffRequest:
         else:
             self.text += delta
 
-    def finish(self) -> bool:
+    def clear_closing_phrase(self) -> bool:
         words = " ".join(re.findall(r"[a-z0-9']+", self.text.casefold().replace("’", "'")))
         words = words.removeprefix("jarvis ").removesuffix(" jarvis")
         for courtesy in ("thanks", "thank you"):
             words = words.removeprefix(courtesy + " ").removesuffix(" " + courtesy)
-        confirmed = self.requested and not self.overflow and words in SIGN_OFFS
+        return not self.overflow and words in SIGN_OFFS
+
+    def finish(self) -> bool:
+        confirmed = self.requested and self.clear_closing_phrase()
         self.text = ""
         self.requested = self.overflow = False
         return confirmed

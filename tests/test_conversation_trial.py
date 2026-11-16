@@ -79,8 +79,9 @@ class SimulatedReply:
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_warm_speech_near_idle_deadline_keeps_listening(self):
-        for signoff, speaking in ((False, False), (False, True), (True, False), (True, True)):
-            with self.subTest(signoff=signoff, speaking=speaking):
+        for signoff, speaking, pending in ((False, False, False), (False, True, False), (True, False, False),
+                                           (True, True, False), (False, False, True)):
+            with self.subTest(signoff=signoff, speaking=speaking, pending=pending):
                 now = 100.0
                 sent = 0
                 output = None
@@ -101,12 +102,15 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 async def send_audio(_):
                     nonlocal sent
                     sent += 1
+                    if sent == turn_deadline + 1:
+                        session.assist_work_pending = False
                     if sent == turn_deadline + 3:
                         output.first_voice_at = now
                         output.last_voice_at = now - 1
 
                 device = SimpleNamespace(errors=[], info={"jack_plugged": True})
-                session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio)
+                session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio,
+                                          assist_work_pending=pending)
                 stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0)
                 detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
                 result = {"id": "warm"}
@@ -115,8 +119,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                      patch("jarvis.conversation_trial.time", SimpleNamespace(monotonic=lambda: now)):
                     run = stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
                                        gain_db=0, max_age_ms=250, warm_follow_up=True, idle_seconds=6,
-                                       closure_policy=policy)
-                    if speaking:
+                                       closure_policy=policy, assist=pending)
+                    if speaking or pending:
                         self.assertIsNotNone(await run)
                         self.assertEqual(sent, turn_deadline + 3)
                         self.assertFalse(policy.ending_requested)
@@ -300,13 +304,13 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(session.prior, (("Previous question", "Previous reply"),))
                     if turn == len(returned):
                         raise ending
+                    set_output(returned[turn])
                     if is_signoff and turn == len(returned) - 1:
                         session.transcript("Good")
                         session.transcript("bye.")
                         session.request_end()
                         self.assertFalse(closure_policy.ending_requested)
                     turn += 1
-                    set_output(returned[turn - 1])
                     session.collect("user", f"Question {turn}?", turn * 1000, turn * 1000 + 200)
                     session.collect("assistant", f"Answer {turn}.", turn * 1000 + 500, turn * 1000 + 750)
                     set_output(None)

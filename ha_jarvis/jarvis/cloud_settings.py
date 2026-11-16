@@ -10,6 +10,7 @@ import secrets
 VOICE_USD_PER_SECOND = 0.05 / 60
 BACKEND_OUTPUT_TOKENS = 512
 BACKEND_RESPONSE_LIMIT = 2
+STANDBY_BACKEND_RESPONSE_LIMIT = 6
 BACKEND_CONTEXT_TOKENS = 1_050_000
 BACKEND_RATES = {"gpt-6-luna": (.10, .01, .50), "gpt-6-sol": (2, .20, 10)}
 
@@ -28,6 +29,11 @@ def _backend_cost(model, input_tokens, cached_tokens, output_tokens):
 
 def _backend_allowance(model):
     return _backend_cost(model, BACKEND_CONTEXT_TOKENS, 0, BACKEND_OUTPUT_TOKENS)
+
+
+def _backend_reservation(backend):
+    # Live can start one additional response before shutdown reaches it.
+    return (backend.get("response_limit", BACKEND_RESPONSE_LIMIT) + 1) * _backend_allowance(backend["model"])
 
 
 class CloudBudgetError(ValueError):
@@ -101,7 +107,7 @@ class CloudSettings:
         if not math.isfinite(self.spent_usd) or self.spent_usd < 0:
             raise CloudBudgetError("Invalid saved cloud spending; paid calls are blocked")
 
-    def reserve_attempt(self, *, transport, backend_model=None):
+    def reserve_attempt(self, *, transport, backend_model=None, backend_response_limit=BACKEND_RESPONSE_LIMIT):
         """Reserve voice and optional backend usage before any network operation.
 
         This is a single-App ledger. Never create parallel paid session owners.
@@ -111,6 +117,8 @@ class CloudSettings:
             raise ValueError("Unknown cloud transport")
         if backend_model is not None and (transport != "websocket" or backend_model not in BACKEND_RATES):
             raise CloudBudgetError("Unsupported budgeted delegation configuration")
+        if backend_response_limit not in (BACKEND_RESPONSE_LIMIT, STANDBY_BACKEND_RESPONSE_LIMIT):
+            raise CloudBudgetError("Unsupported delegated response limit")
         # Other objects constructed before the current attempt must also see its
         # durable reservation. This method is synchronous on the App event loop.
         if self.path.exists():
@@ -122,17 +130,17 @@ class CloudSettings:
         if self.pending is not None:
             raise CloudBudgetError("Previous cloud attempt has unconfirmed finalization; paid retries are blocked")
         reserved = 60 * VOICE_USD_PER_SECOND
+        backend = None
         if backend_model is not None:
-            # Allow for one extra response that Live can start before the
-            # client receives the event that triggers shutdown.
-            reserved += (BACKEND_RESPONSE_LIMIT + 1) * _backend_allowance(backend_model)
+            backend = {"model": backend_model, "response_limit": backend_response_limit, "responses": {}}
+            reserved += _backend_reservation(backend)
         if self.spent_usd + reserved > self.budget_usd + 1e-12:
             raise CloudBudgetError(f"Cloud test would exceed the US${self.budget_usd} budget")
         self.pending = {"id": secrets.token_hex(12), "transport": transport,
                         "reserved_usd": reserved, "usage_seconds": 0.0,
                         "status": "reserved"}
-        if backend_model is not None:
-            self.pending["backend"] = {"model": backend_model, "responses": {}}
+        if backend is not None:
+            self.pending["backend"] = backend
         self.attempt_count += 1
         try:
             self._save()
@@ -153,7 +161,7 @@ class CloudSettings:
             raise CloudBudgetError("Invalid cloud usage duration")
         pending["usage_seconds"] = max(pending["usage_seconds"], float(seconds))
         backend = pending.get("backend")
-        reserved_backend = (BACKEND_RESPONSE_LIMIT + 1) * _backend_allowance(backend["model"]) if backend else 0
+        reserved_backend = _backend_reservation(backend) if backend else 0
         pending["reserved_usd"] = max(pending["reserved_usd"], reserved_backend + seconds * VOICE_USD_PER_SECOND)
         self._save()
 
@@ -210,7 +218,7 @@ class CloudSettings:
             backend_cost = sum(allowance if counts is None else _backend_cost(model, *counts)
                                for counts in responses.values())
             if backend.get("unconfirmed"):
-                backend_cost = max(backend_cost, (BACKEND_RESPONSE_LIMIT + 1) * allowance)
+                backend_cost = max(backend_cost, _backend_reservation(backend))
         self._settle(billed * VOICE_USD_PER_SECOND + backend_cost)
 
     def finalize_realtime(self, attempt_id, estimated_usd):

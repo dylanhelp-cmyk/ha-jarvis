@@ -84,15 +84,17 @@
             <div id="voice-context-options" hidden>
               <label class="check"><input id="voice-remember-context" type="checkbox" autocomplete="off"><span>Remember up to two recent exchanges in memory for 60 seconds after a conversation. Send the text to GPT-Live if I wake Jarvis again within that time.</span></label>
             </div>
-            <label class="check"><input id="voice-assist" type="checkbox"><span>Allow one on or off command for a named Assist-exposed light or switch during this preview.</span></label>
+            <label class="check"><input id="voice-assist" type="checkbox"><span id="voice-assist-mode">Allow one on or off command for a named Assist-exposed light or switch during this preview.</span></label>
             <div id="voice-assist-fields" hidden>
-              <label for="voice-assist-name">Exact device name in Assist</label>
-              <input id="voice-assist-name" type="text" maxlength="128" autocomplete="off">
-              <label for="voice-assist-domain">Device type</label>
-              <select id="voice-assist-domain"><option value="light">Light</option><option value="switch">Switch</option></select>
+              <div id="voice-assist-target">
+                <label for="voice-assist-name">Exact device name in Assist</label>
+                <input id="voice-assist-name" type="text" maxlength="128" autocomplete="off">
+                <label for="voice-assist-domain">Device type</label>
+                <select id="voice-assist-domain"><option value="light">Light</option><option value="switch">Switch</option></select>
+              </div>
               <label for="voice-assist-token">Home Assistant access token</label>
               <input id="voice-assist-token" type="password" autocomplete="off" maxlength="2048">
-              <p class="field-help">Use a non-admin Home Assistant account. Jarvis uses the token locally for this run.</p>
+              <p class="field-help">Use a non-admin Home Assistant account. Jarvis keeps this token locally in memory until the preview or wake standby stops.</p>
             </div>
             <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from the selected voice mode to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
             <p class="field-help">The single-run preview ends after the selected one or two replies. Wake standby supports multiple follow-ups. Wait for the reply to finish before speaking. Run Echo reference alignment first.</p>

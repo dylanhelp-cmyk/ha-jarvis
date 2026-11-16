@@ -11,7 +11,7 @@ import aiohttp
 import numpy as np
 from av import AudioFrame
 
-from jarvis.assist_delegation import AssistDelegation
+from jarvis.assist_delegation import AssistDelegation, END_CONVERSATION
 from jarvis.cloud_settings import CloudSettings, CloudBudgetError
 from jarvis.live_session import LiveSession, LiveSessionError, _PCMTrack
 from jarvis.realtime_bench import MODEL as REALTIME_MODEL, RealtimeBenchmarkSession
@@ -162,13 +162,17 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         catalog = [{"name": "HassTurnOn", "description": "Turn on an exposed device",
                     "inputSchema": {"type": "object"}}]
         bridge = AssistDelegation(client, catalog)
-        session = self.session(transport="websocket", assist_delegation=bridge)
+        request_signoff = Mock(return_value=False)
+        current_speech = Mock(return_value=True)
+        session = self.session(transport="websocket", assist_delegation=bridge,
+                               on_signoff_request=request_signoff, allow_assist_action=current_speech)
         with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
             await session.start()
 
         config = ws.sent[0]["session"]["delegation"]
         self.assertEqual(config["responses"]["model"], "gpt-6-luna")
-        self.assertEqual([tool["name"] for tool in config["responses"]["tools"]], ["HassTurnOn"])
+        self.assertEqual([tool["name"] for tool in config["responses"]["tools"]], ["HassTurnOn", END_CONVERSATION])
+        self.assertEqual(self.settings.pending["backend"]["response_limit"], 6)
 
         def emit(kind, delegation="task", **data):
             session._event({"type": "response.event", "delegation_id": delegation,
@@ -191,6 +195,9 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         emit("response.completed", response={"id": "ok", "status": "completed"})
         emit("response.completed", response={"id": "ok", "status": "completed"})
         await asyncio.wait_for(tool_started.wait(), 1)
+        self.assertTrue(session.assist_work_pending)
+        session._queue_audio(bytes(640))
+        self.output.assert_not_awaited()
         self.assertEqual(len([m for m in ws.sent if m["type"] == "response.create"]), 0)
         await session.send_audio(bytes(640))
         finish_tool.set()
@@ -201,6 +208,61 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([json.loads(m["output"])["outcome"] for m in outputs], ["rejected", "unverified"])
         self.assertNotIn("private Home Assistant response", str(ws.sent))
         self.assertEqual([m["type"] for m in ws.sent][-2:], ["response.item.create", "response.create"])
+        self.assertTrue(session.assist_work_pending)
+        emit("response.created", delegation=None, response={"id": "continued"})
+        emit("response.completed", delegation=None, response={"id": "continued", "status": "completed"})
+        self.assertFalse(session.assist_work_pending)
+        session.begin_turn()
+        self.assertFalse(session.assist_used_this_turn)
+        session._queue_audio(bytes(640))
+        await asyncio.sleep(0)
+        self.output.assert_awaited_once()
+        request_signoff.return_value = True
+        self.assertEqual(await session._execute_assist_call("signoff", END_CONVERSATION, "{}"), {"outcome": "accepted"})
+        current_speech.return_value = False
+        self.assertEqual((await session._execute_assist_call("seeded", "HassTurnOn", "{}"))["outcome"], "rejected")
+        client.call_tool.assert_awaited_once()
+
+    async def test_two_assist_requests_and_signoff_fit_one_standby_session(self):
+        ws = FakeWS()
+        client = SimpleNamespace(call_tool=AsyncMock(return_value={"outcome": "reported", "text": "{}"}))
+        catalog = [{"name": "HassTurnOn", "inputSchema": {"type": "object"}},
+                   {"name": "HassTurnOff", "inputSchema": {"type": "object"}}]
+        signoff = Mock(return_value=True)
+        session = self.session(transport="websocket", assist_delegation=AssistDelegation(client, catalog),
+                               on_signoff_request=signoff, allow_assist_action=lambda: True)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+
+        def event(kind, delegation, **kwargs):
+            session._event({"type": "response.event", "delegation_id": delegation, "event": {"type": kind, **kwargs}})
+
+        async def tool_turn(index, name, args):
+            session.begin_turn()
+            delegation = f"turn-{index}"
+            response = {"id": f"{delegation}-tool", "model": "gpt-6-luna", "status": "completed"}
+            session._event({"type": "session.delegation.created", "delegation": {
+                "target": "responses", "id": delegation, "response_id": response["id"]}})
+            self.assertTrue(session.assist_work_pending)
+            event("response.created", delegation, response=response)
+            event("response.output_item.done", delegation, item={
+                "type": "function_call", "call_id": f"call-{index}", "name": name, "arguments": args})
+            event("response.completed", delegation, response=response)
+            await session._delegation_task
+            continuation = {**response, "id": f"{delegation}-speak",
+                            "usage": {"input_tokens": 200, "output_tokens": 20}}
+            event("response.created", None, response=continuation)
+            event("response.completed", None, response=continuation)
+            self.assertFalse(session.assist_work_pending)
+
+        await tool_turn(1, "HassTurnOn", '{"name":"Reading light"}')
+        await tool_turn(2, "HassTurnOff", '{"name":"Reading light"}')
+        await tool_turn(3, END_CONVERSATION, "{}")
+        self.assertEqual(client.call_tool.await_count, 2)
+        signoff.assert_called_once_with()
+        self.assertIsNone(session.metrics.error)
+        self.assertTrue((await session.close()).finalization_confirmed)
+        self.assertIsNone(self.settings.pending)
 
     async def test_delegation_closes_at_the_reserved_response_limit(self):
         ws = FakeWS()

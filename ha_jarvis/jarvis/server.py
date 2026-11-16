@@ -39,6 +39,7 @@ from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, ster
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
 STANDBY_ARM_MS = 120_000
+ASSIST_TOKEN = re.compile(r"[A-Za-z0-9._~-]{1,2048}")
 DEFAULTS = {"ha_lan_url": "", "repetitions": 3, "standby_idle_seconds": DEFAULT_IDLE_SECONDS}
 LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
                  "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
@@ -935,13 +936,15 @@ class Bench:
         result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
                                              for x in result["trials"]) else "unavailable"
 
-    async def run_standby(self, gain_db, *, after_greeting, remember_context=False):
+    async def run_standby(self, gain_db, *, after_greeting, remember_context=False, assist_token=None):
         """Keep local wake available until explicitly stopped or the setup changes."""
         context = StandbyContext() if remember_context else None
+        uncertain_actions = set() if assist_token is not None else None
         try:
             while True:
                 await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
-                               after_greeting=after_greeting, standby_context=context)
+                               after_greeting=after_greeting, standby_context=context,
+                               assist_standby_token=assist_token, uncertain_actions=uncertain_actions)
                 result = self.results[0]
                 if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
                     self.results.pop(0)
@@ -960,7 +963,7 @@ class Bench:
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False,
-                  standby_context=None):
+                  standby_context=None, assist_standby_token=None, uncertain_actions=None):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -982,14 +985,21 @@ class Bench:
                 return
             if kind != "connection":
                 self.test["output_route"] = route
-            if assist_preview is not None:
-                token, domain, name = assist_preview
-                result["assist_preview"] = True
-                self.test["phase"] = "checking the selected Assist device"
+            if assist_preview is not None or assist_standby_token is not None:
+                if assist_preview is not None:
+                    token, domain, name = assist_preview
+                    target = (domain, name)
+                    result["assist_preview"] = True
+                    self.test["phase"] = "checking the selected Assist device"
+                else:
+                    token, target = assist_standby_token, None
+                    result["assist_standby"] = True
+                    self.test["phase"] = "checking the current Assist tool list"
                 origin = os.environ.get("JARVIS_ASSIST_ORIGIN", "http://127.0.0.1:8123")
                 client = await resources.enter_async_context(AssistClient(origin, token))
-                assist_delegation = AssistDelegation(client, await client.list_tools(), preview_target=(domain, name))
-                if await assist_delegation.preview_state("setup") not in ("on", "off"):
+                assist_delegation = AssistDelegation(client, await client.list_tools(), preview_target=target,
+                    uncertain_actions=uncertain_actions)
+                if target is not None and await assist_delegation.preview_state("setup") not in ("on", "off"):
                     raise ValueError("Assist could not uniquely resolve the selected light or switch")
             self.test["phase"] = "synchronizing Voice PE and starting capture"
             wake_kind = kind in ("wake_ack", "voice_turn")
@@ -1224,7 +1234,7 @@ def create_ui(bench):
         if not isinstance(data, dict) or set(data) != {"token"}:
             raise ValueError("Enter a Home Assistant access token")
         token = data["token"]
-        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{1,2048}", token):
+        if not isinstance(token, str) or not ASSIST_TOKEN.fullmatch(token):
             raise ValueError("Enter a valid Home Assistant access token")
         # This App uses host networking. Keep the destination out of the
         # request so the ingress route cannot send credentials to other hosts.
@@ -1386,6 +1396,10 @@ def create_ui(bench):
         remember_context = data.get("remember_context", False)
         if type(remember_context) is not bool or (remember_context and not standby):
             raise ValueError("Remembering recent exchanges is available only in wake standby")
+        assist_standby_token = data.get("assist_standby_token")
+        if assist_standby_token is not None and (not standby or data.get("allow_assist_standby") is not True
+                or not isinstance(assist_standby_token, str) or not ASSIST_TOKEN.fullmatch(assist_standby_token)):
+            raise ValueError("Explicitly enable Assist device control in wake standby and enter a local token")
         assist_preview = data.get("assist_preview")
         if assist_preview is not None:
             if (kind != "voice_turn" or standby or follow_up or preconnect
@@ -1393,7 +1407,7 @@ def create_ui(bench):
                     or not isinstance(assist_preview, dict) or set(assist_preview) != {"token", "domain", "name"}):
                 raise ValueError("Assist power control needs separate consent for a single voice preview")
             token, domain, name = (assist_preview[key] for key in ("token", "domain", "name"))
-            if (not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{1,2048}", token)
+            if (not isinstance(token, str) or not ASSIST_TOKEN.fullmatch(token)
                     or domain not in ("light", "switch") or not isinstance(name, str)
                     or not 0 < len(name.strip()) <= 128 or not name.isprintable()):
                 raise ValueError("Enter a Home Assistant token and the exact name of an exposed light or switch")
@@ -1430,7 +1444,8 @@ def create_ui(bench):
         if standby:
             bench.test["standby"] = True
             bench.task = asyncio.create_task(bench.run_standby(
-                gain_db, after_greeting=after_greeting, remember_context=remember_context))
+                gain_db, after_greeting=after_greeting, remember_context=remember_context,
+                assist_token=assist_standby_token))
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
                                                       follow_up=follow_up, preconnect=preconnect,

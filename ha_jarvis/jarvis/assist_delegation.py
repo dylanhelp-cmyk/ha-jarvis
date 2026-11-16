@@ -14,6 +14,7 @@ POWER_STATE = {"HassTurnOn": "on", "HassTurnOff": "off"}
 POWER_TOOL = re.compile(r"(?:assist__)?(?:intent__)?(HassTurnOn|HassTurnOff)")
 POWER_DOMAINS = {"fan", "humidifier", "input_boolean", "light", "switch"}
 UNVERIFIED = {"outcome": "unverified", "reason": "Assist replied but device state was not verified"}
+END_CONVERSATION = "jarvis_end_conversation"
 
 
 def _power_target(text):
@@ -68,16 +69,17 @@ def _live_context_state(text, domain, name):
 
 @dataclass
 class ResponseBatch:
-    delegation_id: str
+    delegation_id: str | None
     response_id: str
     calls: dict = field(default_factory=dict)
 
 
 class AssistDelegation:
-    def __init__(self, client, catalog, *, model="gpt-6-luna", preview_target=None):
+    def __init__(self, client, catalog, *, model="gpt-6-luna", preview_target=None, uncertain_actions=None):
         if model not in BACKEND_RATES:
             raise ValueError("Unsupported Assist reasoning model")
         self.client, self.model = client, model
+        self.uncertain_actions = uncertain_actions
         self.tools = {
             tool["name"]: {"type": "function", "name": tool["name"],
                            "description": str(tool.get("description") or "")[:1024],
@@ -109,21 +111,31 @@ class AssistDelegation:
         self._responses = set()
         self._calls = set()
 
-    def config(self):
+    def config(self, *, signoff=False):
+        tools = list(self.tools.values())
+        instructions = ("Use Assist functions only for an explicit request in the current spoken turn. "
+                        "Report success only when the App confirms the resulting state. "
+                        "Never retry an unknown outcome. Ask before acting on an ambiguous target.")
+        if signoff:
+            if END_CONVERSATION in self.tools:
+                raise ValueError("An Assist tool conflicts with the Jarvis conversation control")
+            tools.append({"type": "function", "name": END_CONVERSATION, "strict": False,
+                          "description": "End this conversation only when the user clearly says goodbye.",
+                          "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
+            instructions += (" For a clear sign-off, call jarvis_end_conversation and give a brief farewell. "
+                             "A thank-you or pause alone is not a sign-off.")
         return {"type": "responses", "responses": {
             "model": self.model, "reasoning": {"effort": "low"}, "max_output_tokens": BACKEND_OUTPUT_TOKENS,
             "service_tier": "default",
-            "tool_choice": "auto", "parallel_tool_calls": False, "tools": list(self.tools.values()),
-            "instructions": ("Use Assist functions only for an explicit user request. "
-                             "Report success only when the App confirms the resulting state. "
-                             "Never retry an unknown outcome. Ask before acting on an ambiguous target."),
+            "tool_choice": "auto", "parallel_tool_calls": False, "tools": tools,
+            "instructions": instructions,
         }}
 
     def observe(self, envelope):
         """Collect one completed, correlated response before any local side effect."""
         event = envelope.get("event")
         delegation_id = envelope.get("delegation_id")
-        if not isinstance(event, dict) or not isinstance(delegation_id, str):
+        if not isinstance(event, dict) or (delegation_id is not None and not isinstance(delegation_id, str)):
             return None
         kind = event.get("type")
         if kind == "response.created":
@@ -138,7 +150,7 @@ class AssistDelegation:
             self._current = ResponseBatch(delegation_id, response_id)
         elif self._current is not None and self._current.delegation_id == delegation_id:
             batch = self._current
-            if kind == "response.output_item.done":
+            if kind == "response.output_item.done" and delegation_id is not None:
                 item = event.get("item")
                 if not isinstance(item, dict) or item.get("type") != "function_call":
                     return None
@@ -172,12 +184,17 @@ class AssistDelegation:
             return _live_context_state(check.get("text"), domain, name)
         return None
 
+    def is_state_query(self, name):
+        return name == self._state_tool
+
     async def execute(self, call_id, name, encoded):
         if name not in self.tools:
             return {"outcome": "rejected", "reason": "Function was not offered by Assist"}
         try:
             arguments = json.loads(encoded)
         except (ValueError, RecursionError):
+            return {"outcome": "rejected", "reason": "Invalid function arguments"}
+        if not isinstance(arguments, dict):
             return {"outcome": "rejected", "reason": "Invalid function arguments"}
         match = POWER_TOOL.fullmatch(name)
         if self.preview_target is not None:
@@ -196,10 +213,29 @@ class AssistDelegation:
                 return {"outcome": "verified", "state": expected, "already_in_state": True}
             arguments = {"name": device_name, "domain": [domain]}
 
+        identity = None
+        if self.uncertain_actions is not None and name != self._state_tool:
+            try:
+                canonical = json.dumps(arguments, sort_keys=True, allow_nan=False, separators=(",", ":"))
+            except (ValueError, RecursionError):
+                return {"outcome": "rejected", "reason": "Invalid function arguments"}
+            identity = sha256(f"{name}\0{canonical}".encode("utf-8", errors="surrogatepass")).digest()
+            if identity in self.uncertain_actions:
+                return {"outcome": "unknown", "reason": "An earlier attempt is unconfirmed. Check the device state."}
+            self.uncertain_actions.add(identity)
         result = await self.client.call_tool(call_id, name, arguments)
         outcome = result["outcome"]
+        if identity is not None and outcome != "unknown":
+            self.uncertain_actions.discard(identity)
         if outcome != "reported":
             return {"outcome": outcome, "reason": result.get("reason", "Home Assistant reported a failure")}
+        if name == self._state_tool:
+            domain, device_name = arguments.get("domain"), arguments.get("name")
+            if isinstance(domain, str) and isinstance(device_name, str):
+                state = _live_context_state(result.get("text"), domain, device_name)
+                if isinstance(state, str) and 0 < len(state) <= 64 and state.isprintable():
+                    return {"outcome": "verified", "state": state}
+            return {"outcome": "unverified", "reason": "Assist did not return a unique state for that named device"}
 
         target = _power_target(result.get("text")) if self._state_tool and match else None
         if target and (self.preview_target is None or target[0] == self.preview_target[0]

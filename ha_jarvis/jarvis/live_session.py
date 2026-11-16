@@ -19,7 +19,8 @@ import aiohttp
 from aiortc import AudioStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from av import AudioFrame, AudioResampler
 
-from .cloud_settings import BACKEND_RESPONSE_LIMIT, CloudBudgetError
+from .assist_delegation import END_CONVERSATION
+from .cloud_settings import BACKEND_RESPONSE_LIMIT, STANDBY_BACKEND_RESPONSE_LIMIT, CloudBudgetError
 
 
 RATE = 16000
@@ -98,18 +99,27 @@ class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
                  startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
                  output_buffer_seconds=1, assist_delegation=None,
-                 on_input_transcript=None, on_signoff_request=None, on_timed_transcript=None, prior_exchanges=()):
+                 on_input_transcript=None, on_signoff_request=None, on_timed_transcript=None, prior_exchanges=(),
+                 allow_assist_action=None):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
         if assist_delegation is not None and (transport != "websocket" or greeting):
             raise ValueError("Assist delegation requires a conversational WebSocket session")
-        if on_signoff_request is not None and (transport != "websocket" or greeting or assist_delegation is not None):
-            raise ValueError("Sign-off requires a voice-only WebSocket session")
-        if prior_exchanges and (greeting or assist_delegation is not None):
-            raise ValueError("Prior voice exchanges cannot seed a greeting or device-control session")
+        if on_signoff_request is not None and (transport != "websocket" or greeting):
+            raise ValueError("Sign-off requires a conversational WebSocket session")
+        if prior_exchanges and (greeting or (assist_delegation is not None and allow_assist_action is None)):
+            raise ValueError("Resumed conversations with Assist require a fresh spoken request")
         self.assist_delegation = assist_delegation
+        self.allow_assist_action = allow_assist_action
+        self._assist_response_limit = (STANDBY_BACKEND_RESPONSE_LIMIT if on_signoff_request is not None
+                                       else BACKEND_RESPONSE_LIMIT)
+        self._assist_active = set()
+        self._assist_finished = set()
+        self._assist_continuing = False
+        self.assist_used_this_turn = False
+        self._assist_unknown_this_turn = False
         self._delegation_task = None
         self._assist_result_submitted = False
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
@@ -152,7 +162,7 @@ class LiveSession:
                   "store": False, "delegation": {"type": "client"},
                   "audio": {"output": {"voice": VOICE}}}
         if self.assist_delegation is not None:
-            config["delegation"] = self.assist_delegation.config()
+            config["delegation"] = self.assist_delegation.config(signoff=self.on_signoff_request is not None)
         elif self.on_signoff_request is not None:
             config["delegation"]["acknowledgement_delay_ms"] = 800
         if self.greeting:
@@ -171,7 +181,8 @@ class LiveSession:
         if self._attempt or self._disposed:
             raise LiveSessionError("A LiveSession can start only once")
         backend_model = self.assist_delegation.model if self.assist_delegation is not None else None
-        self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport, backend_model=backend_model)
+        self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport, backend_model=backend_model,
+            backend_response_limit=self._assist_response_limit if backend_model is not None else BACKEND_RESPONSE_LIMIT)
         self._started_at = time.monotonic()
         try:
             self._http = aiohttp.ClientSession(
@@ -275,9 +286,22 @@ class LiveSession:
             if not self._closing and not self._final.is_set():
                 self._fail("Cloud audio track ended unexpectedly")
 
+    @property
+    def assist_work_pending(self):
+        return bool(self._assist_active or self._assist_continuing
+                    or (self._delegation_task is not None and not self._delegation_task.done()))
+
+    def begin_turn(self):
+        self._assist_result_submitted = False
+        self.assist_used_this_turn = False
+        self._assist_unknown_this_turn = False
+
+    def _hold_assist_audio(self):
+        return (self.assist_delegation is not None and not self._assist_result_submitted
+                and (self.assist_delegation.preview_target is not None or self.assist_work_pending))
+
     def _queue_audio(self, pcm):
-        if (self._closing or not pcm or (self.assist_delegation is not None
-                and self.assist_delegation.preview_target is not None and not self._assist_result_submitted)):
+        if self._closing or not pcm or self._hold_assist_audio():
             return
         if len(pcm) % 2 or self._output_bytes + len(pcm) > self._output_limit_bytes:
             self._fail("Cloud output queue exceeded its limit or contained invalid PCM")
@@ -297,7 +321,8 @@ class LiveSession:
             while True:
                 pcm = await self._output.get()
                 self._output_bytes -= len(pcm)
-                await self.on_audio(pcm, RATE)
+                if not self._hold_assist_audio():
+                    await self.on_audio(pcm, RATE)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -333,12 +358,20 @@ class LiveSession:
             self._transcript_event(kind, event)
         elif kind == "error":
             self._fail("Cloud session reported an error")
-        elif kind == "session.delegation.created" and self.assist_delegation is None:
-            if self.on_signoff_request is None:
+        elif kind == "session.delegation.created":
+            delegation = event.get("delegation")
+            if self._closing or not self._ready.is_set() or not isinstance(delegation, dict):
+                return
+            if self.assist_delegation is not None:
+                response_id = delegation.get("response_id")
+                if (delegation.get("target") == "responses" and isinstance(response_id, str)
+                        and 0 < len(response_id) <= 128 and response_id not in self._assist_finished):
+                    self._assist_active.add(response_id)
+                    self.assist_used_this_turn = True
+            elif self.on_signoff_request is None:
                 self._fail("Unexpected delegation in voice-only benchmark")
-            elif not self._closing and self._ready.is_set():
-                delegation = event.get("delegation")
-                if not isinstance(delegation, dict) or delegation.get("target") != "client":
+            else:
+                if delegation.get("target") != "client":
                     return
                 ident = delegation.get("id")
                 if (not isinstance(ident, str) or not 0 < len(ident) <= 128
@@ -354,17 +387,30 @@ class LiveSession:
                         "response.created", "response.completed", "response.failed",
                         "response.incomplete", "response.cancelled"):
                     response = nested.get("response") or {}
-                    count = self.settings.observe_backend_response(self._attempt, response.get("id"),
+                    response_id = response.get("id")
+                    count = self.settings.observe_backend_response(self._attempt, response_id,
                         usage=response.get("usage"), model=response.get("model"))
-                    if count > BACKEND_RESPONSE_LIMIT:
+                    if count > self._assist_response_limit:
                         self._fail("Delegated response budget limit reached")
                         return
+                    if nested["type"] == "response.created":
+                        if response_id not in self._assist_finished:
+                            self._assist_active.add(response_id)
+                            self.assist_used_this_turn = True
+                            self._assist_continuing = False
+                    else:
+                        self._assist_active.discard(response_id)
+                        self._assist_finished.add(response_id)
                 if self._closing or self._failed.is_set():
                     return
                 batch = self.assist_delegation.observe(event)
                 if batch:
                     if self._delegation_task is not None and not self._delegation_task.done():
                         raise ValueError("Overlapping Assist execution")
+                    if count >= self._assist_response_limit:
+                        self._fail("Delegated response budget cannot cover the continuation")
+                        return
+                    self._assist_result_submitted = False
                     self._delegation_task = self._spawn(self._return_assist_results(batch))
             except (CloudBudgetError, TypeError, AttributeError):
                 self.settings.mark_backend_unconfirmed(self._attempt)
@@ -386,17 +432,35 @@ class LiveSession:
             for call_id, (name, arguments) in batch.calls.items():
                 if self._closing or self._final.is_set():
                     return
-                result = await self.assist_delegation.execute(call_id, name, arguments)
+                result = await self._execute_assist_call(call_id, name, arguments)
                 if self._closing or self._final.is_set():
                     return
                 await self._ws.send_json({"type": "response.item.create", "event_id": uuid.uuid4().hex,
                     "item": {"type": "function_call_output", "call_id": call_id,
                              "output": json.dumps(result, allow_nan=False)}})
             if not self._closing and not self._final.is_set():
-                await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
+                self._assist_continuing = True
                 self._assist_result_submitted = True
+                await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
         except Exception:
             self._fail("Could not return Assist delegation results")
+
+    async def _execute_assist_call(self, call_id, name, arguments):
+        if name == END_CONVERSATION and self.on_signoff_request is not None:
+            try:
+                empty = json.loads(arguments) == {}
+            except (ValueError, RecursionError):
+                empty = False
+            if empty and self.on_signoff_request():
+                return {"outcome": "accepted"}
+            return {"outcome": "rejected", "reason": "The current speech does not confirm a sign-off"}
+        if self.allow_assist_action is not None and not self.allow_assist_action():
+            return {"outcome": "rejected", "reason": "An explicit current spoken request is required"}
+        if self._assist_unknown_this_turn and not self.assist_delegation.is_state_query(name):
+            return {"outcome": "unknown", "reason": "An earlier attempt in this turn is unconfirmed. Check device state."}
+        result = await self.assist_delegation.execute(call_id, name, arguments)
+        self._assist_unknown_this_turn |= result["outcome"] == "unknown"
+        return result
 
     def _transcript_event(self, kind, event):
         delta = event.get("delta")

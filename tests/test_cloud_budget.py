@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from jarvis.cloud_settings import CloudBudgetError, CloudSettings, _backend_allowance
+from jarvis.cloud_settings import STANDBY_BACKEND_RESPONSE_LIMIT, CloudBudgetError, CloudSettings, _backend_allowance
 
 
 class CloudBudgetTests(unittest.TestCase):
@@ -106,6 +106,17 @@ class CloudBudgetTests(unittest.TestCase):
         self.settings.mark_backend_unconfirmed(attempt)
         self.settings.finalize(attempt, 60)
         self.assertAlmostEqual(self.settings.spent_usd, reserved)
+
+    def test_assist_standby_reserves_the_full_continuation_budget(self):
+        model = "gpt-6-luna"
+        attempt = self.settings.reserve_attempt(transport="websocket", backend_model=model,
+                                                backend_response_limit=STANDBY_BACKEND_RESPONSE_LIMIT)
+        reserved = 0.05 + 7 * _backend_allowance(model)
+        self.assertAlmostEqual(self.settings.pending["reserved_usd"], reserved)
+        reloaded = CloudSettings(self.folder.name)
+        reloaded.mark_backend_unconfirmed(attempt)
+        reloaded.finalize(attempt, 60)
+        self.assertAlmostEqual(reloaded.spent_usd, reserved)
 
     def test_legacy_file_and_missing_key(self):
         path = Path(self.folder.name) / "openai-private.json"

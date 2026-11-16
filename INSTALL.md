@@ -16,7 +16,7 @@ In wake standby, try a clear sign-off such as “Goodbye” or “That's all for
 
 To try resuming a topic, select **Remember up to two recent exchanges** before enabling wake standby. Ask “What is the capital of France?” and let Jarvis return to **armed for Hey Jarvis** on its own. Within a minute, wake it again and ask “Which river runs through that city?” The option shares the recent text with GPT-Live on the next wake. Jarvis keeps it in memory and clears it when standby stops.
 
-For an Assist test, use a non-admin Home Assistant access token and choose an exposed light or switch by its exact name. In **Voice preview**, enable the one-command option, fill in the device and token, review the microphone consent, and start. When armed, say “Hey Jarvis, turn on [device name]” or ask to turn it off. The token is held in memory for this run.
+To test Assist in standby, select **Stay ready for “Hey Jarvis”** and **Allow control of Assist-exposed devices** in **Voice preview**. Enter a non-admin Home Assistant access token locally, review the microphone consent and enable standby. Ask for an exposed test light by name, check that it changes state, then ask Jarvis to restore that light as a warm follow-up. Try “Goodbye” to close the conversation. Jarvis keeps the token in memory until standby stops. You can also select Assist without standby to try a single named light or switch.
 
 ## Recovery
 

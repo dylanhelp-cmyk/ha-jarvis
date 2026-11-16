@@ -106,6 +106,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 third_arm.set()
 
         context = None
+        token = "test.assist.standby"
+        assist = AsyncMock()
+        assist.__aenter__.return_value = assist
+        assist.list_tools.return_value = [{"name": "HassTurnOn", "inputSchema": {"type": "object"}}]
 
         async def voice_turn(_device, _settings, result, *_args, **kwargs):
             nonlocal context
@@ -115,6 +119,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["idle_seconds"], 6)
             self.assertEqual(result["standby_idle_seconds"], 6)
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
+            self.assertIs(kwargs["assist_delegation"].client, assist)
+            self.assertEqual(result["assist_standby"], True)
             context = kwargs["standby_context"]
             self.assertIsNotNone(context)
             context.save((("Private question", "Private reply"),))
@@ -135,6 +141,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch.object(device, "end", new_callable=AsyncMock),
               patch.object(self.bench, "alignment_delay", return_value=35),
               patch.object(self.bench, "acknowledgment_status", return_value={"cached_on_device": True}),
+              patch("jarvis.server.AssistClient", return_value=assist) as assist_client,
               patch("jarvis.server.verified_render", return_value=("clip", b"pcm")),
               patch("jarvis.conversation_trial.run_voice_turn", side_effect=voice_turn) as cloud):
             body = {"kind": "voice_turn", "standby": True, "after_greeting": True, "confirm_paid": True,
@@ -146,10 +153,16 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             body["remember_context"] = True
             response = await self.ui.post("/api/tests", json={**body, "standby": False})
             self.assertEqual(response.status, 400)
+            body["assist_standby_token"] = token
+            response = await self.ui.post("/api/tests", json=body)
+            self.assertEqual(response.status, 400)
+            assist_client.assert_not_called()
+            body["allow_assist_standby"] = True
             response = await self.ui.post("/api/tests", json=body)
             self.assertEqual(response.status, 202)
             await asyncio.wait_for(second_arm.wait(), 1)
             cloud.assert_not_called()
+            self.assertEqual(assist.list_tools.await_count, 2)
             self.assertEqual(len(self.bench.results), 1)
             device.wake_details = {"ack_cache_id": "clip"}
             device.wake_event.set()
@@ -159,6 +172,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bench.test["running"])
             self.assertEqual(len(set(arms)), 3)
             self.assertEqual(context.take(), ())
+            self.assertEqual(assist.list_tools.await_count, 3)
+            assist.call_tool.assert_not_awaited()
+            for path in ("/api/status", "/api/results", "/api/diagnostics"):
+                response = await self.ui.get(path)
+                self.assertNotIn(token, await response.text())
 
     async def test_alignment_retries_a_discontinuous_render_and_requires_two_matches(self):
         from types import SimpleNamespace

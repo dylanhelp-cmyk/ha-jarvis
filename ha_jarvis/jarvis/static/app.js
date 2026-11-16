@@ -42,9 +42,12 @@ function readiness() {
   $('voice-turn-consent').hidden = kind !== 'voice_turn';
   startup.disabled = running || busy;
   const assist = kind === 'voice_turn' && $('voice-assist').checked;
-  const standby = kind === 'voice_turn' && !assist && $('voice-standby').checked;
+  const standby = kind === 'voice_turn' && $('voice-standby').checked;
   $('voice-assist-fields').hidden = !assist;
-  $('voice-standby').disabled = assist;
+  $('voice-assist-target').hidden = !assist || standby;
+  $('voice-assist-mode').textContent = standby
+    ? 'Allow control of Assist-exposed devices while wake standby is enabled.'
+    : 'Allow one on or off command for a named Assist-exposed light or switch during this preview.';
   $('voice-context-options').hidden = !standby;
   $('voice-remember-context').disabled = running || busy;
   $('voice-preconnect').disabled = standby || assist;
@@ -60,10 +63,11 @@ function readiness() {
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
-  else if (assist && (!$('voice-assist-name').value.trim() || !$('voice-assist-token').value.trim())) reason = 'Enter the selected device name and a local token.';
+  else if (assist && !$('voice-assist-token').value.trim()) reason = 'Enter a local Home Assistant token.';
+  else if (assist && !standby && !$('voice-assist-name').value.trim()) reason = 'Enter the selected device name.';
   else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for the selected voice mode.';
   $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for an authorized cloud voice preview.' : 'Ready for a local test.');
-  $('run-test').textContent = assist ? 'Run Assist voice preview' : standby ? 'Enable wake standby' : 'Run ' + labels[kind].toLowerCase();
+  $('run-test').textContent = standby ? 'Enable wake standby' : assist ? 'Run Assist voice preview' : 'Run ' + labels[kind].toLowerCase();
   $('cancel-test').textContent = state?.test.standby ? 'Stop wake standby' : 'Stop test';
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
@@ -332,20 +336,23 @@ $('run-test').addEventListener('click', () => {
     if (!$('voice-turn-confirmed').checked) return;
     $('voice-turn-confirmed').checked = false;
     const assist = $('voice-assist').checked;
-    const standby = !assist && $('voice-standby').checked;
+    const standby = $('voice-standby').checked;
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true, standby,
       allow_repeated_wake_audio: standby, remember_context: standby && $('voice-remember-context').checked,
       input_gain_db: Number($('voice-input-gain').value),
-      follow_up: !assist && (standby || $('voice-follow-up').checked),
+      follow_up: standby || (!assist && $('voice-follow-up').checked),
       after_greeting: $('voice-after-greeting').checked,
       preconnect: !assist && !standby && $('voice-preconnect').checked});
     $('voice-remember-context').checked = false;
-    if (assist) {
+    if (assist && standby) {
+      body.allow_assist_standby = true;
+      body.assist_standby_token = $('voice-assist-token').value.trim();
+    } else if (assist) {
       body.allow_assist_power_action = true;
       body.assist_preview = {token: $('voice-assist-token').value.trim(),
         domain: $('voice-assist-domain').value, name: $('voice-assist-name').value.trim()};
-      $('voice-assist-token').value = '';
     }
+    if (assist) $('voice-assist-token').value = '';
   }
   action(() => api('api/tests', 'POST', body));
 });

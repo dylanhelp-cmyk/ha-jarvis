@@ -1,3 +1,8 @@
+# 0.2.68
+
+- Enable optional Assist device control in wake standby. Refresh the local Assist catalog before arming, keep the microphone open while delegated work is pending and preserve spoken sign-off.
+- Keep the Home Assistant token in local memory for this standby activation. Reads and verifiable power outcomes use Assist state, and unconfirmed actions are guarded against repeat dispatch.
+
 # 0.2.67
 
 - Optionally carry up to two recent exchanges into the next wake standby conversation within 60 seconds. Jarvis keeps the text only in memory and clears it after a confirmed sign-off or when standby stops.
