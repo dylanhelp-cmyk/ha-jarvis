@@ -1,3 +1,7 @@
+# 0.2.67
+
+- Optionally carry up to two recent exchanges into the next wake standby conversation within 60 seconds. Jarvis keeps the text only in memory and clears it after a confirmed sign-off or when standby stops.
+
 # 0.2.66
 
 - Lower the cached wake greeting by a further 4 dB to bring it closer to the perceived loudness of live replies. The App automatically replaces the cached playback on the Voice PE using the existing approved clip.

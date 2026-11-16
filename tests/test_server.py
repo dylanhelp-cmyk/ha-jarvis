@@ -105,13 +105,19 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             elif len(arms) == 3:
                 third_arm.set()
 
+        context = None
+
         async def voice_turn(_device, _settings, result, *_args, **kwargs):
+            nonlocal context
             self.assertTrue(device.wake_event.is_set())
             self.assertTrue(kwargs["follow_up"])
             self.assertTrue(kwargs["after_greeting"])
             self.assertEqual(kwargs["idle_seconds"], 6)
             self.assertEqual(result["standby_idle_seconds"], 6)
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
+            context = kwargs["standby_context"]
+            self.assertIsNotNone(context)
+            context.save((("Private question", "Private reply"),))
             result["cloud"] = {"finalization_confirmed": True}
             result["status"] = "unavailable"
             return []
@@ -137,6 +143,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
             self.assertIsNone(self.bench.task)
             body["allow_repeated_wake_audio"] = True
+            body["remember_context"] = True
+            response = await self.ui.post("/api/tests", json={**body, "standby": False})
+            self.assertEqual(response.status, 400)
             response = await self.ui.post("/api/tests", json=body)
             self.assertEqual(response.status, 202)
             await asyncio.wait_for(second_arm.wait(), 1)
@@ -149,6 +158,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await self.bench.cancel()
             self.assertFalse(self.bench.test["running"])
             self.assertEqual(len(set(arms)), 3)
+            self.assertEqual(context.take(), ())
 
     async def test_alignment_retries_a_discontinuous_render_and_requires_two_matches(self):
         from types import SimpleNamespace

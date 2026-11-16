@@ -12,7 +12,7 @@ import numpy as np
 
 from .audio import RATE
 from .device import output_route
-from .lifecycle import ConversationPolicy, DEFAULT_IDLE_SECONDS, SignOffRequest
+from .lifecycle import CONTEXT_EXCHANGES, ConversationPolicy, DEFAULT_IDLE_SECONDS, ExchangeTranscript, SignOffRequest
 from .live_bench import BenchReply
 from .live_session import LiveSession
 from .playback import RATE as RENDER_RATE
@@ -413,7 +413,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
                          follow_up=False, wait_for_preconnected_wake=None, standby=False,
-                         assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS):
+                         assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS,
+                         standby_context=None):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -421,13 +422,25 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
     output = None
     closure_policy = ConversationPolicy(idle_seconds=idle_seconds) if standby else None
     signoff = SignOffRequest() if standby else None
+    transcript = ExchangeTranscript() if standby_context is not None else None
+    recent = deque(maxlen=CONTEXT_EXCHANGES)
+    prior_exchanges = standby_context.take() if standby_context is not None else ()
 
     def request_signoff():
         signoff.requested = True
 
+    def collect_transcript(speaker, delta, start_ms, end_ms):
+        if output is not None:
+            transcript.append(speaker, delta, start_ms, end_ms)
+
     def finish_turn():
-        if signoff is not None and signoff.finish():
+        signed_off = signoff is not None and signoff.finish()
+        if signed_off:
             closure_policy.request_end(clear_closing_intent=True)
+        if transcript is not None:
+            exchange = transcript.finish()
+            if exchange is not None and not signed_off:
+                recent.append(exchange)
 
     def set_output(reply):
         nonlocal output
@@ -439,6 +452,10 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
 
     result["connection_start"] = "before_wake" if preconnect else "on_wake"
     instructions = STANDBY_INSTRUCTIONS if standby else INSTRUCTIONS
+    if standby_context is not None:
+        result["resumed_context_exchanges"] = len(prior_exchanges)
+        instructions += (" Use any earlier exchanges only as background for the next spoken request. "
+                         "Wait for new speech before responding.")
     if assist_delegation is not None:
         instructions = ("You are Jarvis, a concise British-style voice assistant. Do not greet. "
                         "For an explicit request to turn a named light or switch on or off, Generate <|SpawnThinking|>. "
@@ -447,7 +464,9 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                           max_seconds=60 if follow_up or preconnect else 30,
                           startup_timeout=3, instructions=instructions, assist_delegation=assist_delegation,
                           on_input_transcript=signoff.append if signoff is not None else None,
-                          on_signoff_request=request_signoff if signoff is not None else None)
+                          on_signoff_request=request_signoff if signoff is not None else None,
+                          on_timed_transcript=collect_transcript if transcript is not None else None,
+                          prior_exchanges=prior_exchanges)
     try:
         phase("preconnecting to GPT-Live" if preconnect else
               "connecting to GPT-Live while the cached acknowledgment plays")
@@ -546,6 +565,11 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 await asyncio.wait_for(ws.send_json({"type": "play_stop",
                     "playback_id": wake["ack_playback_id"], "generation": wake["ack_generation"]}), 1)
         metrics = await session.close()
+        if (standby_context is not None and result.get("conversation_end") in ("inactivity", "session_limit")
+                and not closure_policy.ending_requested and metrics.finalization_confirmed
+                and metrics.close_reason == "close_requested" and not metrics.error):
+            standby_context.save(recent)
+            result["remembered_context_exchanges"] = len(recent)
         profile = "wake standby" if standby else ("warm follow-up preview" if follow_up else "one-turn preview")
         if assist_delegation is not None:
             profile = "single-device Assist preview"

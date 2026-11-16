@@ -1,5 +1,7 @@
+import asyncio
 import unittest
-from jarvis.lifecycle import ConversationPolicy, SignOffRequest
+from unittest.mock import patch
+from jarvis.lifecycle import ConversationPolicy, ExchangeTranscript, SignOffRequest, StandbyContext
 
 
 class LifecycleTests(unittest.TestCase):
@@ -49,6 +51,37 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(request.finish(), expected)
                 self.assertEqual(request.text, "")
                 self.assertFalse(request.requested)
+
+
+    def test_exchange_skips_stale_incomplete_and_oversized_transcript_fragments(self):
+        transcript = ExchangeTranscript()
+        transcript.append("user", "Which", 50, 500)
+        transcript.append("assistant", "The Seine.", 1500, 1900)
+        transcript.append("user", " river?", 510, 750)
+        self.assertEqual(transcript.finish(), ("Which river?", "The Seine."))
+        transcript.append("assistant", "Late fragment", 1800, 1910)
+        transcript.append("user", "How long is it?", 2200, 2500)
+        self.assertIsNone(transcript.finish())
+        transcript.append("user", "How long is it?", 2700, 3000)
+        transcript.append("assistant", "a" * 641, 3500, 3700)
+        transcript.append("assistant", "Too late", 3710, 3730)
+        self.assertIsNone(transcript.finish())
+
+
+class StandbyContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_is_bounded_consumable_and_expires_without_a_wake(self):
+        history = StandbyContext()
+        pairs = (("First", "One"), ("Second", "Two"), ("Third", "Three"))
+        history.save(pairs)
+        self.assertEqual(history.take(), pairs[-2:])
+        self.assertEqual(history.take(), ())
+        with patch("jarvis.lifecycle.CONTEXT_SECONDS", 0):
+            history.save(pairs)
+            self.assertEqual(history.take(), ())
+            history.save(pairs)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(history._exchanges, ())
 
 
 if __name__ == "__main__": unittest.main()

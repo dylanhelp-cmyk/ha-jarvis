@@ -14,6 +14,8 @@ To keep the preview ready between uses, select **Stay ready for “Hey Jarvis”
 
 In wake standby, try a clear sign-off such as “Goodbye” or “That's all for now.” Jarvis gives you two seconds after the farewell to speak again. If GPT-Live does not confirm the sign-off, the inactivity timeout still applies.
 
+To try resuming a topic, select **Remember up to two recent exchanges** before enabling wake standby. Ask “What is the capital of France?” and let Jarvis return to **armed for Hey Jarvis** on its own. Within a minute, wake it again and ask “Which river runs through that city?” The option shares the recent text with GPT-Live on the next wake. Jarvis keeps it in memory and clears it when standby stops.
+
 For an Assist test, use a non-admin Home Assistant access token and choose an exposed light or switch by its exact name. In **Voice preview**, enable the one-command option, fill in the device and token, review the microphone consent, and start. When armed, say “Hey Jarvis, turn on [device name]” or ask to turn it off. The token is held in memory for this run.
 
 ## Recovery

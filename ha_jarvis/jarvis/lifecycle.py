@@ -1,8 +1,11 @@
-"""Local rules for closing a conversation."""
+"""Local rules for ending and resuming conversations."""
+import asyncio
 from dataclasses import dataclass
 import re
 
 DEFAULT_IDLE_SECONDS = 10
+CONTEXT_SECONDS = 60
+CONTEXT_EXCHANGES = 2
 SIGN_OFFS = frozenset({"bye", "goodbye", "good bye", "good night", "that's all", "that's all for now",
                        "that's it for now", "that will be all", "that'll be all", "we're done", "end the conversation",
                        "stop listening", "you can stop listening", "you can go now", "talk to you later"})
@@ -34,6 +37,58 @@ class SignOffRequest:
         self.text = ""
         self.requested = self.overflow = False
         return confirmed
+
+
+class StandbyContext:
+    """Keep only the previous session's recent exchanges until the next wake."""
+
+    def __init__(self):
+        self._exchanges = ()
+        self._expiry = None
+
+    def save(self, exchanges):
+        self.clear()
+        if exchanges:
+            self._exchanges = tuple(exchanges)[-CONTEXT_EXCHANGES:]
+            self._expiry = asyncio.get_running_loop().call_later(CONTEXT_SECONDS, self.clear)
+
+    def take(self):
+        fresh = self._expiry is not None and asyncio.get_running_loop().time() < self._expiry.when()
+        exchanges = self._exchanges if fresh else ()
+        self.clear()
+        return exchanges
+
+    def clear(self):
+        self._exchanges = ()
+        if self._expiry is not None:
+            self._expiry.cancel()
+            self._expiry = None
+
+
+class ExchangeTranscript:
+    """Pair bounded transcript fragments using their position in the Live session."""
+
+    def __init__(self):
+        self._previous_reply_end = 0
+        self._parts = {}
+
+    def append(self, speaker, delta, start_ms, end_ms):
+        if start_ms < self._previous_reply_end:
+            return
+        text, first, last = self._parts.get(speaker, ("", start_ms, end_ms))
+        limit = 160 if speaker == "user" else 640
+        if text is not None:
+            text = text + delta if len(text) + len(delta) <= limit else None
+        self._parts[speaker] = (text, min(first, start_ms), max(last, end_ms))
+
+    def finish(self):
+        user, _, user_end = self._parts.get("user", (None, 0, 0))
+        assistant, assistant_start, assistant_end = self._parts.get("assistant", (None, 0, 0))
+        self._parts.clear()
+        self._previous_reply_end = max(self._previous_reply_end, assistant_end)
+        if user and assistant and user_end <= assistant_start and user.strip() and assistant.strip():
+            return user.strip(), assistant.strip()
+        return None
 
 
 @dataclass

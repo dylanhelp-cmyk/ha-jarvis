@@ -245,3 +245,7 @@ App 0.2.65 handles clear sign-offs in wake standby using the existing GPT-Live c
 App 0.2.65 is installed with the quieter greeting cached and the 10-second fallback saved. The internal speaker aligned at 31.3 ms with both references detected. No cloud call ran during deployment.
 
 App 0.2.66 lowers the approved greeting by a further 4 dB, for a total attenuation of 10 dB from the source. The playback cache identity changes, and the browser preview uses the same gain as the Voice PE cache. Check perceived level against the next live reply at the usual speaker volume.
+
+App 0.2.66 passed all 176 offline tests and is installed. The Voice PE confirmed the quieter cache. Both plays were detected in a local internal-speaker calibration at 32.9 ms. Perceived loudness against a live reply still needs a listening check. No API calls ran.
+
+App 0.2.67 adds optional short-term context to voice-only wake standby. On normal close it keeps at most two recent timestamp-matched exchanges for 60 seconds in App memory. The next wake can seed them as dialogue with GPT-Live storage disabled. The option is off by default. Context is consumed at wake and cleared after a sign-off, cancellation or standby exit. Results include exchange counts without transcript text. Exercise a two-wake reference to the previous topic on hardware before treating resumption as verified. [GPT-Live session history](https://developers.openai.com/api/docs/guides/live-conversations#seed-a-session-with-prior-conversation)

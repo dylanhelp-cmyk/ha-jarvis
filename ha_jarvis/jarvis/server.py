@@ -31,7 +31,7 @@ from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
 from .device import Device, output_route
-from .lifecycle import DEFAULT_IDLE_SECONDS
+from .lifecycle import DEFAULT_IDLE_SECONDS, StandbyContext
 from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
 from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, stereo_pcm
@@ -457,7 +457,7 @@ class Bench:
         return match, detected_at, bounds[0]
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False,
-                                 assist_delegation=None, after_greeting=False):
+                                 assist_delegation=None, after_greeting=False, standby_context=None):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_streamed_reply
 
@@ -487,7 +487,7 @@ class Bench:
                                        gain_db=gain_db, follow_up=follow_up,
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
                                        assist_delegation=assist_delegation, after_greeting=after_greeting,
-                                       idle_seconds=idle_seconds)
+                                       idle_seconds=idle_seconds, standby_context=standby_context)
         if not replies:
             return
         await asyncio.sleep(.25)
@@ -935,26 +935,32 @@ class Bench:
         result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
                                              for x in result["trials"]) else "unavailable"
 
-    async def run_standby(self, gain_db, *, after_greeting):
+    async def run_standby(self, gain_db, *, after_greeting, remember_context=False):
         """Keep local wake available until explicitly stopped or the setup changes."""
-        while True:
-            await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
-                           after_greeting=after_greeting)
-            result = self.results[0]
-            if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
-                self.results.pop(0)
-            elif (not result.get("cloud", {}).get("finalization_confirmed")
-                    or result["status"] == "failed" or result.get("conversation_end") == "error"):
-                return
-            device = self.device.snapshot()
-            if (not device["connected"] or device.get("muted") or not device.get("raw_ready")
-                    or self.alignment_delay() is None or not self.acknowledgment_status()["cached_on_device"]
-                    or self.cloud_settings.public()["paid_retry_blocked"]):
-                return
-            self.test = {"running": True, "id": uuid.uuid4().hex, "phase": "rearming for Hey Jarvis", "standby": True}
+        context = StandbyContext() if remember_context else None
+        try:
+            while True:
+                await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
+                               after_greeting=after_greeting, standby_context=context)
+                result = self.results[0]
+                if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
+                    self.results.pop(0)
+                elif (not result.get("cloud", {}).get("finalization_confirmed")
+                        or result["status"] == "failed" or result.get("conversation_end") == "error"):
+                    return
+                device = self.device.snapshot()
+                if (not device["connected"] or device.get("muted") or not device.get("raw_ready")
+                        or self.alignment_delay() is None or not self.acknowledgment_status()["cached_on_device"]
+                        or self.cloud_settings.public()["paid_retry_blocked"]):
+                    return
+                self.test = {"running": True, "id": uuid.uuid4().hex, "phase": "rearming for Hey Jarvis", "standby": True}
+        finally:
+            if context is not None:
+                context.clear()
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
-                  follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False):
+                  follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False,
+                  standby_context=None):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -1018,7 +1024,8 @@ class Bench:
                 return
             if kind == "voice_turn":
                 await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby,
-                                              assist_delegation=assist_delegation, after_greeting=after_greeting)
+                                              assist_delegation=assist_delegation, after_greeting=after_greeting,
+                                              standby_context=standby_context)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -1376,6 +1383,9 @@ def create_ui(bench):
             raise ValueError("Wake standby uses the voice preview and connects only after wake")
         if standby and data.get("allow_repeated_wake_audio") is not True:
             raise ValueError("Explicitly authorize cleaned microphone audio after each wake while standby is enabled")
+        remember_context = data.get("remember_context", False)
+        if type(remember_context) is not bool or (remember_context and not standby):
+            raise ValueError("Remembering recent exchanges is available only in wake standby")
         assist_preview = data.get("assist_preview")
         if assist_preview is not None:
             if (kind != "voice_turn" or standby or follow_up or preconnect
@@ -1419,7 +1429,8 @@ def create_ui(bench):
             bench.test["input_gain_db"] = gain_db
         if standby:
             bench.test["standby"] = True
-            bench.task = asyncio.create_task(bench.run_standby(gain_db, after_greeting=after_greeting))
+            bench.task = asyncio.create_task(bench.run_standby(
+                gain_db, after_greeting=after_greeting, remember_context=remember_context))
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
                                                       follow_up=follow_up, preconnect=preconnect,

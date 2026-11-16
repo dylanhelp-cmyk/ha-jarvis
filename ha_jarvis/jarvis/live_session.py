@@ -98,7 +98,7 @@ class LiveSession:
     def __init__(self, settings, *, on_audio, transport="webrtc", max_seconds=60,
                  startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
                  output_buffer_seconds=1, assist_delegation=None,
-                 on_input_transcript=None, on_signoff_request=None):
+                 on_input_transcript=None, on_signoff_request=None, on_timed_transcript=None, prior_exchanges=()):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
@@ -107,12 +107,16 @@ class LiveSession:
             raise ValueError("Assist delegation requires a conversational WebSocket session")
         if on_signoff_request is not None and (transport != "websocket" or greeting or assist_delegation is not None):
             raise ValueError("Sign-off requires a voice-only WebSocket session")
+        if prior_exchanges and (greeting or assist_delegation is not None):
+            raise ValueError("Prior voice exchanges cannot seed a greeting or device-control session")
         self.assist_delegation = assist_delegation
         self._delegation_task = None
         self._assist_result_submitted = False
         self.settings, self.on_audio, self.transport = settings, on_audio, transport
         self.greeting, self.on_transcript = greeting, on_transcript
         self.on_input_transcript, self.on_signoff_request = on_input_transcript, on_signoff_request
+        self.on_timed_transcript = on_timed_transcript
+        self._prior_exchanges = prior_exchanges
         self._signoff_delegation_ids = set()
         self.instructions = instructions
         self.max_seconds, self.startup_timeout, self.close_timeout = max_seconds, startup_timeout, close_timeout
@@ -153,6 +157,12 @@ class LiveSession:
             config["delegation"]["acknowledgement_delay_ms"] = 800
         if self.greeting:
             config["input"] = [{"role": "developer", "content": [{"type": "input_text", "text": self.greeting}]}]
+        elif self._prior_exchanges:
+            config["input"] = [
+                {"type": "message", "role": role, "content": [{"type": content_type, "text": text}]}
+                for user, assistant in self._prior_exchanges
+                for role, content_type, text in (("user", "input_text", user), ("assistant", "output_text", assistant))
+            ]
         if self.transport == "websocket":
             config["audio"]["format"] = {"type": "audio/pcm", "rate": RATE}
         return config
@@ -319,12 +329,8 @@ class LiveSession:
                     self._close_task = asyncio.create_task(self._close())
         elif kind == "session.output_audio.delta" and self.transport == "websocket":
             self._queue_audio(base64.b64decode(event["delta"], validate=True))
-        elif kind == "session.output_transcript.delta" and self.on_transcript is not None:
-            self.on_transcript(event["delta"])
-        elif kind == "session.input_transcript.delta" and self.on_input_transcript is not None and not self._closing:
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                self.on_input_transcript(delta)
+        elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
+            self._transcript_event(kind, event)
         elif kind == "error":
             self._fail("Cloud session reported an error")
         elif kind == "session.delegation.created" and self.assist_delegation is None:
@@ -391,6 +397,22 @@ class LiveSession:
                 self._assist_result_submitted = True
         except Exception:
             self._fail("Could not return Assist delegation results")
+
+    def _transcript_event(self, kind, event):
+        delta = event.get("delta")
+        if not isinstance(delta, str):
+            return
+        is_input = kind == "session.input_transcript.delta"
+        start, end = event.get("start_ms"), event.get("end_ms")
+        if type(start) is int and start == end:
+            # A zero-length transcript interval can describe seeded text, not speech.
+            return
+        callback = self.on_input_transcript if is_input else self.on_transcript
+        if callback is not None and (not is_input or not self._closing):
+            callback(delta)
+        if (self.on_timed_transcript is not None and not self._closing
+                and type(start) is int and type(end) is int and 0 <= start < end):
+            self.on_timed_transcript("user" if is_input else "assistant", delta, start, end)
 
     async def send_audio(self, pcm):
         if not self._ready.is_set() or self._closing or self._final.is_set() or self._failed.is_set():
@@ -459,6 +481,7 @@ class LiveSession:
                     self.settings.mark_unconfirmed(self._attempt)
         finally:
             self._disposed = True
+            self._prior_exchanges = ()
             current = asyncio.current_task()
             tasks = [task for task in self._tasks if task is not current]
             for task in tasks:

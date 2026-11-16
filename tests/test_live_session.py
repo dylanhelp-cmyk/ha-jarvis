@@ -420,6 +420,28 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(metrics.finalization_confirmed)
         self.assertNotIn("Goodbye", repr(metrics))
 
+    async def test_seeded_dialogue_keeps_storage_off_and_captures_only_timed_speech(self):
+        ws = FakeWS()
+        callback = Mock()
+        session = self.session(transport="websocket", prior_exchanges=(("What city?", "Paris."),),
+                               on_timed_transcript=callback)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        config = ws.sent[0]["session"]
+        self.assertFalse(config["store"])
+        self.assertEqual(config["input"], [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What city?"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Paris."}]},
+        ])
+        session._event({"type": "session.input_transcript.delta", "delta": "What city?",
+                        "start_ms": 0, "end_ms": 0})
+        session._event({"type": "session.input_transcript.delta", "delta": "Which river?",
+                        "start_ms": 1000, "end_ms": 1300})
+        callback.assert_called_once_with("user", "Which river?", 1000, 1300)
+        metrics = await session.close()
+        self.assertNotIn("What city?", repr(metrics))
+        self.assertEqual(session._prior_exchanges, ())
+
     async def test_real_pyav_output_resampling_and_pcm_queue_bound(self):
         session = self.session()
         session._started_at = 0

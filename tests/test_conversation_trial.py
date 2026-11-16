@@ -9,7 +9,7 @@ import numpy as np
 from jarvis.audio import PCMFrame
 from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
                                        run_voice_turn, stream_reply, warm_input_after_render)
-from jarvis.lifecycle import ConversationPolicy
+from jarvis.lifecycle import ConversationPolicy, StandbyContext
 from jarvis.opening_audio import OpeningAudio
 from jarvis.live_session import LiveMetrics
 
@@ -265,11 +265,17 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                        FollowUpEnded("session_limit", "Preview time limit"),
                        RuntimeError("Jack disconnected")):
             with self.subTest(ending=ending):
+                context = StandbyContext()
+                context.save((("Previous question", "Previous reply"),))
+                self.addCleanup(context.clear)
+
                 class StandbySession(SimulatedSession):
                     def __init__(self, *args, **kwargs):
                         super().__init__(*args, **kwargs)
                         self.transcript = kwargs["on_input_transcript"]
                         self.request_end = kwargs["on_signoff_request"]
+                        self.collect = kwargs["on_timed_transcript"]
+                        self.prior = kwargs["prior_exchanges"]
 
                     def media_deadline(self):
                         return time.monotonic() + 50
@@ -287,9 +293,11 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 is_signoff = isinstance(ending, FollowUpEnded) and ending.reason == "signoff"
                 turn = 0
 
-                async def fake_reply(_device, session, *_args, closure_policy, **_kwargs):
+                async def fake_reply(_device, session, _result, _stream, set_output, *_args,
+                                     closure_policy, **_kwargs):
                     nonlocal turn
                     self.assertEqual(closure_policy.ending_requested, is_signoff and turn == len(returned))
+                    self.assertEqual(session.prior, (("Previous question", "Previous reply"),))
                     if turn == len(returned):
                         raise ending
                     if is_signoff and turn == len(returned) - 1:
@@ -298,6 +306,10 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                         session.request_end()
                         self.assertFalse(closure_policy.ending_requested)
                     turn += 1
+                    set_output(returned[turn - 1])
+                    session.collect("user", f"Question {turn}?", turn * 1000, turn * 1000 + 200)
+                    session.collect("assistant", f"Answer {turn}.", turn * 1000 + 500, turn * 1000 + 750)
+                    set_output(None)
                     return returned[turn - 1]
 
                 with (patch("jarvis.conversation_trial.LiveSession", StandbySession),
@@ -305,13 +317,21 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                       patch("jarvis.conversation_trial.warm_input_after_render", return_value=None),
                       patch("jarvis.conversation_trial.stream_reply", side_effect=fake_reply) as play):
                     replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4),
-                                                   31, lambda _: None, follow_up=True, standby=True, idle_seconds=6)
+                                                   31, lambda _: None, follow_up=True, standby=True, idle_seconds=6,
+                                                   standby_context=context)
 
                 self.assertEqual(replies, returned)
                 self.assertEqual(messages, ["ready", "closed"])
                 self.assertEqual(len({id(call.args[1]) for call in play.call_args_list}), 1)
                 self.assertTrue(all(call.kwargs["idle_seconds"] == 6 for call in play.call_args_list[1:]))
                 self.assertEqual(result["warm_reply"]["id"], "standby-warm-2")
+                self.assertEqual(result["resumed_context_exchanges"], 1)
+                remembers = isinstance(ending, FollowUpEnded) and ending.reason in ("inactivity", "session_limit")
+                expected = (("Question 2?", "Answer 2."), ("Question 3?", "Answer 3.")) if remembers else ()
+                self.assertEqual(context.take(), expected)
+                self.assertEqual(result.get("remembered_context_exchanges", 0), len(expected))
+                self.assertNotIn("Previous question", repr(result))
+                self.assertNotIn("Answer 3.", repr(result))
                 extra = result["additional_warm_replies"]
                 self.assertEqual(extra[0]["id"], "standby-warm-3")
                 if isinstance(ending, FollowUpEnded):

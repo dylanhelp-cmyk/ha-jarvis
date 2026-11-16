@@ -45,6 +45,8 @@ function readiness() {
   const standby = kind === 'voice_turn' && !assist && $('voice-standby').checked;
   $('voice-assist-fields').hidden = !assist;
   $('voice-standby').disabled = assist;
+  $('voice-context-options').hidden = !standby;
+  $('voice-remember-context').disabled = running || busy;
   $('voice-preconnect').disabled = standby || assist;
   $('voice-follow-up').disabled = standby || assist;
   let reason = '';
@@ -208,6 +210,7 @@ function showResults(results) {
     if (result.conversation_end === 'inactivity') add(card, 'p', 'Conversation closed after ' +
       (result.standby_idle_seconds ?? 10) + ' seconds without detected speech.');
     if (result.conversation_end === 'signoff') add(card, 'p', 'Conversation closed after your sign-off.');
+    if (result.resumed_context_exchanges) add(card, 'p', 'Used recent context from the previous wake.');
     if (result.conversation_end === 'session_limit') add(card, 'p', 'Conversation reached the preview session limit.');
     if (wakeReady == null && result.connection_start === 'before_wake' && result.wake_receipt_to_ready_ms != null) {
       const lead = result.wake_receipt_to_ready_ms;
@@ -331,10 +334,12 @@ $('run-test').addEventListener('click', () => {
     const assist = $('voice-assist').checked;
     const standby = !assist && $('voice-standby').checked;
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true, standby,
-      allow_repeated_wake_audio: standby, input_gain_db: Number($('voice-input-gain').value),
+      allow_repeated_wake_audio: standby, remember_context: standby && $('voice-remember-context').checked,
+      input_gain_db: Number($('voice-input-gain').value),
       follow_up: !assist && (standby || $('voice-follow-up').checked),
       after_greeting: $('voice-after-greeting').checked,
       preconnect: !assist && !standby && $('voice-preconnect').checked});
+    $('voice-remember-context').checked = false;
     if (assist) {
       body.allow_assist_power_action = true;
       body.assist_preview = {token: $('voice-assist-token').value.trim(),
