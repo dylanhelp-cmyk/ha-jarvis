@@ -1,3 +1,7 @@
+# 0.2.69
+
+- Compare microphone speech with the calibrated speaker echo in multiple frequency bands during the local spoken-interruption tests. Keep acoustic capture local.
+
 # 0.2.68
 
 - Enable optional Assist device control in wake standby. Refresh the local Assist catalog before arming, keep the microphone open while delegated work is pending and preserve spoken sign-off.

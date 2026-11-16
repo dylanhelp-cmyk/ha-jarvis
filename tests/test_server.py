@@ -229,7 +229,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         async def send(_pcm, **_options):
             loud_start = 1520 if playback_only else 720
-            for index in range(115):
+            for index in range(1, 115):
                 observe = device.pcm_consumer
                 frame_samples = samples * 3 if loud_start <= index * 16 < loud_start + 160 else samples
                 observe(PCMFrame(index, index * 256, start_ms + index * 16, frame_samples), 0)
@@ -238,8 +238,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         player = SimpleNamespace(first_rendered_ms=start_ms, last_rendered_ms=start_ms + 1730, reason="requested",
                                  send=send, stop=AsyncMock(), snapshot=lambda: {})
-        echo = SimpleNamespace(error=None, finished=True, rendered_frames=192000, prime_capture=lambda *_: b"",
+        echo = SimpleNamespace(error=None, finished=True, rendered_frames=192000,
+                               prime_capture=lambda *_: samples.tobytes(),
                                offer=lambda frame, _: frame.samples.tobytes())
+        self.bench.echo_band_profile = SimpleNamespace(third_band_ratio=lambda mic, _: np.mean(abs(mic)) / 140)
         detector = SimpleNamespace(observe=lambda *_: True)
         with (patch.object(self.bench, "alignment_delay", return_value=35),
               patch.object(device, "end", new_callable=AsyncMock),
@@ -252,8 +254,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.live_bench.voiced_bounds", return_value=(0, len(reference))),
               patch("jarvis.live_bench.render_reference", return_value=np.zeros(4 * RATE)),
               patch("jarvis.live_bench.match_response", return_value={"status": "detected", "latency_ms": 40}),
-              patch("jarvis.streaming_aec.ConfirmedRenderInput", return_value=echo),
-              patch("jarvis.streaming_aec.residual_echo_similarity", return_value=.01)):
+              patch("jarvis.streaming_aec.ConfirmedRenderInput", return_value=echo)):
             device.clock_offset_ms = 0
             await self.bench.measure_interrupt(result, spoken_reply=True)
             synthesize.reset_mock()
@@ -262,7 +263,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await self.bench.measure_interrupt(control, spoken_reply=True, playback_only=True)
 
         self.assertEqual(result["status"], "unavailable")
-        self.assertGreater(result["interruption_probe"]["low_level_candidates_rejected"], 0)
+        self.assertGreater(result["interruption_probe"]["band_candidates_rejected"], 0)
         self.assertLess(result["interruption_probe"]["early_candidate_relative_to_injection_ms"], 0)
         self.assertGreater(result["interruption_probe"]["trigger_relative_to_injection_ms"], 0)
         self.assertEqual(result["trials"][0]["latency_ms"], 40)

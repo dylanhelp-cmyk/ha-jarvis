@@ -124,6 +124,7 @@ class Bench:
         self.device = Device()
         self.opening_audio = None
         self.echo_alignment = None
+        self.echo_band_profile = None
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
@@ -527,6 +528,7 @@ class Bench:
             result["status"] = "measured"
 
     async def measure_render_alignment(self, result):
+        from .interruption import calibrate_echo_bands
         from .live_bench import match_response, render_reference, voiced_bounds
         from .streaming_aec import check_confirmed_references
 
@@ -536,6 +538,7 @@ class Bench:
             raise ValueError("Verify the wake acknowledgment before checking render alignment")
         ident, pcm = cached
         self.echo_alignment = None
+        self.echo_band_profile = None
         reference = await asyncio.to_thread(render_reference, pcm)
         bounds = voiced_bounds(reference)
         if bounds is None:
@@ -602,17 +605,27 @@ class Bench:
         boot = device.info.get("diagnostics", {}).get("boot_id")
         if outcome["status"] == "processed" and boot and device.info.get("ack_cache_id") == ident:
             self.echo_alignment = (boot, ident, result["route"], outcome["estimated_delay_ms"])
+            acoustic_starts = [(first_ms + offset + delay) / 1000
+                               for (_, first_ms, _), delay in zip(renders, delays)]
+            self.echo_band_profile = await asyncio.to_thread(
+                calibrate_echo_bands, captured, capture_start, reference, acoustic_starts)
+            result["interruption_band_profile_ready"] = self.echo_band_profile is not None
         result["status"] = "measured" if outcome["status"] == "processed" else "unavailable"
         result["clock_uncertainty_ms"] = round(device.clock_rtt_ms / 2 + 4, 1)
 
     async def measure_interrupt(self, result, *, spoken_reply=False, playback_only=False):
         from .conversation_trial import SpeechEndpoint, gain_packet
+        from .interruption import InterruptionEvidence
         from .live_bench import INTERRUPTION_REPLY, SYNTHETIC_PROMPTS, render_reference, synthesize_fixture, voiced_bounds
         from .streaming_aec import ConfirmedRenderInput, residual_echo_similarity
 
         alignment = self.alignment_delay()
         if alignment is None:
             raise ValueError("Run Echo reference alignment before the interruption check")
+        profile = self.echo_band_profile if spoken_reply else None
+        if spoken_reply and profile is None:
+            result.update(status="unavailable", reason="Echo alignment did not yield a usable interruption band profile")
+            return
         device = self.device
         speech = None
         if not playback_only:
@@ -640,6 +653,8 @@ class Bench:
         candidate_windows = 0
         injection_window = False
         rejected = level_rejected = 0
+        band_rejected = 0
+        strongest_band_ratio = None
         baseline_power = []
         noise_power = None
         min_excess_db = 6
@@ -650,6 +665,10 @@ class Bench:
         if capture_start_ms is None:
             raise RuntimeError("No microphone pre-roll for the interruption check")
         processed = len(echo.prime_capture(device.frames, device.clock_offset_ms)) // 2
+        evidence = InterruptionEvidence(profile, reference, device.frames[0].first_sample) if profile is not None else None
+        if evidence is not None:
+            for frame in device.frames:
+                evidence.offer_capture(frame)
 
         def observe(frame, offset):
             first_ms = player.first_rendered_ms
@@ -663,6 +682,11 @@ class Bench:
                     mixed = samples[lo:hi].astype(np.int32) + speech[start + lo:start + hi]
                     samples[lo:hi] = np.clip(mixed, -32768, 32767)
                     frame = replace(frame, samples=samples)
+            if evidence is not None:
+                try:
+                    evidence.offer_capture(frame)
+                except ValueError as exc:
+                    echo.error = str(exc)
             inspect_cleaned(echo.offer(frame, offset), offset)
 
         def on_render_progress():
@@ -671,7 +695,7 @@ class Bench:
 
         def inspect_cleaned(pcm, offset):
             nonlocal detector, early_candidate, injection_window, noise_power, processed, rejected, level_rejected
-            nonlocal candidate_windows
+            nonlocal candidate_windows, band_rejected, strongest_band_ratio
             first_ms = player.first_rendered_ms
             cleaned.extend(pcm)
             while len(cleaned) >= 640 and not trigger.done():
@@ -679,17 +703,32 @@ class Bench:
                 del cleaned[:640]
                 processed += 320
                 end_ms = capture_start_ms + processed * 1000 / RATE
-                if playback_only and echo.finished and end_ms > player.last_rendered_ms + alignment:
+                if first_ms is None or (playback_only and echo.finished and end_ms > player.last_rendered_ms + alignment):
                     continue
-                if first_ms is not None and first_ms + 300 <= end_ms < first_ms + monitor_start_ms:
+                relative_ms = end_ms - first_ms
+                render_end = round((relative_ms - alignment) * RATE / 1000)
+                if evidence is not None:
+                    if relative_ms < alignment + 80:
+                        continue
+                    ratio, confirmed = evidence.observe(processed, render_end, echo.rendered_frames // 3)
+                    voiced = detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic())
+                    if ratio is None or not voiced:
+                        continue
+                    strongest_band_ratio = max(strongest_band_ratio or 0, ratio)
+                    if not confirmed:
+                        band_rejected += 1
+                        continue
+                    excess_db = 10 * math.log10(ratio)
+                    similarity = None
+                elif 300 <= relative_ms < monitor_start_ms:
                     samples = np.frombuffer(packet, dtype="<i2").astype(np.float64)
                     baseline_power.append(float(np.mean(samples ** 2)))
-                elif first_ms is not None and end_ms >= first_ms + monitor_start_ms:
+                    continue
+                elif relative_ms >= monitor_start_ms:
                     if noise_power is None:
                         if len(baseline_power) < 5:
                             continue
                         noise_power = max(1., float(np.percentile(baseline_power, 75)))
-                    relative_ms = end_ms - first_ms
                     if not playback_only and relative_ms >= inject_at_ms and not injection_window:
                         injection_window = True
                         detector = SpeechEndpoint()
@@ -698,10 +737,9 @@ class Bench:
                     voiced = detector.observe(gain_packet(packet, 24)[0], (end_ms + offset) / 1000, time.monotonic())
                     if not voiced or len(recent) < recent.maxlen:
                         continue
-                    expected_end = round((end_ms - first_ms - alignment) * RATE / 1000)
                     search_margin = RATE * 45 // 1000
-                    lo = max(0, expected_end - 1600 - search_margin)
-                    hi = min(echo.rendered_frames // 3, expected_end + search_margin)
+                    lo = max(0, render_end - 1600 - search_margin)
+                    hi = min(echo.rendered_frames // 3, render_end + search_margin)
                     candidate = b"".join(recent)
                     similarity = residual_echo_similarity(candidate, reference[lo:hi])
                     if similarity is None or similarity >= .65:
@@ -711,15 +749,18 @@ class Bench:
                     excess_db = 10 * math.log10(max(1., float(np.mean(samples ** 2))) / noise_power)
                     if excess_db < min_excess_db:
                         level_rejected += 1
-                    elif playback_only:
-                        candidate_windows += 1
-                        if early_candidate is None:
-                            early_candidate = (relative_ms, similarity, excess_db)
-                    elif not injection_window:
-                        if early_candidate is None:
-                            early_candidate = (relative_ms - inject_at_ms, similarity, excess_db)
-                    else:
-                        trigger.set_result((relative_ms, similarity, excess_db, (end_ms + offset) / 1000, time.monotonic()))
+                        continue
+                else:
+                    continue
+                if playback_only:
+                    candidate_windows += 1
+                    if early_candidate is None:
+                        early_candidate = (relative_ms, similarity, excess_db)
+                elif relative_ms < inject_at_ms:
+                    if early_candidate is None:
+                        early_candidate = (relative_ms - inject_at_ms, similarity, excess_db)
+                else:
+                    trigger.set_result((relative_ms, similarity, excess_db, (end_ms + offset) / 1000, time.monotonic()))
 
         self.test["phase"] = ("checking for false interruptions during playback" if playback_only
                               else "testing a local speech-triggered stop")
@@ -758,22 +799,29 @@ class Bench:
 
         report = result["interruption_probe"] = {"input": "microphone only" if playback_only
                                                 else "generated speech injected before local AEC",
-                                                "speaker_signal": "generated reply" if spoken_reply else "acoustic pilot",
-                                                "echo_like_candidates_rejected": rejected,
-                                                "low_level_candidates_rejected": level_rejected,
-                                                "baseline_packets": len(baseline_power),
-                                                "minimum_excess_db": min_excess_db}
+                                                "speaker_signal": "generated reply" if spoken_reply else "acoustic pilot"}
+        if evidence is not None:
+            report.update(detector="calibrated_band_power", band_candidates_rejected=band_rejected,
+                          maximum_third_band_above_bound_db=(round(10 * math.log10(strongest_band_ratio), 1)
+                              if strongest_band_ratio else None))
+        else:
+            report.update(detector="fixed_level_and_correlation", echo_like_candidates_rejected=rejected,
+                          low_level_candidates_rejected=level_rejected, baseline_packets=len(baseline_power),
+                          minimum_excess_db=min_excess_db)
         if early_candidate is not None:
             early_ms, early_similarity, early_excess_db = early_candidate
             time_key = "first_candidate_after_render_ms" if playback_only else "early_candidate_relative_to_injection_ms"
             report[time_key] = round(early_ms, 1)
-            report["early_candidate_render_similarity"] = round(early_similarity, 3)
-            report["early_candidate_excess_db"] = round(early_excess_db, 1)
+            if early_similarity is not None:
+                report["early_candidate_render_similarity"] = round(early_similarity, 3)
+                report["early_candidate_excess_db"] = round(early_excess_db, 1)
+            else:
+                report["early_candidate_third_band_above_bound_db"] = round(early_excess_db, 1)
         if noise_power is not None:
             report["baseline_dbfs"] = round(10 * math.log10(noise_power / 32768 ** 2), 1)
         if playback_only:
             report["playback_candidate_windows"] = candidate_windows
-            if echo.error or noise_power is None or not echo.finished:
+            if echo.error or not echo.finished or (evidence is None and noise_power is None):
                 result.update(status="unavailable", reason=echo.error or "The complete playback could not be observed")
                 return
             observed_until = capture_start_ms + processed * 1000 / RATE
@@ -792,14 +840,17 @@ class Bench:
             return
         report["injection_after_render_ms"] = inject_at_ms
         if stop_at is None or not trigger.done() or trigger.cancelled():
-            reason = ("No stop was triggered after the speech injection" if noise_power is not None
+            reason = ("No stop was triggered after the speech injection" if evidence is not None or noise_power is not None
                       else "No usable playback baseline")
             result.update(status="unavailable", reason=echo.error or reason)
             return
         trigger_ms, similarity, excess_db, capture_at, decided_at = trigger.result()
         report["trigger_relative_to_injection_ms"] = round(trigger_ms - inject_at_ms, 1)
-        report["trigger_render_similarity"] = round(similarity, 3)
-        report["trigger_excess_db"] = round(excess_db, 1)
+        if similarity is not None:
+            report["trigger_render_similarity"] = round(similarity, 3)
+            report["trigger_excess_db"] = round(excess_db, 1)
+        else:
+            report["trigger_third_band_above_bound_db"] = round(excess_db, 1)
         report["capture_to_decision_ms"] = round((decided_at - capture_at) * 1000, 1)
         report["decision_to_stop_request_ms"] = round((stop_at - decided_at) * 1000, 1)
         if trigger_ms < inject_at_ms or echo.error or player.reason != "requested":
