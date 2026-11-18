@@ -485,11 +485,12 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_seeded_dialogue_keeps_storage_off_and_captures_only_timed_speech(self):
         ws = FakeWS()
         callback = Mock()
-        session = self.session(transport="websocket", prior_exchanges=(("What city?", "Paris."),),
+        session = self.session(transport="websocket", voice="cedar", prior_exchanges=(("What city?", "Paris."),),
                                on_timed_transcript=callback)
         with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
             await session.start()
         config = ws.sent[0]["session"]
+        self.assertEqual(config["audio"]["output"]["voice"], "cedar")
         self.assertFalse(config["store"])
         self.assertEqual(config["input"], [
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What city?"}]},

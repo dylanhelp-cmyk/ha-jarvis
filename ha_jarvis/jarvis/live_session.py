@@ -26,6 +26,12 @@ from .cloud_settings import BACKEND_RESPONSE_LIMIT, STANDBY_BACKEND_RESPONSE_LIM
 RATE = 16000
 MODEL = "gpt-live-1"
 VOICE = "marin"
+LIVE_VOICES = (
+    "marin", "cedar", "alloy", "ash", "ballad", "beacon", "bossa", "brise", "calandria", "cinder",
+    "compas", "coral", "delta", "destello", "echo", "flitz", "gleam", "halo", "harema", "hornero",
+    "juni", "luciernaga", "meridian", "nira", "noeul", "nuri", "pearl", "quartz", "ripple", "sage",
+    "shida", "shimmer", "sillage", "stone", "tempo", "verse", "vesper", "willow",
+)
 INSTRUCTIONS = "Wait silently for a spoken question, then answer briefly in one short sentence. Do not greet, delegate work or use tools."
 
 
@@ -100,9 +106,11 @@ class LiveSession:
                  startup_timeout=15, close_timeout=10, greeting=None, on_transcript=None, instructions=INSTRUCTIONS,
                  output_buffer_seconds=1, assist_delegation=None,
                  on_input_transcript=None, on_signoff_request=None, on_timed_transcript=None, prior_exchanges=(),
-                 allow_assist_action=None):
+                 allow_assist_action=None, voice=VOICE):
         if transport not in ("webrtc", "websocket"):
             raise ValueError("Choose webrtc or websocket")
+        if voice not in LIVE_VOICES:
+            raise ValueError("Choose a built-in GPT-Live voice")
         if not 0 < max_seconds <= 60 or not 0 < close_timeout < max_seconds or startup_timeout <= 0:
             raise ValueError("Cloud attempt must fit within 60 seconds including finalization")
         if assist_delegation is not None and (transport != "websocket" or greeting):
@@ -122,7 +130,7 @@ class LiveSession:
         self._assist_unknown_this_turn = False
         self._delegation_task = None
         self._assist_result_submitted = False
-        self.settings, self.on_audio, self.transport = settings, on_audio, transport
+        self.settings, self.on_audio, self.transport, self.voice = settings, on_audio, transport, voice
         self.greeting, self.on_transcript = greeting, on_transcript
         self.on_input_transcript, self.on_signoff_request = on_input_transcript, on_signoff_request
         self.on_timed_transcript = on_timed_transcript
@@ -160,7 +168,7 @@ class LiveSession:
     def _config(self):
         config = {"model": MODEL, "instructions": self.greeting or self.instructions,
                   "store": False, "delegation": {"type": "client"},
-                  "audio": {"output": {"voice": VOICE}}}
+                  "audio": {"output": {"voice": self.voice}}}
         if self.assist_delegation is not None:
             config["delegation"] = self.assist_delegation.config(signoff=self.on_signoff_request is not None)
         elif self.on_signoff_request is not None:

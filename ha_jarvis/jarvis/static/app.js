@@ -9,7 +9,7 @@ const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: '
 let kind = 'latency';
 let state;
 let busy = false;
-let listenedClip;
+let listenedRender;
 let acousticSource;
 
 async function api(path, method = 'GET', body) {
@@ -79,9 +79,9 @@ function readiness() {
   $('run-test').disabled = Boolean(reason || running || busy);
   $('cancel-test').hidden = !running;
   $('cancel-test').disabled = busy;
-  $('save-config').disabled = running || busy;
+  $('save-config').disabled = running || busy || !$('jarvis-voice').value;
   const ack = state?.acknowledgment;
-  $('verify-ack').disabled = running || busy || !ack?.candidate_id || listenedClip !== ack.candidate_id;
+  $('verify-ack').disabled = running || busy || !ack?.playback_id || listenedRender !== ack.playback_id;
   $('run-synthetic-replies').disabled = running || busy || !device?.connected || device.muted ||
     !device.raw_ready || device.playback_protocol !== 1 || speakerRoute(device) === 'unavailable' ||
     !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked ||
@@ -111,9 +111,10 @@ function showStatus(data) {
     ' API test cap is US$' + data.cloud.budget_usd + '.';
   const ack = data.acknowledgment;
   const preview = $('ack-preview');
-  if (preview.dataset.clip !== (ack.candidate_id || '')) {
+  if (preview.dataset.render !== (ack.playback_id || '')) {
+    preview.dataset.render = ack.playback_id || '';
     preview.dataset.clip = ack.candidate_id || '';
-    listenedClip = undefined;
+    listenedRender = undefined;
     if (ack.candidate_id) preview.src = 'api/acknowledgment/preview?' +
       new URLSearchParams({clip: ack.candidate_id, render: ack.playback_id});
     else preview.removeAttribute('src');
@@ -122,14 +123,15 @@ function showStatus(data) {
   $('verify-ack').hidden = !ack.cached_on_host || ack.verified;
   $('generate-ack').hidden = ack.verified;
   $('generate-ack').textContent = ack.cached_on_host ? 'Replace clip (paid API test)' : 'Generate clip (paid API test)';
-  $('ack-state').textContent = ack.cached_on_device ? 'Verified clip cached on Voice PE.' :
+  const ackStatus = ack.cached_on_device ? 'Verified clip cached on Voice PE.' :
     ack.phase === 'preload_failed' ? 'Verified clip saved. Upload to the Voice PE failed.' :
     ack.verified && data.device.connected && (data.device.ack_cache_max_frames || 48000) <= 48000 ?
       'Verified clip saved. Update the Voice PE to firmware 0.2.6 to cache the longer greeting.' :
     ack.verified ? 'Verified clip saved. Waiting for it to upload to the Voice PE.' :
     ack.cached_on_host ? 'Play the clip and confirm it says “Yes sir. How can I help?”' :
     ack.phase === 'failed' ? 'Generation failed. Check the API budget and key before retrying.' :
-    'Generate the cached greeting in the selected GPT-Live voice.';
+    'Generate the wake clip for this voice.';
+  $('ack-state').textContent = ack.voice + ' · ' + ackStatus;
   readiness();
 }
 
@@ -329,10 +331,13 @@ $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
   action(async () => {
     const config = {ha_lan_url: $('ha-lan-url').value.trim(), repetitions: Number($('repetitions').value),
-      standby_idle_seconds: Number($('standby-idle-seconds').value)};
+      standby_idle_seconds: Number($('standby-idle-seconds').value), voice: $('jarvis-voice').value,
+      personality: $('jarvis-personality').value, voice_output_gain_db: Number($('jarvis-volume').value)};
+    const changedPlayback = state?.config.voice !== config.voice ||
+      state?.config.voice_output_gain_db !== config.voice_output_gain_db;
     if ($('device-token').value) config.device_token = $('device-token').value;
     await api('api/config', 'PUT', config);
-    $('save-state').textContent = 'Settings saved.';
+    $('save-state').textContent = changedPlayback ? 'Settings saved. Check the wake clip and rerun Echo reference alignment.' : 'Settings saved.';
   });
 });
 $('reveal-token').addEventListener('click', () => {
@@ -463,20 +468,33 @@ async function initialize() {
   $('ha-lan-url').value = config.ha_lan_url;
   $('repetitions').value = config.repetitions;
   $('standby-idle-seconds').value = config.standby_idle_seconds;
+  $('jarvis-personality').value = config.personality;
+  $('jarvis-volume').value = config.voice_output_gain_db;
+  showVoiceVolume();
   $('device-token').value = config.device_token;
   $('save-state').textContent = 'Settings loaded.';
   await poll();
+  for (const voice of state.voice_options) {
+    $('jarvis-voice').add(new Option(voice[0].toUpperCase() + voice.slice(1), voice));
+  }
+  $('jarvis-voice').value = config.voice;
+  readiness();
 }
+
+function showVoiceVolume() {
+  $('jarvis-volume-db').value = $('jarvis-volume').value.replace('-', '−') + ' dB';
+}
+$('jarvis-volume').addEventListener('input', showVoiceVolume);
 
 initialize().catch((error) => notice(error.message));
 setInterval(() => { if (!busy) poll().catch((error) => notice(error.message)); }, 1500);
 
 $('ack-preview').addEventListener('ended', (event) => {
-  listenedClip = event.currentTarget.dataset.clip;
+  listenedRender = event.currentTarget.dataset.render;
   readiness();
 });
 $('verify-ack').addEventListener('click', () => action(() => api('api/acknowledgment/verify', 'POST', {
-  clip: listenedClip, heard_exact_phrase: true
+  clip: $('ack-preview').dataset.clip, render: listenedRender, heard_exact_phrase: true
 })));
 $('generate-ack').addEventListener('click', () => {
   if (window.confirm('Start one budgeted GPT-Live greeting test using digital silence?')) {

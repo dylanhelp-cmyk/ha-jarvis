@@ -1,3 +1,7 @@
+# 0.2.72
+
+- Configure the GPT-Live voice, personality and output volume in Jarvis settings. Cache and approve a greeting for each voice. Update cached playback and repeat echo alignment when the output level changes.
+
 # 0.2.71
 
 - Add a local interruption check using a separate browser speaker. Match the microphone onset and the cleaned opening against the generated test phrase, and time raw and cleaned detector evidence independently.

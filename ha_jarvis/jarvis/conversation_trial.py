@@ -14,7 +14,7 @@ from .audio import RATE
 from .device import output_route
 from .lifecycle import CONTEXT_EXCHANGES, ConversationPolicy, DEFAULT_IDLE_SECONDS, ExchangeTranscript, SignOffRequest
 from .live_bench import BenchReply
-from .live_session import LiveSession
+from .live_session import LiveSession, VOICE
 from .playback import RATE as RENDER_RATE
 from .playback import VOICE_OUTPUT_GAIN_DB
 from .streaming_aec import StreamingEcho
@@ -25,6 +25,11 @@ VOICE_STYLE = (
     "Do not greet or claim to have controlled any devices. "
 )
 INSTRUCTIONS = VOICE_STYLE + "Do not delegate work."
+PERSONALITIES = {
+    "classic": "",
+    "warm": "Use a warm, approachable British delivery while keeping replies brief.",
+    "dry": "Use understated British wit when it suits the conversation. Keep device status and failures plain.",
+}
 ASSIST_STANDBY_INSTRUCTIONS = (
     "You are Jarvis, a concise British-style voice assistant. Wait for the user to finish and do not greet. "
     "Answer ordinary questions directly. For explicit current requests to control or check Home Assistant devices, "
@@ -303,8 +308,8 @@ class FollowUpEnded(TimeoutError):
 
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None,
-                       idle_seconds=DEFAULT_IDLE_SECONDS, closure_policy=None, assist=False):
-    output_gain_db = VOICE_OUTPUT_GAIN_DB
+                       idle_seconds=DEFAULT_IDLE_SECONDS, closure_policy=None, assist=False,
+                       output_gain_db=VOICE_OUTPUT_GAIN_DB):
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
     sender = None
@@ -426,7 +431,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
 async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase, *, gain_db=0,
                          follow_up=False, wait_for_preconnected_wake=None, standby=False,
                          assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS,
-                         standby_context=None):
+                         standby_context=None, voice=VOICE, personality="classic",
+                         output_gain_db=VOICE_OUTPUT_GAIN_DB):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -485,6 +491,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             instructions = ("You are Jarvis, a concise British-style voice assistant. Do not greet. "
                             "For an explicit request to turn a named light or switch on or off, Generate <|SpawnThinking|>. "
                             "Wait for the tool result before saying the device changed. Report only verified outcomes.")
+    if style := PERSONALITIES[personality]:
+        instructions += " " + style
     if standby_context is not None:
         result["resumed_context_exchanges"] = len(prior_exchanges)
         instructions += (" Use any earlier exchanges only as background for the next spoken request. "
@@ -495,7 +503,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                           on_input_transcript=input_transcript if signoff is not None else None,
                           on_signoff_request=request_signoff if signoff is not None else None,
                           on_timed_transcript=collect_transcript if transcript is not None else None,
-                          prior_exchanges=prior_exchanges, allow_assist_action=allow_assist_action if standby and assist else None)
+                          prior_exchanges=prior_exchanges, allow_assist_action=allow_assist_action if standby and assist else None,
+                          voice=voice)
     try:
         phase("preconnecting to GPT-Live" if preconnect else
               "connecting to GPT-Live while the cached acknowledgment plays")
@@ -542,7 +551,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                                       gain_db=gain_db, max_age_ms=opening.max_ms,
                                       source_prime_packets=20 if preconnect else 12,
                                       closure_policy=closure_policy,
-                                      input_deadline=input_deadline if assist else None, assist=assist)]
+                                      input_deadline=input_deadline if assist else None, assist=assist,
+                                      output_gain_db=output_gain_db)]
         finish_turn()
         terminal = device.wake_playback_terminal
         terminal_at = getattr(device, "wake_render_terminal_at", None)
@@ -571,7 +581,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up", gain_db=gain_db,
                                                   max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline,
-                                                  idle_seconds=idle_seconds, closure_policy=closure_policy, assist=assist))
+                                                  idle_seconds=idle_seconds, closure_policy=closure_policy, assist=assist,
+                                                  output_gain_db=output_gain_db))
                 finish_turn()
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 if standby and isinstance(exc, FollowUpEnded):
@@ -607,7 +618,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         profile = "wake standby" if standby else ("warm follow-up preview" if follow_up else "one-turn preview")
         if assist:
             profile = "Assist wake standby" if standby else "single-device Assist preview"
-        result["cloud"] = {"transport": "websocket", "profile": profile,
+        result["cloud"] = {"transport": "websocket", "profile": profile, "voice": voice, "personality": personality,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
                            **metrics.websocket_startup_breakdown(),
                            "finalization_confirmed": metrics.finalization_confirmed,

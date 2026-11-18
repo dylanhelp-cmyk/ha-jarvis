@@ -66,7 +66,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_realtime_benchmark_uses_neither_microphone_nor_speaker(self):
         from types import SimpleNamespace
 
-        async def benchmark(_device, _settings, _transport, _id, _fixtures, timings, _stage, _profile):
+        async def benchmark(_device, _settings, _transport, _id, _fixtures, timings, _stage, _profile,
+                            *, voice, output_gain_db):
+            self.assertEqual((voice, output_gain_db), ("marin", -6))
             player = SimpleNamespace(snapshot=lambda: {})
             timings.append((1.0, SimpleNamespace(first_voice_at=1.4, player=player), True))
             return {"playback_enabled": False, "failure": None}
@@ -421,7 +423,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         restarted = Bench(self.folder.name)
         self.assertEqual(restarted.config, {
             'device_token': original, 'ha_lan_url': 'http://192.168.1.10:8099', 'repetitions': 5,
-            'standby_idle_seconds': 10})
+            'standby_idle_seconds': 10, 'voice': 'marin', 'personality': 'classic', 'voice_output_gain_db': -6})
         self.assertEqual(restarted.firmware_secrets, self.bench.firmware_secrets)
 
     async def test_playback_requires_a_connected_jack_and_compatible_firmware(self):
@@ -616,6 +618,55 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.bench.device.playback)
         finally:
             await ws.close()
+
+    async def test_voice_setting_isolates_approved_clips_and_refreshes_render_on_volume_change(self):
+        from jarvis.acknowledgment import approval_path, cache_path, candidate_identity, greeting_playback_identity
+
+        directory = self.bench.data_dir
+        pcm = np.full(RATE, 900, dtype="<i2").tobytes()
+        ident = candidate_identity(pcm)
+        marin_render = greeting_playback_identity(ident)
+        cache_path(directory).write_bytes(pcm)
+        approval_path(directory).write_text(ident + "\n", encoding="ascii")
+        self.bench.device.info["ack_cache_id"] = marin_render
+        self.assertTrue(self.bench.acknowledgment_status()["cached_on_device"])
+        self.bench.echo_alignment, self.bench.echo_band_profile = object(), object()
+        self.bench.ack_cache_attempted_on = object()
+
+        response = await self.ui.put("/api/config", json={"voice": "cedar", "personality": "warm"})
+        self.assertEqual(response.status, 200)
+        reloaded = Bench(directory)
+        self.assertEqual((reloaded.config["voice"], reloaded.config["personality"]), ("cedar", "warm"))
+        self.assertIsNone(self.bench.echo_alignment)
+        self.assertIsNone(self.bench.echo_band_profile)
+        self.assertIsNone(self.bench.ack_cache_attempted_on)
+        self.assertFalse(self.bench.acknowledgment_status()["cached_on_host"])
+
+        cache_path(directory, "cedar").write_bytes(pcm)
+        self.assertFalse(self.bench.acknowledgment_status()["verified"])
+        cedar_render = greeting_playback_identity(ident, voice="cedar")
+        bad = await self.ui.post("/api/acknowledgment/verify",
+                                json={"clip": ident, "render": marin_render, "heard_exact_phrase": True})
+        self.assertEqual(bad.status, 400)
+        approved = await self.ui.post("/api/acknowledgment/verify",
+                                     json={"clip": ident, "render": cedar_render, "heard_exact_phrase": True})
+        self.assertTrue((await approved.json())["verified"])
+        self.bench.device.info["ack_cache_id"] = cedar_render
+        response = await self.ui.put("/api/config", json={"voice_output_gain_db": -12})
+        self.assertEqual(response.status, 200)
+        ack = self.bench.acknowledgment_status()
+        self.assertTrue(ack["verified"])
+        self.assertFalse(ack["cached_on_device"])
+        self.assertNotEqual(ack["playback_id"], cedar_render)
+        stale = await self.ui.get("/api/acknowledgment/preview", params={"clip": ident, "render": cedar_render})
+        self.assertEqual(stale.status, 409)
+        ready = await self.ui.get("/api/acknowledgment/preview", params={"clip": ident, "render": ack["playback_id"]})
+        with wave.open(io.BytesIO(await ready.read()), "rb") as wav:
+            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 143)
+        response = await self.ui.put("/api/config", json={"voice": "marin", "voice_output_gain_db": -6})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.bench.acknowledgment_status()["playback_id"], marin_render)
+        self.assertEqual(self.bench.cloud_settings.attempt_count, 0)
 
     async def test_cross_origin_and_non_json_control_are_rejected(self):
         response = await self.ui.put('/api/config', json={}, headers={'Origin':'https://untrusted.example'})

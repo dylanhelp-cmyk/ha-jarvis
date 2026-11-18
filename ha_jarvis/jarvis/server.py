@@ -30,17 +30,20 @@ from .acknowledgment import (PHRASE, approval_path, cache_path, candidate_identi
 from .assist import AssistClient, AssistDiscoveryError, discover_tools
 from .assist_delegation import AssistDelegation
 from .audio import RATE, STABILITY_PILOT_GAP_SECONDS, make_probe, detect_probe, detect_stop, detect_stability, summarize
+from .conversation_trial import PERSONALITIES
 from .device import Device, output_route
 from .lifecycle import DEFAULT_IDLE_SECONDS, StandbyContext
+from .live_session import LIVE_VOICES, VOICE
 from .opening_audio import OpeningAudio
 from .cloud_settings import CloudSettings
-from .playback import RATE as PLAYBACK_RATE, JackPlayback, WakeCacheUpload, stereo_pcm
+from .playback import RATE as PLAYBACK_RATE, VOICE_OUTPUT_GAIN_DB, JackPlayback, WakeCacheUpload, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
 CONNECTION_TEST_SECONDS = 60
 STANDBY_ARM_MS = 120_000
 ASSIST_TOKEN = re.compile(r"[A-Za-z0-9._~-]{1,2048}")
-DEFAULTS = {"ha_lan_url": "", "repetitions": 3, "standby_idle_seconds": DEFAULT_IDLE_SECONDS}
+DEFAULTS = {"ha_lan_url": "", "repetitions": 3, "standby_idle_seconds": DEFAULT_IDLE_SECONDS,
+            "voice": VOICE, "personality": "classic", "voice_output_gain_db": VOICE_OUTPUT_GAIN_DB}
 LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
                  "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
 
@@ -62,6 +65,13 @@ def validate_config(value):
     idle_seconds = config["standby_idle_seconds"]
     if type(idle_seconds) is not int or not 3 <= idle_seconds <= 30:
         raise ValueError("Choose a wake standby timeout from 3 to 30 seconds")
+    if config["voice"] not in LIVE_VOICES:
+        raise ValueError("Choose a built-in GPT-Live voice")
+    if not isinstance(config["personality"], str) or config["personality"] not in PERSONALITIES:
+        raise ValueError("Choose a supported Jarvis personality")
+    gain = config["voice_output_gain_db"]
+    if type(gain) is not int or not -18 <= gain <= 0:
+        raise ValueError("Choose a voice output level from -18 to 0 dB")
     token = config.get("device_token", "")
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
         raise ValueError("Device token must contain 32 to 128 URL-safe characters")
@@ -182,20 +192,28 @@ class Bench:
             temporary.chmod(0o600)
         temporary.replace(self.path)
 
+    def wake_render_options(self):
+        return {"voice": self.config["voice"], "output_gain_db": self.config["voice_output_gain_db"]}
+
+    async def wake_render(self):
+        return await asyncio.to_thread(verified_render, self.data_dir, **self.wake_render_options())
+
     def acknowledgment_status(self):
-        pcm = read_candidate(self.data_dir) if cache_path(self.data_dir).is_file() else None
+        voice = self.config["voice"]
+        pcm = read_candidate(self.data_dir, voice) if cache_path(self.data_dir, voice).is_file() else None
         ident = candidate_identity(pcm) if pcm else None
-        approval = approval_path(self.data_dir)
+        approval = approval_path(self.data_dir, voice)
         verified = bool(ident and approval.is_file() and approval.read_text(encoding="ascii").strip() == ident)
-        playback_id = greeting_playback_identity(ident) if ident else None
+        playback_id = greeting_playback_identity(ident, **self.wake_render_options()) if ident else None
         return {**self.acknowledgment, "cached_on_host": pcm is not None, "candidate_id": ident,
-                "playback_id": playback_id, "phrase": PHRASE, "verified": verified,
+                "playback_id": playback_id, "phrase": PHRASE, "voice": voice, "verified": verified,
                 "cached_on_device": bool(verified and self.device.info.get("ack_cache_id") == playback_id)}
 
     def maybe_preload_wake_cache(self):
         device = self.device
         if (self.test["running"] or device.ws is None or self.ack_cache_attempted_on is device.ws
-                or device.info.get("ack_cache_protocol") != 1 or not approval_path(self.data_dir).is_file()):
+                or device.info.get("ack_cache_protocol") != 1
+                or not approval_path(self.data_dir, self.config["voice"]).is_file()):
             return
         self.ack_cache_attempted_on = device.ws
         self.test = {"running": True, "phase": "preloading the verified wake clip"}
@@ -210,7 +228,7 @@ class Bench:
     async def preload_wake_cache(self):
         ws = self.device.ws
         try:
-            cached = await asyncio.to_thread(verified_render, self.data_dir)
+            cached = await self.wake_render()
             if cached is None:
                 return
             ident, pcm = cached
@@ -242,7 +260,8 @@ class Bench:
         return {"version": __version__, "milestone": "wired_audio_bench", "device": self.device.snapshot(),
                 "test": self.test, "echo_alignment_ready": self.alignment_delay() is not None,
                 "interruption_profile_ready": self.echo_band_profile is not None and self.alignment_delay() is not None,
-                "acknowledgment": self.acknowledgment_status(), "config": {k: v for k, v in self.config.items() if k != "device_token"},
+                "acknowledgment": self.acknowledgment_status(), "voice_options": LIVE_VOICES,
+                "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
                           "reason": "The voice preview requires separate per-run room microphone consent"}}
 
@@ -258,7 +277,7 @@ class Bench:
 
     async def prepare_acknowledgment(self):
         try:
-            metadata = await generate_acknowledgment(self.cloud_settings, self.data_dir)
+            metadata = await generate_acknowledgment(self.cloud_settings, self.data_dir, voice=self.config["voice"])
             self.acknowledgment = {"phase": "generated", **metadata}
         except asyncio.CancelledError:
             self.acknowledgment = {"phase": "cancelled"}
@@ -296,7 +315,7 @@ class Bench:
 
     async def measure_wake_ack(self, result, startup_transport):
         device = self.device
-        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        cached = await self.wake_render()
         if cached is None or device.info.get("ack_cache_id") != cached[0]:
             raise ValueError("Verify and preload the wake acknowledgment first")
         ident, pcm = cached
@@ -339,7 +358,8 @@ class Bench:
         async def discard_audio(pcm, rate):
             pass
 
-        session = LiveSession(self.cloud_settings, on_audio=discard_audio, transport=transport, max_seconds=30)
+        session = LiveSession(self.cloud_settings, on_audio=discard_audio, transport=transport, max_seconds=30,
+                              voice=self.config["voice"])
         ready = None
         try:
             await session.start()
@@ -465,7 +485,7 @@ class Bench:
         from .live_bench import match_streamed_reply
 
         device = self.device
-        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        cached = await self.wake_render()
         delay = self.alignment_delay()
         if cached is None or delay is None:
             raise ValueError("Run a successful echo reference alignment first")
@@ -490,7 +510,8 @@ class Bench:
                                        gain_db=gain_db, follow_up=follow_up,
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
                                        assist_delegation=assist_delegation, after_greeting=after_greeting,
-                                       idle_seconds=idle_seconds, standby_context=standby_context)
+                                       idle_seconds=idle_seconds, standby_context=standby_context,
+                                       personality=self.config["personality"], **self.wake_render_options())
         if not replies:
             return
         await asyncio.sleep(.25)
@@ -534,7 +555,7 @@ class Bench:
         from .streaming_aec import check_confirmed_references
 
         device = self.device
-        cached = await asyncio.to_thread(verified_render, self.data_dir)
+        cached = await self.wake_render()
         if cached is None:
             raise ValueError("Verify the wake acknowledgment before checking render alignment")
         ident, pcm = cached
@@ -1030,7 +1051,8 @@ class Bench:
             self.test["phase"] = phase
         result["metric"] = "synthetic_digital_speech_end_to_audible_reply"
         result["cloud"] = await benchmark_replies(self.device, self.cloud_settings, transport,
-                                                   result["id"], fixtures, timings, stage, profile)
+                                                   result["id"], fixtures, timings, stage, profile,
+                                                   **self.wake_render_options())
         if result["cloud"]["playback_enabled"]:
             await asyncio.sleep(.35)
             await self.device.end()
@@ -1390,7 +1412,7 @@ def create_ui(bench):
                 raise ValueError("Explicitly confirm the paid greeting generation")
             if bench.test["running"] or (bench.task and not bench.task.done()):
                 raise web.HTTPConflict(text="Wait for the current test to finish")
-            if approval_path(bench.data_dir).is_file():
+            if approval_path(bench.data_dir, bench.config["voice"]).is_file():
                 raise web.HTTPConflict(text="The current voice already has a verified greeting")
             public = bench.cloud_settings.public()
             if not public["api_key_configured"] or public["paid_retry_blocked"]:
@@ -1402,25 +1424,32 @@ def create_ui(bench):
         return web.json_response(bench.acknowledgment_status(), status=202 if request.method == "POST" else 200)
 
     async def preview_acknowledgment(request):
-        if not cache_path(bench.data_dir).is_file():
+        voice = bench.config["voice"]
+        if not cache_path(bench.data_dir, voice).is_file():
             raise web.HTTPNotFound(text="No generated greeting is available")
-        pcm = read_candidate(bench.data_dir)
-        if request.query.get("clip") != candidate_identity(pcm):
+        pcm = read_candidate(bench.data_dir, voice)
+        candidate = candidate_identity(pcm)
+        expected_render = greeting_playback_identity(candidate, **bench.wake_render_options())
+        if request.query.get("clip") != candidate or request.query.get("render", expected_render) != expected_render:
             raise web.HTTPConflict(text="The greeting changed. Reload the preview.")
-        return web.Response(body=candidate_wav(pcm), content_type="audio/wav", headers={"Cache-Control": "no-store"})
+        return web.Response(body=candidate_wav(pcm, output_gain_db=bench.config["voice_output_gain_db"]),
+                            content_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     async def verify_acknowledgment(request):
         data = await request.json()
         if bench.test["running"]:
             raise web.HTTPConflict(text="Wait for the current test before verifying its greeting")
-        if not cache_path(bench.data_dir).is_file():
+        voice = bench.config["voice"]
+        if not cache_path(bench.data_dir, voice).is_file():
             raise web.HTTPNotFound(text="No generated greeting is available")
-        pcm = read_candidate(bench.data_dir)
+        pcm = read_candidate(bench.data_dir, voice)
         ident = candidate_identity(pcm)
+        expected_render = greeting_playback_identity(ident, **bench.wake_render_options())
         if (not isinstance(data, dict) or data.get("clip") != ident
+                or data.get("render", expected_render) != expected_render
                 or data.get("heard_exact_phrase") is not True):
             raise ValueError(f"Listen to the current clip and confirm it says {PHRASE}")
-        path = approval_path(bench.data_dir)
+        path = approval_path(bench.data_dir, voice)
         temporary = path.with_suffix(".verified.tmp")
         temporary.write_text(ident + "\n", encoding="ascii")
         temporary.replace(path)
@@ -1480,13 +1509,29 @@ def create_ui(bench):
 
     async def config(request):
         if request.method == "PUT":
+            changes = await request.json()
             if bench.test["running"]:
                 raise web.HTTPConflict(text="Cancel the current test before changing settings")
-            new = validate_config({**bench.config, **await request.json()})
-            if new["device_token"] != bench.config["device_token"] and bench.device.ws:
-                await bench.device.ws.close(code=1008, message=b"Pairing changed")
+            if not isinstance(changes, dict):
+                raise ValueError("Settings must be a JSON object")
+            previous = bench.config
+            new = validate_config({**previous, **changes})
+            changed_playback = (new["voice"] != previous["voice"]
+                                or new["voice_output_gain_db"] != previous["voice_output_gain_db"])
             bench.config = new
-            bench.save()
+            try:
+                bench.save()
+            except OSError:
+                bench.config = previous
+                raise
+            if changed_playback:
+                bench.echo_alignment = bench.echo_band_profile = None
+                bench.ack_cache_attempted_on = None
+                bench.acknowledgment = {}
+            if new["device_token"] != previous["device_token"] and bench.device.ws:
+                await bench.device.ws.close(code=1008, message=b"Pairing changed")
+            elif changed_playback:
+                bench.maybe_preload_wake_cache()
         return web.json_response(bench.config)
 
     async def near_end_fixture(request):

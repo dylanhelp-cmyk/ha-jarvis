@@ -17,7 +17,7 @@
     </header>
     <main id="main">
       <section class="hero" aria-labelledby="page-title">
-        <div><p class="eyebrow">MILESTONE 01 / LOCAL AUDIO</p><h1 id="page-title">First, prove the path.</h1><p class="intro">Measure the Voice PE speaker jack in the room before bringing conversation online.</p></div>
+        <div><h1 id="page-title">Jarvis</h1><p class="intro">Set up your Voice PE, choose how Jarvis speaks and run audio checks.</p></div>
         <div class="signal-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="signal-core"><span>J</span></div><span class="orbit-label">AUDIO BENCH</span></div>
       </section>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
@@ -28,23 +28,37 @@
       </section>
       <div class="workspace">
         <section class="panel setup" aria-labelledby="setup-title">
-          <div class="section-heading"><span class="step">01</span><div><h2 id="setup-title">Connect the room</h2><p>Pair your Voice PE and connect its speakers.</p></div></div>
+          <div class="section-heading"><div><h2 id="setup-title">Jarvis settings</h2><p>Pair the Voice PE and set up conversation.</p></div></div>
           <form id="config-form">
             <label for="ha-lan-url">Home Assistant LAN address</label>
             <input id="ha-lan-url" name="ha_lan_url" type="url" placeholder="http://192.168.1.10:8099" autocomplete="off" spellcheck="false">
             <p class="field-help">Voice PE uses this address for the paired connection. Open this panel through Home Assistant ingress.</p>
-            <label for="repetitions">Probe repetitions</label>
-            <input id="repetitions" name="repetitions" type="number" min="1" max="20" value="3" required>
+            <label for="jarvis-voice">GPT-Live voice</label>
+            <select id="jarvis-voice" name="voice" required></select>
+            <p class="field-help">Generate and approve a wake clip for each new voice.</p>
+            <label for="jarvis-personality">Personality</label>
+            <select id="jarvis-personality" name="personality">
+              <option value="classic">Classic Jarvis</option>
+              <option value="warm">Warm</option>
+              <option value="dry">Dry wit</option>
+            </select>
+            <label for="jarvis-volume">Voice volume <output id="jarvis-volume-db" for="jarvis-volume">−6 dB</output></label>
+            <input id="jarvis-volume" name="voice_output_gain_db" type="range" min="-18" max="0" step="1" value="-6">
+            <p class="field-help">Changes both the wake clip and replies. Run Echo reference alignment after changing the level.</p>
             <label for="standby-idle-seconds">Wake standby inactivity timeout (seconds)</label>
             <input id="standby-idle-seconds" name="standby_idle_seconds" type="number" min="3" max="30" value="10" required>
             <p class="field-help">How long Jarvis listens for a follow-up after a reply in wake standby.</p>
+            <details class="device-setup"><summary>Audio diagnostics</summary><div class="details-content">
+              <label for="repetitions">Probe repetitions</label>
+              <input id="repetitions" name="repetitions" type="number" min="1" max="20" value="3" required>
+            </div></details>
             <details class="device-setup"><summary>Microphone pairing & firmware</summary><div class="details-content">
               <label for="device-token">Device token</label><div class="token-row"><input id="device-token" name="device_token" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="token-help"><button class="button subtle" id="reveal-token" type="button" aria-label="Show device token" aria-pressed="false">Show</button><button class="button subtle" id="copy-token" type="button">Copy</button></div>
               <p id="token-help" class="field-help">Use this secret only in your microphone firmware. Keep this panel behind authenticated Home Assistant ingress or on a trusted local network.</p>
               <a class="text-link" href="api/firmware" download>Download one-time ESPHome setup <span aria-hidden="true">↗</span></a>
               <p class="field-help">Keep this local entry in Builder. Future firmware builds fetch source updates from GitHub; no repeated folder copying.</p>
             </div></details>
-            <div class="save-row"><button class="button primary" id="save-config" type="submit">Save settings</button><span id="save-state" class="muted" aria-live="polite">Loading settings…</span></div>
+            <div class="save-row"><button class="button primary" id="save-config" type="submit" disabled>Save settings</button><span id="save-state" class="muted" aria-live="polite">Loading settings…</span></div>
           </form>
         </section>
         <section class="panel tests" aria-labelledby="tests-title">
@@ -114,7 +128,6 @@
         </section>
       </div>
       <section class="panel results" aria-labelledby="results-title"><div class="results-heading"><div class="section-heading"><span class="step">03</span><div><h2 id="results-title">Evidence, at a glance</h2><p>Missing detections stay missing. They never become zero latency.</p></div></div><a class="button subtle" href="api/diagnostics" download>Export diagnostics <span aria-hidden="true">↓</span></a></div><div id="results-list"><div class="empty-state"><span aria-hidden="true">∿</span><h3>Your first measurement goes here.</h3><p>Save the connection, pair the microphone, then run a local audio test.</p></div></div></section>
-      <section class="future" aria-labelledby="future-title"><span class="future-symbol" aria-hidden="true">◇</span><div><p class="eyebrow">NEXT / AFTER THE HARDWARE GATE</p><h2 id="future-title">Conversation can wait for a sound foundation.</h2><p>Wake word, voice, and model settings are unavailable in this milestone. First verify jack playback, reliable stopping, and simultaneous capture.</p></div><span class="tag">Not enabled</span></section>
       <section class="panel" aria-labelledby="cloud-title"><h2 id="cloud-title">OpenAI test preparation</h2><p>Enter your API key locally. Change the API test cap in the Home Assistant App configuration.</p><form id="cloud-form"><label for="openai-key">OpenAI API key</label><input id="openai-key" type="password" autocomplete="off" maxlength="512"><button class="button subtle" type="submit">Save key locally</button><p id="cloud-state" class="field-help" aria-live="polite">Checking credential status.</p></form>
         <h3>Synthetic reply timing</h3>
         <p class="field-help">Compare a first reply and a warm follow-up through the selected speaker. The two prompts are generated on the App. Room microphone audio stays local.</p>

@@ -14,7 +14,7 @@ import numpy as np
 from .audio import RATE, detect_probe
 from .playback import JackPlayback, RATE as RENDER_RATE
 from .playback import VOICE_OUTPUT_GAIN_DB
-from .live_session import INSTRUCTIONS, LiveSession
+from .live_session import INSTRUCTIONS, LiveSession, VOICE
 
 
 POST_INPUT_SECONDS = 15.0
@@ -263,7 +263,8 @@ REPLY_PROFILES = {
 }
 
 
-async def benchmark_replies(device, settings, transport, identity, fixtures, timings, stage, profile):
+async def benchmark_replies(device, settings, transport, identity, fixtures, timings, stage, profile, *,
+                            voice=VOICE, output_gain_db=VOICE_OUTPUT_GAIN_DB):
     """Stream two digital fixtures and two incremental replies on one Live session."""
     current = None
 
@@ -282,13 +283,13 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
                                            instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
     else:
         session = LiveSession(settings, on_audio=on_audio, transport=transport,
-                              instructions=REPLY_PROFILES[profile], on_transcript=on_transcript)
+                              instructions=REPLY_PROFILES[profile], on_transcript=on_transcript, voice=voice)
     failure = None
     try:
         stage("connecting to OpenAI Realtime" if transport == "realtime" else "connecting to GPT-Live")
         await session.start()
         for index, (fixture, endpoint) in enumerate(fixtures, 1):
-            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=VOICE_OUTPUT_GAIN_DB,
+            reply = BenchReply(device, f"{identity}-{index}", output_gain_db=output_gain_db,
                                output_buffer_seconds=8 if transport == "realtime" else 1)
             current = reply
             sender = None
@@ -362,8 +363,9 @@ async def benchmark_replies(device, settings, transport, identity, fixtures, tim
     finally:
         metrics = await session.close()
     return {"transport": transport, "model": metrics.model, "profile": profile,
+            "voice": VOICE if transport == "realtime" else voice,
             "playback_enabled": transport != "realtime", "playback_prime_ms": 50, "source_reserve_ms": 120,
-            "output_gain_db": VOICE_OUTPUT_GAIN_DB,
+            "output_gain_db": output_gain_db,
             "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
             **metrics.websocket_startup_breakdown(),
             "finalization_confirmed": metrics.finalization_confirmed, "usage_seconds": metrics.usage_seconds,

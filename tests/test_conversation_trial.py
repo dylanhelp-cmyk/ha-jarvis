@@ -225,7 +225,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(device.playback)
 
     async def test_warm_reply_reuses_session_with_fresh_capture_and_no_cold_queue(self):
-        with (patch("jarvis.conversation_trial.LiveSession", SimulatedSession),
+        with (patch("jarvis.conversation_trial.LiveSession", side_effect=SimulatedSession) as provider,
               patch("jarvis.conversation_trial.BenchReply", SimulatedReply),
               patch("jarvis.conversation_trial.StreamingEcho", LocalEcho),
               patch("jarvis.conversation_trial.warm_input_after_render",
@@ -255,12 +255,16 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
 
             messages, result = [], {"id": "test"}
             replies = await run_voice_turn(device, messages, result, opening, bytes(480 * 4), 31, phase,
-                                           follow_up=True)
+                                           follow_up=True, voice="cedar", personality="dry", output_gain_db=-12)
             self.assertEqual(len(replies), 2)
             self.assertEqual(messages, ["ready", cold[:320].tobytes(), cold[320:640].tobytes(),
                                         warm[:320].tobytes(), warm[320:640].tobytes(), "closed"])
             self.assertEqual(result["warm_reply"]["input_samples_sent"], 640)
             self.assertEqual(result["warm_reply"]["opening_reference_mode"], "confirmed_render_tail")
+            self.assertEqual(provider.call_args.kwargs["voice"], "cedar")
+            self.assertIn("understated British wit", provider.call_args.kwargs["instructions"])
+            self.assertEqual(result["reply_output_gain_db"], -12)
+            self.assertEqual(result["warm_reply"]["reply_output_gain_db"], -12)
             handoff.assert_called_once_with(device, replies[0], 31)
 
     async def test_standby_keeps_multiple_warm_turns_on_one_connection(self):
