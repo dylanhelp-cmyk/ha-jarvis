@@ -1,3 +1,7 @@
+# 0.2.73
+
+- Check inactivity, context reuse, ambiguous thanks and sign-off with two generated-speech GPT-Live sessions. The test uses no microphone capture or speaker playback.
+
 # 0.2.72
 
 - Configure the GPT-Live voice, personality and output volume in Jarvis settings. Cache and approve a greeting for each voice. Update cached playback and repeat echo alignment when the output level changes.

@@ -1,0 +1,77 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import numpy as np
+
+from jarvis.session_bench import SESSION_PROMPTS, check_sessions
+
+
+class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_time_generated_input_resumes_context_and_settles_both_sessions(self):
+        clock = 100.
+        owners = []
+        sent_at = []
+        deadlines = {}
+
+        async def sleep(seconds):
+            nonlocal clock
+            clock += seconds
+
+        async def fixture(prompt):
+            marker = SESSION_PROMPTS.index(prompt) + 1
+            return np.full(320, marker, dtype="<i2").tobytes(), 320
+
+        class Provider:
+            def __init__(self, _settings, **callbacks):
+                owners.append(callbacks)
+                self.callbacks = callbacks
+                self.metrics = SimpleNamespace(error=None, finalization_confirmed=True,
+                                               usage_seconds=24, close_reason="close_requested")
+                deadlines[id(self)] = clock + 50
+                self.seen = set()
+
+            async def start(self):
+                pass
+
+            def media_deadline(self):
+                return deadlines[id(self)]
+
+            async def send_audio(self, pcm):
+                marker = int.from_bytes(pcm[:2], "little")
+                sent_at.append((id(self), clock))
+                if not marker or marker in self.seen:
+                    return
+                self.seen.add(marker)
+                question = SESSION_PROMPTS[marker - 1]
+                answer = ("Paris.", "The Seine.", "You're welcome.", "Goodbye.")[marker - 1]
+                self.callbacks["on_input_transcript"](question)
+                collect = self.callbacks["on_timed_transcript"]
+                collect("user", question, marker * 1000, marker * 1000 + 300)
+                collect("assistant", answer, marker * 1000 + 500, marker * 1000 + 800)
+                self.callbacks["on_transcript"](answer)
+                await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
+                if marker == 4:
+                    self.callbacks["on_signoff_request"]()
+
+            async def close(self):
+                return self.metrics
+
+        with (patch("jarvis.session_bench.LiveSession", Provider),
+              patch("jarvis.session_bench.synthesize_fixture", side_effect=fixture),
+              patch("jarvis.session_bench.time", SimpleNamespace(monotonic=lambda: clock)),
+              patch("jarvis.session_bench.asyncio.sleep", side_effect=sleep)):
+            result = await check_sessions(None, "marin", "classic", lambda _: None)
+
+        self.assertEqual(len(result["sessions"]), 2)
+        self.assertEqual(len(result["checks"]), 6)
+        self.assertTrue(all(result["checks"].values()))
+        self.assertGreaterEqual(result["inactivity_wait_ms"], 10_000)
+        self.assertLess(result["inactivity_wait_ms"], 10_100)
+        self.assertGreaterEqual(result["signoff_wait_ms"], 2000)
+        self.assertEqual(owners[1]["prior_exchanges"], ((SESSION_PROMPTS[0], "Paris."),))
+        for (before_owner, before), (after_owner, after) in zip(sent_at, sent_at[1:]):
+            if before_owner == after_owner:
+                self.assertGreaterEqual(after - before, .0199)
+        self.assertNotIn("Paris.", repr(result))
+        self.assertNotIn("What is the capital", repr(result))

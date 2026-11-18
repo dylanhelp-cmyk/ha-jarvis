@@ -148,11 +148,12 @@ SYNTHETIC_PROMPTS = (
 )
 INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows through it is called the Seine."
 INTERRUPTION_INPUTS = ("Wait, please switch to a different topic.", "Hold on, can you tell me the time?")
+SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Goodbye.")
 
 
 async def synthesize_fixture(prompt):
     """Build a digital test asset on the App. No recording or upload endpoint is used."""
-    if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY, *INTERRUPTION_INPUTS):
+    if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY, *INTERRUPTION_INPUTS, *SESSION_ONLY_PROMPTS):
         raise ValueError("Unknown built-in synthetic prompt")
     process = await asyncio.create_subprocess_exec(
         "espeak-ng", "--stdout", "-v", "en-gb", "--stdin",
@@ -177,7 +178,7 @@ async def synthesize_fixture(prompt):
     blocks = converter.resample(frame) + converter.resample(None)
     pcm = np.concatenate([block.to_ndarray().ravel() for block in blocks])
     bounds = voiced_bounds(pcm)
-    if bounds is None or not RATE // 2 <= len(pcm) <= 6 * RATE:
+    if bounds is None or not RATE // 4 <= len(pcm) <= 6 * RATE:
         raise ValueError("Synthetic speech has no usable endpoint or exceeds six seconds")
     return pcm.astype("<i2", copy=False).tobytes(), bounds[1]
 

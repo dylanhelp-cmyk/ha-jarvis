@@ -85,6 +85,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["trials"][0]["digital_end_to_cloud_voice_ms"], 400)
         self.assertIsNone(result["trials"][0]["latency_ms"])
 
+    async def test_generated_session_checks_require_consent_and_never_start_capture(self):
+        from unittest.mock import AsyncMock
+
+        response = await self.ui.post("/api/cloud/session-checks", json={"confirm_paid": True})
+        self.assertEqual(response.status, 400)
+        self.bench.cloud_settings.set_key("sk-generated-session-test-key")
+        sample = {"checks": {name: True for name in ("first_answer", "complete_exchange_available",
+            "resumed_answer", "thanks_recognized", "thanks_stays_open", "clear_signoff")},
+            "sessions": [{"finalization_confirmed": True, "error": None}] * 2}
+        with (patch.object(self.bench.device, "begin") as capture,
+              patch("jarvis.session_bench.check_sessions", new_callable=AsyncMock, return_value=sample) as check):
+            response = await self.ui.post("/api/cloud/session-checks", json={"confirm_paid": 1})
+            self.assertEqual(response.status, 400)
+            check.assert_not_called()
+            response = await self.ui.post("/api/cloud/session-checks", json={"confirm_paid": True})
+            self.assertEqual(response.status, 202)
+            await self.bench.task
+            self.assertEqual(self.bench.results[0]["status"], "passed")
+            capture.assert_not_called()
+            self.assertEqual(self.bench.results[0]["route"], "digital")
+            sample["sessions"] = sample["sessions"][:1]
+            self.bench.test = {"running": True, "id": "incomplete"}
+            await self.bench.run("synthetic_sessions", 1)
+            self.assertEqual(self.bench.results[0]["status"], "unavailable")
+
     async def test_standby_rearms_locally_and_waits_for_a_real_wake_before_cloud(self):
         from unittest.mock import AsyncMock
 

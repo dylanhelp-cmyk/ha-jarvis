@@ -35,7 +35,7 @@ from .device import Device, output_route
 from .lifecycle import DEFAULT_IDLE_SECONDS, StandbyContext
 from .live_session import LIVE_VOICES, VOICE
 from .opening_audio import OpeningAudio
-from .cloud_settings import CloudSettings
+from .cloud_settings import CloudSettings, VOICE_USD_PER_SECOND
 from .playback import RATE as PLAYBACK_RATE, VOICE_OUTPUT_GAIN_DB, JackPlayback, WakeCacheUpload, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1122,14 +1122,30 @@ class Bench:
         del self.results[30:]
         player = sender = assist_delegation = None
         resources = AsyncExitStack()
-        digital_only = kind == "synthetic_replies" and startup_transport == "realtime"
+        digital_only = kind == "synthetic_sessions" or (kind == "synthetic_replies" and startup_transport == "realtime")
         if standby:
             result["standby"] = True
         try:
             if digital_only:
                 result["route"] = "digital"
                 result["warnings"].clear()
-                await self.measure_synthetic_replies(result, startup_transport, reply_profile)
+                if kind == "synthetic_sessions":
+                    from .session_bench import check_sessions
+
+                    result["metric"] = "generated_conversation_session_policy"
+                    def stage(phase):
+                        self.test["phase"] = phase
+                    outcome = await check_sessions(self.cloud_settings, self.config["voice"],
+                                                   self.config["personality"], stage)
+                    result["session_checks"] = outcome
+                    required = ("first_answer", "complete_exchange_available", "resumed_answer",
+                                "thanks_recognized", "thanks_stays_open", "clear_signoff")
+                    confirmed = (len(outcome["sessions"]) == 2 and all(
+                        item["finalization_confirmed"] and not item["error"] for item in outcome["sessions"]))
+                    result["status"] = "passed" if (confirmed and not outcome.get("failure") and
+                        all(outcome["checks"].get(name) is True for name in required)) else "unavailable"
+                else:
+                    await self.measure_synthetic_replies(result, startup_transport, reply_profile)
                 return
             if kind != "connection":
                 self.test["output_route"] = route
@@ -1507,6 +1523,22 @@ def create_ui(bench):
         bench.task = asyncio.create_task(bench.run("synthetic_replies", 2, transport, profile))
         return web.json_response({"test_id": ident}, status=202)
 
+    async def session_checks(request):
+        data = await request.json()
+        if not isinstance(data, dict) or set(data) != {"confirm_paid"} or data["confirm_paid"] is not True:
+            raise ValueError("Confirm two budgeted sessions with generated speech")
+        if bench.test["running"] or (bench.task and not bench.task.done()):
+            raise web.HTTPConflict(text="Wait for the current test to finish")
+        public = bench.cloud_settings.public()
+        if not public["api_key_configured"] or public["paid_retry_blocked"]:
+            raise ValueError("A configured key and settled budget ledger are required")
+        if public["spent_usd"] + 2 * 60 * VOICE_USD_PER_SECOND > public["budget_usd"]:
+            raise ValueError("The test needs up to US$0.10 of the existing API budget")
+        ident = uuid.uuid4().hex
+        bench.test = {"running": True, "id": ident, "phase": "preparing generated conversation checks"}
+        bench.task = asyncio.create_task(bench.run("synthetic_sessions", 1))
+        return web.json_response({"test_id": ident}, status=202)
+
     async def config(request):
         if request.method == "PUT":
             changes = await request.json()
@@ -1701,6 +1733,7 @@ def create_ui(bench):
     app.router.add_get("/api/audio/capabilities", audio_capabilities)
     app.router.add_get(r"/api/interruption-source/{variant:[0-9]}.wav", near_end_fixture)
     app.router.add_post("/api/cloud/tests", cloud_start)
+    app.router.add_post("/api/cloud/session-checks", session_checks)
     app.router.add_get("/api/config", config)
     app.router.add_put("/api/config", config)
     app.router.add_post("/api/tests", start)

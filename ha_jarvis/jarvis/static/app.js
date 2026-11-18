@@ -5,7 +5,7 @@ const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: '
   interrupt_speech: 'Spoken reply interruption',
   interrupt_acoustic: 'Acoustic interruption check',
   interrupt_control: 'Playback-only interruption check',
-  reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', synthetic_sessions: 'Conversation checks', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -80,6 +80,7 @@ function readiness() {
   $('cancel-test').hidden = !running;
   $('cancel-test').disabled = busy;
   $('save-config').disabled = running || busy || !$('jarvis-voice').value;
+  $('run-session-checks').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
   const ack = state?.acknowledgment;
   $('verify-ack').disabled = running || busy || !ack?.playback_id || listenedRender !== ack.playback_id;
   $('run-synthetic-replies').disabled = running || busy || !device?.connected || device.muted ||
@@ -152,6 +153,18 @@ function showResults(results) {
     list.append(card);
     add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
+    if (result.session_checks) {
+      const checks = result.session_checks;
+      const names = {first_answer: 'Opening answer', complete_exchange_available: 'Temporary context',
+        resumed_answer: 'Answer using previous context', thanks_recognized: 'Thanks recognized',
+        thanks_stays_open: 'Thanks keeps the conversation open', clear_signoff: 'Clear sign-off recognized'};
+      for (const [name, label] of Object.entries(names)) {
+        add(card, 'p', label + ' — ' + (checks.checks[name] === true ? 'passed' :
+          checks.checks[name] === false ? 'failed' : 'unavailable'));
+      }
+      if (checks.failure) add(card, 'p', checks.failure);
+      add(card, 'p', checks.scope);
+    }
     if (result.wake_capture_mode === 'device_armed') {
       const onset = result.wake_to_first_capture_sample_ms;
       add(card, 'p', onset == null ? 'Device-armed capture timing unavailable.' :
@@ -506,4 +519,9 @@ $('run-synthetic-replies').addEventListener('click', () => {
   if (!window.confirm('Start one budgeted GPT-Live session with two built-in synthetic prompts? Room audio stays local.')) return;
   action(() => api('api/cloud/tests', 'POST', {transport: $('reply-transport').value,
     comfortable_volume_confirmed: $('volume-confirmed').checked, profile: $('reply-profile').value, confirm_paid: true}));
+});
+
+$('run-session-checks').addEventListener('click', () => {
+  if (!window.confirm('Run two generated-speech sessions using up to US$0.10 of the API test budget?')) return;
+  action(() => api('api/cloud/session-checks', 'POST', {confirm_paid: true}));
 });
