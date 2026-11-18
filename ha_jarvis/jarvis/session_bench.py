@@ -106,6 +106,12 @@ async def check_sessions(settings, voice, personality, stage):
         owner = DigitalConversation(settings, voice, instructions)
         await owner.session.start()
         await owner.send(fixtures[0])
+        report["first_exchange_timing"] = owner.transcript.timing()
+        report["first_input_received"] = bool(owner.signoff.text)
+        metrics = owner.session.metrics
+        report["transcript_events"] = {key: getattr(metrics, key, None) for key in (
+            "input_transcript_events", "output_transcript_events",
+            "timed_input_transcript_events", "timed_output_transcript_events")}
         exchange = owner.transcript.finish()
         checks["first_answer"] = "paris" in re.findall(r"[a-z]+", owner.output_text.casefold())
         checks["complete_exchange_available"] = exchange is not None

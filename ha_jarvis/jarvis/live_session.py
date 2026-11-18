@@ -54,6 +54,10 @@ class LiveMetrics:
     close_reason: str | None = None
     local_close_reason: str | None = None
     error: str | None = None
+    input_transcript_events: int = 0
+    output_transcript_events: int = 0
+    timed_input_transcript_events: int = 0
+    timed_output_transcript_events: int = 0
     http_status: int | None = None
     acoustic_measurement: bool = False
 
@@ -476,6 +480,8 @@ class LiveSession:
             return
         is_input = kind == "session.input_transcript.delta"
         start, end = event.get("start_ms"), event.get("end_ms")
+        field = "input_transcript_events" if is_input else "output_transcript_events"
+        setattr(self.metrics, field, getattr(self.metrics, field) + 1)
         if type(start) is int and start == end:
             # A zero-length transcript interval can describe seeded text, not speech.
             return
@@ -484,6 +490,8 @@ class LiveSession:
             callback(delta)
         if (self.on_timed_transcript is not None and not self._closing
                 and type(start) is int and type(end) is int and 0 <= start < end):
+            field = "timed_" + field
+            setattr(self.metrics, field, getattr(self.metrics, field) + 1)
             self.on_timed_transcript("user" if is_input else "assistant", delta, start, end)
 
     async def send_audio(self, pcm):

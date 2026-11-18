@@ -84,12 +84,16 @@ class ExchangeTranscript:
             text = text + delta if len(text) + len(delta) <= limit else None
         self._parts[speaker] = (text, min(first, start_ms), max(last, end_ms))
 
+    def timing(self):
+        return {speaker: {"start_ms": first, "end_ms": last, "complete_text": bool(text)}
+                for speaker, (text, first, last) in self._parts.items()}
+
     def finish(self):
-        user, _, user_end = self._parts.get("user", (None, 0, 0))
+        user, user_start, _ = self._parts.get("user", (None, 0, 0))
         assistant, assistant_start, assistant_end = self._parts.get("assistant", (None, 0, 0))
         self._parts.clear()
         self._previous_reply_end = max(self._previous_reply_end, assistant_end)
-        if user and assistant and user_end <= assistant_start and user.strip() and assistant.strip():
+        if user and assistant and user_start < assistant_end and user.strip() and assistant.strip():
             return user.strip(), assistant.strip()
         return None
 

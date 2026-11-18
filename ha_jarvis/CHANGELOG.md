@@ -1,3 +1,7 @@
+# 0.2.74
+
+- Allow overlap between the user's final transcript interval and the assistant's response when pairing one completed exchange. Report bounded transcript timing in the generated conversation check.
+
 # 0.2.73
 
 - Check inactivity, context reuse, ambiguous thanks and sign-off with two generated-speech GPT-Live sessions. The test uses no microphone capture or speaker playback.

@@ -66,6 +66,9 @@ class LifecycleTests(unittest.TestCase):
         transcript.append("assistant", "a" * 641, 3500, 3700)
         transcript.append("assistant", "Too late", 3710, 3730)
         self.assertIsNone(transcript.finish())
+        transcript.append("user", "One more question.", 4000, 4300)
+        transcript.append("assistant", "Yes.", 4250, 4500)
+        self.assertEqual(transcript.finish(), ("One more question.", "Yes."))
 
 
 class StandbyContextTests(unittest.IsolatedAsyncioTestCase):
