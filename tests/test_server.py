@@ -592,12 +592,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         cache_path(self.bench.data_dir).write_bytes(pcm)
         identity = candidate_identity(pcm)
         playback_id = greeting_playback_identity(identity)
-        previous_playback_id = hashlib.sha256(f"{identity}:gain:-6".encode("ascii")).hexdigest()
+        previous_playback_id = hashlib.sha256(f"{identity}:gain:-10".encode("ascii")).hexdigest()
         preview = await self.ui.get("/api/acknowledgment/preview", params={"clip": identity})
         self.assertEqual(preview.status, 200)
         with wave.open(io.BytesIO(await preview.read()), "rb") as wav:
             self.assertEqual(wav.getnframes(), RATE * 2)
-            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 285)
+            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 143)
         bad = await self.ui.post("/api/acknowledgment/verify",
                                  json={"clip": "stale", "heard_exact_phrase": True})
         self.assertEqual(bad.status, 400)
@@ -631,7 +631,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((magic, packet_generation, packet_sequence, first),
                                  (b"JPLY", generation, sequence, sent))
                 if sequence == 0:
-                    self.assertEqual(int(np.median(np.frombuffer(frame[HEADER.size:], dtype="<i2"))), 285)
+                    self.assertEqual(int(np.median(np.frombuffer(frame[HEADER.size:], dtype="<i2"))), 143)
                 sent += count
                 sequence += 1
                 await ws.send_json({"type": "ack_cache_progress", "generation": generation, "samples": sent})
@@ -687,7 +687,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale.status, 409)
         ready = await self.ui.get("/api/acknowledgment/preview", params={"clip": ident, "render": ack["playback_id"]})
         with wave.open(io.BytesIO(await ready.read()), "rb") as wav:
-            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 143)
+            self.assertEqual(int.from_bytes(wav.readframes(1), "little", signed=True), 71)
         response = await self.ui.put("/api/config", json={"voice": "marin", "voice_output_gain_db": -6})
         self.assertEqual(response.status, 200)
         self.assertEqual(self.bench.acknowledgment_status()["playback_id"], marin_render)

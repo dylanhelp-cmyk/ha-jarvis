@@ -19,7 +19,7 @@ PHRASE = "Yes sir. How can I help?"
 GREETING = (f'Say exactly "{PHRASE}" once. Use a calm, natural cadence with a short pause '
             'after "sir", then stay silent. Do not add any other words.')
 WAKE_PAUSE_MS = 250
-GREETING_LEVEL_OFFSET_DB = -4
+GREETING_LEVEL_OFFSET_DB = -10
 MAX_CLIP_SECONDS = 3
 
 

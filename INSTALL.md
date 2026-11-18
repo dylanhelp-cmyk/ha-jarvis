@@ -8,6 +8,8 @@ Local tests make no OpenAI calls. API credentials stay in the App's local data a
 
 In **Jarvis settings**, choose a **GPT-Live voice**, **Personality** and **Voice volume**, then save. Voice changes require generating and approving a wake clip for that voice. After a voice or volume change, wait for the clip to cache on the Voice PE and run **Echo reference alignment**. Returning to an already approved voice reuses its clip. A personality change applies on the next conversation.
 
+App **0.2.75** lowers the wake greeting by another 6 dB without changing live reply volume. No firmware update or new clip approval is needed. After the automatic cache refresh and local echo alignment, compare the greeting with the next live reply at your usual speaker level.
+
 **Conversation checks** runs two GPT-Live sessions using generated questions, thanks and goodbye. It checks context across sessions and the closure policy, using up to US$0.10 of the existing cap. The test needs no Voice PE or room microphone audio.
 
 To check interruption detection with real sound, run **Echo reference alignment**, then open **Acoustic interruption check** on a browser device playing through a separate speaker near the Voice PE. Confirm both speakers are at a comfortable level, select a test phrase and let both voices finish. Jarvis measures the time from the phrase reaching its microphone and checks whether the opening survives echo cancellation.

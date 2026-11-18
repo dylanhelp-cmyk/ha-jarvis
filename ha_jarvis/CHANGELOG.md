@@ -1,3 +1,7 @@
+# 0.2.75
+
+- Lower the cached wake greeting another 6 dB while keeping live reply volume unchanged. Automatically replace the Voice PE cache using the approved clip.
+
 # 0.2.74
 
 - Allow overlap between the user's final transcript interval and the assistant's response when pairing one completed exchange. Report bounded transcript timing in the generated conversation check.
