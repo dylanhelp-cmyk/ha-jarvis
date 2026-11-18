@@ -373,6 +373,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
     sent = peak_before = peak_after = clipped = 0
     first_sent_at = None
     first_age = max_age = None
+    completed = False
 
     async def send_packet():
         nonlocal origin, sent, first_sent_at, first_age, max_age, peak_before, peak_after, clipped
@@ -483,9 +484,12 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 "samples_forwarded_during_reply": sent - sent_before_reply,
                 "max_unconfirmed_capture_ms": round(stream.max_unconfirmed_samples * 1000 / RATE, 1),
                 "render_reference_confirmed": True}
+        completed = True
         return reply
     finally:
         set_output(None)
+        if not completed:
+            reply.discard()
         terminal_at = getattr(device, "wake_render_terminal_at", None)
         if early_echo and first_sent_at is not None and terminal_at is not None:
             result["first_input_before_ack_terminal_ms"] = round((terminal_at - first_sent_at) * 1000, 1)
@@ -687,6 +691,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         return replies
     finally:
         device.pcm_consumer = None
+        session.suppress_output()
         if startup is not None and not startup.done():
             startup.cancel()
             await asyncio.gather(startup, return_exceptions=True)

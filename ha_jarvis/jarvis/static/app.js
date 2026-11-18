@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: 'Interruption check', stability: 'Stream stability',
   interrupt_speech: 'Spoken reply interruption',
   interrupt_acoustic: 'Acoustic interruption check',
-  interrupt_control: 'Playback-only interruption check',
+  interrupt_control: 'Playback-only interruption check', synthetic_interrupt: 'Generated interruption control',
   reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', synthetic_sessions: 'Conversation checks', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
@@ -82,6 +82,7 @@ function readiness() {
   $('cancel-test').disabled = busy;
   $('save-config').disabled = running || busy || !$('jarvis-voice').value;
   $('run-session-checks').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
+  $('run-interruption-check').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked;
   const ack = state?.acknowledgment;
   $('verify-ack').disabled = running || busy || !ack?.playback_id || listenedRender !== ack.playback_id;
   $('run-synthetic-replies').disabled = running || busy || !device?.connected || device.muted ||
@@ -154,6 +155,16 @@ function showResults(results) {
     list.append(card);
     add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
+    if (result.interruption_checks) {
+      const checks = result.interruption_checks;
+      for (const [name, label] of Object.entries({first_speech_started: 'Opening speech',
+        interruption_completed: 'Mixer interruption and quiet interval',
+        no_speech_without_new_input: 'No resumed speech before a new question', next_answer: 'Next answer'})) {
+        add(card, 'p', label + ' — ' + (checks.checks[name] === true ? 'passed' :
+          checks.checks[name] === false ? 'failed' : 'unavailable'));
+      }
+      add(card, 'p', checks.scope);
+    }
     if (result.session_checks) {
       const checks = result.session_checks;
       const names = {first_answer: 'Opening answer', complete_exchange_available: 'Temporary context',
@@ -529,4 +540,9 @@ $('run-synthetic-replies').addEventListener('click', () => {
 $('run-session-checks').addEventListener('click', () => {
   if (!window.confirm('Run two generated-speech sessions using up to US$0.10 of the API test budget?')) return;
   action(() => api('api/cloud/session-checks', 'POST', {confirm_paid: true}));
+});
+
+$('run-interruption-check').addEventListener('click', () => {
+  if (!window.confirm('Check cloud interruption with generated speech using up to US$0.05? No microphone or speaker audio is used.')) return;
+  action(() => api('api/cloud/interrupt-check', 'POST', {confirm_paid: true}));
 });

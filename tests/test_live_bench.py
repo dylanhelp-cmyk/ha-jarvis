@@ -10,6 +10,20 @@ from jarvis.playback import stereo_pcm
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_reply_seals_queued_and_late_audio_without_losing_its_reference(self):
+        reply = BenchReply(SimpleNamespace(ws=None), "cancelled")
+        source = np.full(1600, 1500, dtype="<i2").tobytes()
+        await reply.receive(source, RATE)
+        self.assertGreater(reply.pending_bytes, 0)
+        reference = bytes(reply.pcm)
+        reply.discard()
+        await reply.receive(source, RATE)
+        await reply.finish()
+        self.assertEqual([chunk async for chunk in reply.chunks()], [])
+        self.assertEqual(reply.pending_bytes, 0)
+        self.assertEqual(bytes(reply.pcm), reference)
+        self.assertTrue(reply.discarded)
+
     async def test_quiet_audio_can_extend_a_reply_without_finishing_it_early(self):
         reply = BenchReply(SimpleNamespace(ws=None), "test")
         reply.last_voice_at = 1.0

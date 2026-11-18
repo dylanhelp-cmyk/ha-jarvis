@@ -110,6 +110,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await self.bench.run("synthetic_sessions", 1)
             self.assertEqual(self.bench.results[0]["status"], "unavailable")
 
+    async def test_generated_interruption_never_arms_microphone_and_requires_final_usage(self):
+        from unittest.mock import AsyncMock
+
+        self.bench.cloud_settings.set_key("sk-generated-interruption-test-key")
+        sample = {"checks": {name: True for name in ("first_speech_started", "interruption_completed",
+            "no_speech_without_new_input", "next_answer")},
+            "sessions": [{"finalization_confirmed": True, "error": None}]}
+        with (patch.object(self.bench.device, "begin") as capture,
+              patch("jarvis.interruption_bench.check_interruption", new_callable=AsyncMock, return_value=sample) as check):
+            response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": 1})
+            self.assertEqual(response.status, 400)
+            check.assert_not_called()
+            response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": True})
+            self.assertEqual(response.status, 202)
+            await self.bench.task
+            self.assertEqual(self.bench.results[0]["status"], "passed")
+            capture.assert_not_called()
+            sample["sessions"][0]["finalization_confirmed"] = False
+            self.bench.test = {"running": True, "id": "unconfirmed"}
+            await self.bench.run("synthetic_interrupt", 1)
+            self.assertEqual(self.bench.results[0]["status"], "unavailable")
+
     async def test_standby_rearms_locally_and_waits_for_a_real_wake_before_cloud(self):
         from unittest.mock import AsyncMock
 

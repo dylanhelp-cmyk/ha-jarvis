@@ -148,6 +148,82 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.append(result)
         return result
 
+    async def test_interrupt_ack_never_unmutes_or_discards_input_and_pending_work(self):
+        ws = FakeWS()
+        fixture_seen = asyncio.Event()
+        send = ws.send_json
+
+        async def capture_fixture(value):
+            await send(value)
+            if value["type"] == "session.output_audio.fixture.play":
+                fixture_seen.set()
+
+        ws.send_json = capture_fixture
+        session = self.session(transport="websocket")
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        session._assist_active.add("pending-response")
+        attempt = asyncio.create_task(session.interrupt_speech())
+        await asyncio.wait_for(fixture_seen.wait(), 1)
+        command = ws.sent[-1]
+        self.assertEqual(base64.b64decode(command["audio"]), bytes(960))
+        with self.assertRaises(LiveSessionError):
+            await session.send_audio(bytes(640))
+        self.assertFalse(any(item["type"] == "session.input_audio.append" for item in ws.sent))
+        for event in ("playing", "played"):
+            session._event({"type": "session.output_audio.fixture." + event, "client_event_id": "stale"})
+        self.assertFalse(session._fixture_played.is_set())
+        for event in ("playing", "played"):
+            session._event({"type": "session.output_audio.fixture." + event,
+                            "client_event_id": command["event_id"]})
+        with self.assertRaises(LiveSessionError):
+            session.resume_after_interrupt(session._output_generation)
+        await asyncio.sleep(.08)
+        stale = np.full(320, 600, dtype="<i2").tobytes()
+        session._queue_audio(stale)
+        result = await asyncio.wait_for(attempt, 1)
+        self.assertGreaterEqual(result["quiet_observed_ms"], 250)
+        self.assertTrue(session._output_blocked)
+        self.assertTrue(session.assist_work_pending)
+        self.output.assert_not_awaited()
+        with self.assertRaises(LiveSessionError):
+            session.resume_after_interrupt(result["generation"] - 1)
+        session.resume_after_interrupt(result["generation"])
+        fresh = np.full(320, 900, dtype="<i2").tobytes()
+        await session.send_audio(fresh)
+        session._queue_audio(fresh)
+        await asyncio.sleep(0)
+        self.output.assert_awaited_once_with(fresh, 16000)
+        self.assertEqual(session.metrics.discarded_output_samples, 320)
+        session.suppress_output()
+        with self.assertRaises(LiveSessionError):
+            session.resume_after_interrupt(result["generation"])
+
+    async def test_missing_interrupt_ack_keeps_output_blocked_and_settles_usage(self):
+        ws = FakeWS()
+        session = self.session(transport="websocket")
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        with self.assertRaises(TimeoutError):
+            await session.interrupt_speech()
+        self.assertTrue(session._output_blocked)
+        self.assertTrue((await session.close()).finalization_confirmed)
+        self.assertIsNone(self.settings.pending)
+
+    async def test_close_rejects_a_microphone_send_already_waiting_for_the_input_lock(self):
+        ws = FakeWS()
+        session = self.session(transport="websocket")
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+        await session._input_lock.acquire()
+        waiting = asyncio.create_task(session.send_audio(bytes(640)))
+        await asyncio.sleep(0)
+        await session.close()
+        session._input_lock.release()
+        with self.assertRaises(LiveSessionError):
+            await waiting
+        self.assertFalse(any(item["type"] == "session.input_audio.append" for item in ws.sent))
+
     async def test_responses_delegation_waits_for_a_complete_batch_and_keeps_audio_running(self):
         ws = FakeWS()
         tool_started = asyncio.Event()

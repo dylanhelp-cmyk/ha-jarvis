@@ -1175,14 +1175,29 @@ class Bench:
         del self.results[30:]
         player = sender = assist_delegation = None
         resources = AsyncExitStack()
-        digital_only = kind == "synthetic_sessions" or (kind == "synthetic_replies" and startup_transport == "realtime")
+        digital_only = kind in ("synthetic_sessions", "synthetic_interrupt") or (kind == "synthetic_replies" and startup_transport == "realtime")
         if standby:
             result["standby"] = True
         try:
             if digital_only:
                 result["route"] = "digital"
                 result["warnings"].clear()
-                if kind == "synthetic_sessions":
+                if kind == "synthetic_interrupt":
+                    from .interruption_bench import check_interruption
+
+                    result["metric"] = "generated_cloud_speech_interruption"
+                    def stage(phase):
+                        self.test["phase"] = phase
+                    outcome = await check_interruption(self.cloud_settings, self.config["voice"],
+                                                       self.config["personality"], stage)
+                    result["interruption_checks"] = outcome
+                    required = ("first_speech_started", "interruption_completed",
+                                "no_speech_without_new_input", "next_answer")
+                    confirmed = (len(outcome["sessions"]) == 1 and all(
+                        item["finalization_confirmed"] and not item["error"] for item in outcome["sessions"]))
+                    result["status"] = "passed" if (confirmed and not outcome.get("failure") and
+                        all(outcome["checks"].get(name) is True for name in required)) else "unavailable"
+                elif kind == "synthetic_sessions":
                     from .session_bench import check_sessions
 
                     result["metric"] = "generated_conversation_session_policy"
@@ -1579,17 +1594,19 @@ def create_ui(bench):
     async def session_checks(request):
         data = await request.json()
         if not isinstance(data, dict) or set(data) != {"confirm_paid"} or data["confirm_paid"] is not True:
-            raise ValueError("Confirm two budgeted sessions with generated speech")
+            raise ValueError("Confirm budgeted sessions with generated speech")
         if bench.test["running"] or (bench.task and not bench.task.done()):
             raise web.HTTPConflict(text="Wait for the current test to finish")
         public = bench.cloud_settings.public()
         if not public["api_key_configured"] or public["paid_retry_blocked"]:
             raise ValueError("A configured key and settled budget ledger are required")
-        if public["spent_usd"] + 2 * 60 * VOICE_USD_PER_SECOND > public["budget_usd"]:
-            raise ValueError("The test needs up to US$0.10 of the existing API budget")
+        interrupt = request.path.endswith("/interrupt-check")
+        sessions = 1 if interrupt else 2
+        if public["spent_usd"] + sessions * 60 * VOICE_USD_PER_SECOND > public["budget_usd"]:
+            raise ValueError("The test needs enough budget for its bounded generated sessions")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing generated conversation checks"}
-        bench.task = asyncio.create_task(bench.run("synthetic_sessions", 1))
+        bench.task = asyncio.create_task(bench.run("synthetic_interrupt" if interrupt else "synthetic_sessions", 1))
         return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):
@@ -1792,6 +1809,7 @@ def create_ui(bench):
     app.router.add_get(r"/api/interruption-source/{variant:[0-9]}.wav", near_end_fixture)
     app.router.add_post("/api/cloud/tests", cloud_start)
     app.router.add_post("/api/cloud/session-checks", session_checks)
+    app.router.add_post("/api/cloud/interrupt-check", session_checks)
     app.router.add_get("/api/config", config)
     app.router.add_put("/api/config", config)
     app.router.add_post("/api/tests", start)

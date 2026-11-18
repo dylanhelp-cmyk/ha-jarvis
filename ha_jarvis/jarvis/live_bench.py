@@ -148,7 +148,8 @@ SYNTHETIC_PROMPTS = (
 )
 INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows through it is called the Seine."
 INTERRUPTION_INPUTS = ("Wait, please switch to a different topic.", "Hold on, can you tell me the time?")
-SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Goodbye.")
+SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Goodbye.",
+                        "Please count slowly from one to twenty.")
 
 
 async def synthesize_fixture(prompt):
@@ -205,6 +206,8 @@ class BenchReply:
         self.leading_pcm = b""
         self.output_scale = 10 ** (output_gain_db / 20)
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
+        self.accepting_audio = True
+        self.discarded = False
 
     def _render(self, frame):
         for block in self.converter.resample(frame):
@@ -219,6 +222,8 @@ class BenchReply:
             self.pcm.extend(stereo)
 
     async def receive(self, pcm, rate):
+        if not self.accepting_audio:
+            return
         self.last_audio_at = time.monotonic()
         samples = np.frombuffer(pcm, dtype="<i2")
         bounds = voiced_bounds(samples)
@@ -250,8 +255,23 @@ class BenchReply:
             yield chunk
 
     async def finish(self):
+        if not self.accepting_audio:
+            return
+        self.accepting_audio = False
         self._render(None)
         await self.queue.put(None)
+
+    def discard(self):
+        """Seal a cancelled generation before stopping its physical player."""
+        self.accepting_audio = False
+        self.discarded = True
+        self.leading_pcm = b""
+        while not self.queue.empty():
+            self.queue.get_nowait()
+        self.pending_bytes = 0
+        self.queue.put_nowait(None)
+        # Keep the PCM reference until DMA stop is confirmed and its echo
+        # tail is processed. Queued PCM is never yielded again.
 
 
 REPLY_PROFILES = {

@@ -12,6 +12,7 @@ from .live_session import LiveSession, RATE
 
 
 SESSION_PROMPTS = ("What is the capital of France?", "Which river flows through that city?", "Thanks.", "Goodbye.")
+INTERRUPTION_PROMPT = "Please count slowly from one to twenty."
 
 
 class DigitalConversation:
@@ -41,7 +42,7 @@ class DigitalConversation:
     def request_signoff(self):
         self.signoff.requested = True
 
-    async def send(self, pcm, *, observe_seconds=None):
+    async def send(self, pcm, *, observe_seconds=None, until_first_voice=False):
         """Keep silence flowing until a bounded observation or reply ending."""
         started = time.monotonic()
         count = 0
@@ -59,7 +60,9 @@ class DigitalConversation:
             count += 1
             input_done = count * 640 >= len(pcm)
             now = time.monotonic()
-            if observe_seconds is not None:
+            if until_first_voice and input_done and self.last_voice_at is not None:
+                return
+            elif observe_seconds is not None:
                 if now - started >= len(pcm) / (2 * RATE) + observe_seconds:
                     return
             elif input_done and self.last_voice_at is not None and (

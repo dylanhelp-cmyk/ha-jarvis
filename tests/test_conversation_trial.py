@@ -46,6 +46,9 @@ class SimulatedSession:
         self.sent.append("closed")
         return self.metrics
 
+    def suppress_output(self):
+        pass
+
 
 class SimulatedReply:
     def __init__(self, device, identity, *, output_gain_db=0):
@@ -74,6 +77,9 @@ class SimulatedReply:
         return {"frames_rendered": self.frames_rendered}
 
     async def stop(self):
+        self.draining.set()
+
+    def discard(self):
         self.draining.set()
 
 

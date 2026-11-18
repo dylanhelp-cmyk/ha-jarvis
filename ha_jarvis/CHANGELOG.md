@@ -1,3 +1,8 @@
+# 0.2.77
+
+- Seal cancelled reply queues before stopping playback and ignore late audio for that reply.
+- Add a generated-speech screen for the cloud mixer interruption command, quiet observation and recovery on the same connection. The control holds input locally and keeps output muted until explicitly resumed. It does not yet enable automatic spoken cancellation.
+
 # 0.2.76
 
 - Add opt-in microphone forwarding during replies. Reuse one echo processor and ordered capture queue across warm turns, using device-confirmed playback references. Stop with an explicit error if the reference becomes unreliable.

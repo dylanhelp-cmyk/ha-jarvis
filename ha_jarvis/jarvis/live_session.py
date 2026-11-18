@@ -58,6 +58,7 @@ class LiveMetrics:
     output_transcript_events: int = 0
     timed_input_transcript_events: int = 0
     timed_output_transcript_events: int = 0
+    discarded_output_samples: int = 0
     http_status: int | None = None
     acoustic_measurement: bool = False
 
@@ -154,6 +155,16 @@ class LiveSession:
         self._output = asyncio.Queue(maxsize=50 * output_buffer_seconds)
         self._output_limit_bytes = RATE * 2 * output_buffer_seconds
         self._output_bytes = 0
+        self._output_blocked = False
+        self._output_generation = 0
+        self._input_paused = False
+        self._input_lock = asyncio.Lock()
+        self._interrupt_id = None
+        self._interrupt_ready_generation = None
+        self._fixture_playing = asyncio.Event()
+        self._fixture_played = asyncio.Event()
+        self._fixture_played_at = None
+        self._last_output_activity = None
 
     def _spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -312,10 +323,94 @@ class LiveSession:
         return (self.assist_delegation is not None and not self._assist_result_submitted
                 and (self.assist_delegation.preview_target is not None or self.assist_work_pending))
 
+    def suppress_output(self):
+        """Invalidate queued speech immediately; no server acknowledgment unmutes it."""
+        self._output_blocked = True
+        self._output_generation += 1
+        self._interrupt_ready_generation = None
+        while not self._output.empty():
+            self.metrics.discarded_output_samples += len(self._output.get_nowait()) // 2
+        self._output_bytes = 0
+        return self._output_generation
+
+    async def interrupt_speech(self):
+        """Probe a silent mixer interruption while caller-owned capture keeps queuing.
+
+        This does not stop a physical player or cancel a Home Assistant action.
+        The caller must seal the old reply and stop its player separately.
+        """
+        if self.transport != "websocket" or not self._ready.is_set() or self._closing or self._final.is_set():
+            raise LiveSessionError("Speech interruption requires an active WebSocket session")
+        started = time.monotonic()
+        async with self._input_lock:
+            if self._closing or self._final.is_set() or self._failed.is_set():
+                raise LiveSessionError("Cloud session stopped before the interruption")
+            if self._input_paused:
+                raise LiveSessionError("A speech interruption is already pending")
+            generation = self.suppress_output()
+            self._input_paused = True
+            self._fixture_playing.clear()
+            self._fixture_played.clear()
+            self._fixture_played_at = None
+            self._interrupt_id = uuid.uuid4().hex
+            # Fixtures always use 24 kHz PCM16, even on our 16 kHz session.
+            try:
+                await asyncio.wait_for(self._ws.send_json({"type": "session.output_audio.fixture.play",
+                    "event_id": self._interrupt_id, "audio": base64.b64encode(bytes(480 * 2)).decode("ascii")}), .5)
+            except Exception:
+                self._interrupt_id = None
+                self._fail("Cloud speech interruption command failed")
+                raise LiveSessionError("Cloud speech interruption command failed") from None
+        try:
+            async with asyncio.timeout(2):
+                await self._fixture_played.wait()
+                if not self._fixture_playing.is_set():
+                    raise LiveSessionError("The interrupt fixture had no acceptance acknowledgment")
+                # Mixer completion is not an exact media boundary. Keep late
+                # transport audio muted and observe a separate quiet interval.
+                while time.monotonic() - max(self._fixture_played_at, self._last_output_activity or started) < .25:
+                    if self.metrics.error or self._closing:
+                        raise LiveSessionError("Cloud interruption stopped before its quiet interval")
+                    await asyncio.sleep(.02)
+            if self._closing or generation != self._output_generation:
+                raise LiveSessionError("Speech interruption was superseded")
+            self._interrupt_ready_generation = generation
+            return {"generation": generation,
+                    "mixer_ack_ms": round((self._fixture_played_at - started) * 1000, 1),
+                    "quiet_observed_ms": round((time.monotonic() - max(self._fixture_played_at,
+                                                                      self._last_output_activity or started)) * 1000, 1),
+                    "input_pause_ms": round((time.monotonic() - started) * 1000, 1),
+                    "scope": "server mixer and received audio; physical playback is separate"}
+        except (OSError, RuntimeError, TimeoutError):
+            self._fail("Cloud speech interruption could not establish a quiet interval")
+            raise
+        finally:
+            self._interrupt_id = None
+
+    def resume_after_interrupt(self, generation):
+        if (type(generation) is not int or self._closing or self._final.is_set() or generation != self._output_generation
+                or generation != self._interrupt_ready_generation or not self._input_paused):
+            raise LiveSessionError("No matching completed speech interruption is available")
+        # Audio received while muted is discarded, never saved for later play.
+        while not self._output.empty():
+            self.metrics.discarded_output_samples += len(self._output.get_nowait()) // 2
+        self._output_bytes = 0
+        self._interrupt_ready_generation = None
+        self._input_paused = False
+        self._output_blocked = False
+
     def _queue_audio(self, pcm):
-        if self._closing or not pcm or self._hold_assist_audio():
+        if self._closing or not pcm:
             return
-        if len(pcm) % 2 or self._output_bytes + len(pcm) > self._output_limit_bytes:
+        if len(pcm) % 2 or len(pcm) > self._output_limit_bytes:
+            self._fail("Cloud output queue exceeded its limit or contained invalid PCM")
+            return
+        if max(abs(sample) for sample in memoryview(pcm).cast("h")) >= 16:
+            self._last_output_activity = time.monotonic()
+        if self._output_blocked or self._hold_assist_audio():
+            self.metrics.discarded_output_samples += len(pcm) // 2
+            return
+        if self._output_bytes + len(pcm) > self._output_limit_bytes:
             self._fail("Cloud output queue exceeded its limit or contained invalid PCM")
             return
         try:
@@ -333,7 +428,7 @@ class LiveSession:
             while True:
                 pcm = await self._output.get()
                 self._output_bytes -= len(pcm)
-                if not self._hold_assist_audio():
+                if not self._output_blocked and not self._hold_assist_audio():
                     await self.on_audio(pcm, RATE)
         except asyncio.CancelledError:
             raise
@@ -366,6 +461,13 @@ class LiveSession:
                     self._close_task = asyncio.create_task(self._close())
         elif kind == "session.output_audio.delta" and self.transport == "websocket":
             self._queue_audio(base64.b64decode(event["delta"], validate=True))
+        elif (kind in ("session.output_audio.fixture.playing", "session.output_audio.fixture.played")
+              and self._interrupt_id is not None and event.get("client_event_id") == self._interrupt_id):
+            if kind.endswith(".playing"):
+                self._fixture_playing.set()
+            elif not self._fixture_played.is_set():
+                self._fixture_played_at = time.monotonic()
+                self._fixture_played.set()
         elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
             self._transcript_event(kind, event)
         elif kind == "error":
@@ -505,16 +607,21 @@ class LiveSession:
             raise LiveSessionError("Cloud session is not accepting audio")
         if not isinstance(pcm, bytes) or not pcm or len(pcm) % 2 or len(pcm) > 3200:
             raise ValueError("Supply up to 100 ms of complete PCM16LE mono samples at 16 kHz")
-        try:
-            if self.transport == "webrtc":
-                self._track.append(pcm)
-            else:
-                await self._ws.send_json({"type": "session.input_audio.append",
-                                          "audio": base64.b64encode(pcm).decode("ascii")})
-            self.metrics.input_samples += len(pcm) // 2
-        except Exception:
-            self._fail("Cloud microphone send failed")
-            raise LiveSessionError("Cloud microphone send failed") from None
+        async with self._input_lock:
+            if self._closing or self._final.is_set() or self._failed.is_set():
+                raise LiveSessionError("Cloud session stopped before the queued microphone send")
+            if self._input_paused:
+                raise LiveSessionError("Keep microphone input queued locally until the interruption resumes")
+            try:
+                if self.transport == "webrtc":
+                    self._track.append(pcm)
+                else:
+                    await self._ws.send_json({"type": "session.input_audio.append",
+                                              "audio": base64.b64encode(pcm).decode("ascii")})
+                self.metrics.input_samples += len(pcm) // 2
+            except Exception:
+                self._fail("Cloud microphone send failed")
+                raise LiveSessionError("Cloud microphone send failed") from None
 
     async def request_greeting(self):
         if not self.greeting or self.transport != "websocket" or not self._ready.is_set() or self._closing:
@@ -540,6 +647,7 @@ class LiveSession:
         if self._disposed:
             return self.metrics
         self._closing = True
+        self.suppress_output()
         try:
             if self._delegation_task is not None and not self._delegation_task.done():
                 self._delegation_task.cancel()
