@@ -1,3 +1,8 @@
+# 0.2.76
+
+- Add opt-in microphone forwarding during replies. Reuse one echo processor and ordered capture queue across warm turns, using device-confirmed playback references. Stop with an explicit error if the reference becomes unreliable.
+- Check continuous microphone processing during the existing local echo-alignment test. Spoken interruption, cancellation and acoustic voice preservation still require verification.
+
 # 0.2.75
 
 - Lower the cached wake greeting another 6 dB while keeping live reply volume unchanged. Automatically replace the Voice PE cache using the approved clip.

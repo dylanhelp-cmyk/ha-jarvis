@@ -69,6 +69,7 @@ function readiness() {
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
+  else if (kind === 'voice_turn' && $('voice-duplex').checked && !state.continuous_input_ready) reason = 'Repeat Echo reference alignment until the continuous microphone check passes.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (assist && !$('voice-assist-token').value.trim()) reason = 'Enter a local Home Assistant token.';
   else if (assist && !standby && !$('voice-assist-name').value.trim()) reason = 'Enter the selected device name.';
@@ -266,6 +267,9 @@ function showResults(results) {
       'Pilot gaps ' + result.stability.dropout_count : result.stability.reason);
     if (result.render_alignment) add(card, 'p', result.render_alignment.status === 'processed' ?
       'AEC3 processed both confirmed render bursts and the gap between them.' : result.render_alignment.reason);
+    if (result.continuous_input) add(card, 'p', result.continuous_input.status === 'passed' ?
+      'Continuous microphone check passed across both replies. Room audio stayed local.' :
+      'Continuous microphone check unavailable. See diagnostics for details.');
     if (result.opening_prefix_echo) {
       const prefix = result.opening_prefix_echo;
       add(card, 'p', prefix.status === 'compared' ?
@@ -433,6 +437,7 @@ $('run-test').addEventListener('click', () => {
       input_gain_db: Number($('voice-input-gain').value),
       follow_up: standby || (!assist && $('voice-follow-up').checked),
       after_greeting: $('voice-after-greeting').checked,
+      duplex: $('voice-duplex').checked,
       preconnect: !assist && !standby && $('voice-preconnect').checked});
     $('voice-remember-context').checked = false;
     if (assist && standby) {

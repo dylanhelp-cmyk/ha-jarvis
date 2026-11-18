@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from jarvis.audio import PCMFrame
+from jarvis.audio import PCMFrame, RATE
 from jarvis.conversation_trial import (CleanInput, FollowUpEnded, OpeningEchoInput, SpeechEndpoint, gain_packet,
                                        run_voice_turn, stream_reply, warm_input_after_render)
 from jarvis.lifecycle import ConversationPolicy, StandbyContext
@@ -78,6 +78,115 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_continuous_input_keeps_partial_blocks_and_aec_across_two_replies(self):
+        class Processor:
+            def process(self, capture, render):
+                return (np.frombuffer(capture, dtype="<i2") + 100).astype("<i2").tobytes()
+
+        def reply(first):
+            player = SimpleNamespace(first_rendered_ms=first, last_rendered_ms=first + 100,
+                frames_rendered=4800, frames_sent=4800, terminal_confirmed=False, reason=None,
+                render_clock_invalid=False, schedule_rebases=0, max_render_discontinuity_us=0)
+            return SimpleNamespace(player=player, pcm=bytes(4800 * 4))
+
+        samples = np.arange(5120, dtype="<i2")
+        frames = [PCMFrame(i, i * 256, 1000 + 16 * i, samples[i * 256:(i + 1) * 256])
+                  for i in range(20)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=Processor()):
+            stream = CleanInput(31, passthrough_after=0)
+        for frame in frames[:2]:
+            stream.offer(frame, 0)
+        owner = stream.echo
+        first = reply(1032)
+        first.player.first_rendered_ms = None
+        stream.begin_reply_render(first)
+        for frame in frames[2:6]:
+            stream.offer(frame, 0)
+        self.assertEqual(stream.processed_samples, 480)
+        first.player.first_rendered_ms = 1032
+        stream.confirm_reply_render()
+        first.player.terminal_confirmed, first.player.reason = True, "drained"
+        stream.finish_reply_render()
+        for frame in frames[6:14]:
+            stream.offer(frame, 0)
+        second = reply(1224)
+        stream.begin_reply_render(second)
+        for frame in frames[14:]:
+            stream.offer(frame, 0)
+        second.player.terminal_confirmed, second.player.reason = True, "drained"
+        stream.finish_reply_render()
+        actual = b"".join([(await stream.packet())[0] for _ in range(16)])
+        expected = samples.copy()
+        expected[480:] += 100
+        self.assertEqual(actual, expected.tobytes())
+        self.assertIs(stream.echo, owner)
+        self.assertIsNone(stream.error)
+        self.assertEqual(stream.raw_pending, b"")
+        self.assertEqual(stream.released_samples, len(samples))
+
+    async def test_duplex_forwards_ordered_input_while_reply_is_playing(self):
+        sent, observed = [], []
+        target = None
+
+        class Reply(SimulatedReply):
+            async def chunks(self):
+                yield bytes(1920)
+                await self.draining.wait()
+
+            async def send_stream(self, chunks, **kwargs):
+                async for _ in chunks:
+                    pass
+
+            def ready_to_drain(self, now):
+                return len(sent) >= 8
+
+        def set_output(reply):
+            nonlocal target
+            target = reply
+
+        async def packet():
+            count = len(sent)
+            return np.full(320, count, dtype="<i2").tobytes(), time.monotonic()
+
+        async def send_audio(pcm):
+            sent.append(pcm)
+            if len(sent) == 2:
+                await target.receive(bytes(640), RATE)
+            elif len(sent) > 2:
+                observed.append(device.pcm_consumer is stream.offer)
+
+        from unittest.mock import Mock
+        stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0,
+            begin_reply_render=Mock(), finish_reply_render=Mock(), max_unconfirmed_samples=512)
+        device = SimpleNamespace(errors=[], info={"jack_plugged": True})
+        session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio)
+        result = {"id": "duplex"}
+        with patch("jarvis.conversation_trial.BenchReply", Reply):
+            await stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
+                               gain_db=0, max_age_ms=250, duplex=True)
+        self.assertEqual(sent, [np.full(320, i, dtype="<i2").tobytes() for i in range(8)])
+        self.assertTrue(all(observed))
+        stream.begin_reply_render.assert_called_once()
+        stream.finish_reply_render.assert_called_once()
+        self.assertTrue(result["duplex_input"]["render_reference_confirmed"])
+
+    async def test_missing_reply_reference_stops_input_instead_of_releasing_raw_speech(self):
+        with patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            stream = CleanInput(31, passthrough_after=0)
+        stream.offer(PCMFrame(0, 0, 1000, np.ones(256, dtype="<i2")), 0)
+        player = SimpleNamespace(first_rendered_ms=None, last_rendered_ms=None, frames_rendered=None,
+            render_clock_invalid=False, schedule_rebases=0, max_render_discontinuity_us=0,
+            terminal_confirmed=False)
+        stream.begin_reply_render(SimpleNamespace(player=player, pcm=bytes(4800 * 4)))
+        for index in range(1, 34):
+            stream.offer(PCMFrame(index, index * 256, 1000 + index * 16, np.ones(256, dtype="<i2")), 0)
+        self.assertIsNotNone(stream.error)
+        self.assertEqual(stream.pending, b"")
+        with self.assertRaises(RuntimeError):
+            await stream.packet()
+        stream.offer(PCMFrame(34, 34 * 256, 1544, np.ones(256, dtype="<i2")), 0)
+        self.assertEqual(stream.pending, b"")
+
     async def test_warm_speech_near_idle_deadline_keeps_listening(self):
         for signoff, speaking, pending in ((False, False, False), (False, True, False), (True, False, False),
                                            (True, True, False), (False, False, True)):

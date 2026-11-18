@@ -135,6 +135,7 @@ class Bench:
         self.opening_audio = None
         self.echo_alignment = None
         self.echo_band_profile = None
+        self.continuous_input_ready = False
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
@@ -260,6 +261,7 @@ class Bench:
         return {"version": __version__, "milestone": "wired_audio_bench", "device": self.device.snapshot(),
                 "test": self.test, "echo_alignment_ready": self.alignment_delay() is not None,
                 "interruption_profile_ready": self.echo_band_profile is not None and self.alignment_delay() is not None,
+                "continuous_input_ready": self.continuous_input_ready and self.alignment_delay() is not None,
                 "acknowledgment": self.acknowledgment_status(), "voice_options": LIVE_VOICES,
                 "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
@@ -480,7 +482,7 @@ class Bench:
         return match, detected_at, bounds[0]
 
     async def measure_voice_turn(self, result, gain_db, follow_up, preconnect, *, standby=False,
-                                 assist_delegation=None, after_greeting=False, standby_context=None):
+                                 assist_delegation=None, after_greeting=False, standby_context=None, duplex=False):
         from .conversation_trial import run_voice_turn
         from .live_bench import match_streamed_reply
 
@@ -510,7 +512,7 @@ class Bench:
                                        gain_db=gain_db, follow_up=follow_up,
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
                                        assist_delegation=assist_delegation, after_greeting=after_greeting,
-                                       idle_seconds=idle_seconds, standby_context=standby_context,
+                                       idle_seconds=idle_seconds, standby_context=standby_context, duplex=duplex,
                                        personality=self.config["personality"], **self.wake_render_options())
         if not replies:
             return
@@ -550,6 +552,8 @@ class Bench:
             result["status"] = "measured"
 
     async def measure_render_alignment(self, result):
+        from types import SimpleNamespace
+        from .conversation_trial import CleanInput
         from .interruption import calibrate_echo_bands
         from .live_bench import match_response, render_reference, voiced_bounds
         from .streaming_aec import check_confirmed_references
@@ -568,15 +572,45 @@ class Bench:
         plays = []
         continuous_plays = 0
         await asyncio.sleep(.4)
+        # Exercise the actual conversation input bridge during these local
+        # plays. Its provisional delay checks clocks and queue continuity;
+        # the independent acoustic measurements below establish room delay.
+        continuous = CleanInput(35) if device.frames else None
+        max_input_age = None
+
+        def drain_local_input():
+            nonlocal max_input_age
+            while continuous is not None and not continuous.error and len(continuous.pending) >= 640:
+                _, captured_at = continuous.take_packet()
+                age = (time.monotonic() - captured_at) * 1000
+                max_input_age = age if max_input_age is None else max(max_input_age, age)
+
+        def capture_input(frame, offset):
+            continuous.offer(frame, offset)
+            drain_local_input()
+
+        if continuous is not None:
+            for frame in device.frames:
+                capture_input(frame, device.clock_offset_ms)
+            device.pcm_consumer = capture_input
         for index in range(4):
             self.test["phase"] = f"playing reference clip {index + 1}"
             player = JackPlayback(device, f'{result["id"]}-{index + 1}')
             device.playback = player
+            if continuous is not None and not continuous.error:
+                continuous.begin_reply_render(SimpleNamespace(player=player, pcm=pcm))
             try:
                 await player.send(pcm, prime_packets=5)
             finally:
                 with suppress(RuntimeError, OSError, TimeoutError):
                     await player.stop()
+                if continuous is not None and not continuous.error:
+                    try:
+                        continuous.finish_reply_render()
+                        drain_local_input()
+                    except RuntimeError as exc:
+                        continuous.error = str(exc)
+                player.on_render_progress = None
                 device.playback = None
             span = player.confirmed_span()
             reason = None
@@ -592,6 +626,25 @@ class Bench:
             if continuous_plays == 2:
                 break
         await device.end()
+        device.pcm_consumer = None
+        if continuous is not None:
+            drain_local_input()
+            total = sum(len(frame.samples) for frame in device.frames)
+            accounted = continuous.processed_samples + len(continuous.raw_pending) // 2
+            valid = (not continuous.error and accounted == total
+                     and continuous.released_samples + len(continuous.pending) // 2 == continuous.processed_samples)
+            result["continuous_input"] = {"status": "passed" if valid else "unavailable",
+                "scope": "local microphone continuity through the conversation input bridge; no cloud audio",
+                "provisional_echo_delay_ms": 35, "captured_samples": total,
+                "processed_samples": continuous.processed_samples, "released_samples": continuous.released_samples,
+                "partial_packet_samples": len(continuous.pending) // 2,
+                "partial_aec_samples": len(continuous.raw_pending) // 2,
+                "max_packet_age_ms": round(max_input_age, 1) if max_input_age is not None else None,
+                "max_unconfirmed_capture_ms": round(continuous.max_unconfirmed_samples * 1000 / RATE, 1),
+                "error": continuous.error, "near_end_preservation_verified": False}
+        else:
+            result["continuous_input"] = {"status": "unavailable", "reason": "No microphone pre-roll was available"}
+        self.continuous_input_ready = result["continuous_input"]["status"] == "passed"
         captured, capture_start = device.recording()
         offset = device.clock_offset_ms
         renders, delays = [], []
@@ -1084,7 +1137,7 @@ class Bench:
         result["status"] = "measured" if any(x["status"] in ("detected", "digital_only")
                                              for x in result["trials"]) else "unavailable"
 
-    async def run_standby(self, gain_db, *, after_greeting, remember_context=False, assist_token=None):
+    async def run_standby(self, gain_db, *, after_greeting, remember_context=False, assist_token=None, duplex=False):
         """Keep local wake available until explicitly stopped or the setup changes."""
         context = StandbyContext() if remember_context else None
         uncertain_actions = set() if assist_token is not None else None
@@ -1092,7 +1145,7 @@ class Bench:
             while True:
                 await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
                                after_greeting=after_greeting, standby_context=context,
-                               assist_standby_token=assist_token, uncertain_actions=uncertain_actions)
+                               assist_standby_token=assist_token, uncertain_actions=uncertain_actions, duplex=duplex)
                 result = self.results[0]
                 if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
                     self.results.pop(0)
@@ -1111,7 +1164,7 @@ class Bench:
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False,
-                  standby_context=None, assist_standby_token=None, uncertain_actions=None, source_variant=None):
+                  standby_context=None, assist_standby_token=None, uncertain_actions=None, source_variant=None, duplex=False):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -1199,7 +1252,7 @@ class Bench:
             if kind == "voice_turn":
                 await self.measure_voice_turn(result, gain_db, follow_up, preconnect, standby=standby,
                                               assist_delegation=assist_delegation, after_greeting=after_greeting,
-                                              standby_context=standby_context)
+                                              standby_context=standby_context, duplex=duplex)
                 return
             if kind == "render_alignment":
                 await self.measure_render_alignment(result)
@@ -1600,6 +1653,9 @@ def create_ui(bench):
         after_greeting = data.get("after_greeting", False)
         if type(after_greeting) is not bool or (after_greeting and kind != "voice_turn"):
             raise ValueError("Waiting to speak until the greeting ends is available only in the voice preview")
+        duplex = data.get("duplex", False)
+        if type(duplex) is not bool or (duplex and kind != "voice_turn"):
+            raise ValueError("Listening during replies applies only to the voice preview")
         preconnect = data.get("preconnect", False)
         if type(preconnect) is not bool or (preconnect and kind != "voice_turn"):
             raise ValueError("Preconnection is available only in the consent-gated voice preview")
@@ -1638,6 +1694,8 @@ def create_ui(bench):
                 raise ValueError("A configured key and a settled budget ledger are required")
             if device.get("wake_capture_protocol") != 1 or bench.alignment_delay() is None:
                 raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
+            if duplex and not bench.continuous_input_ready:
+                raise ValueError("Repeat Echo reference alignment until the continuous microphone check passes")
         if kind in ("wake_ack", "voice_turn") and not bench.acknowledgment_status()["cached_on_device"]:
             raise ValueError("Verify and preload the wake acknowledgment before testing it")
         if kind.startswith("interrupt") and bench.alignment_delay() is None:
@@ -1671,12 +1729,12 @@ def create_ui(bench):
             bench.test["standby"] = True
             bench.task = asyncio.create_task(bench.run_standby(
                 gain_db, after_greeting=after_greeting, remember_context=remember_context,
-                assist_token=assist_standby_token))
+                assist_token=assist_standby_token, duplex=duplex))
         else:
             bench.task = asyncio.create_task(bench.run(kind, repetitions, startup_transport, gain_db=gain_db,
                                                       follow_up=follow_up, preconnect=preconnect,
                                                       assist_preview=assist_preview, after_greeting=after_greeting,
-                                                      source_variant=source_variant))
+                                                      source_variant=source_variant, duplex=duplex))
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):

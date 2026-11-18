@@ -17,7 +17,7 @@ from .live_bench import BenchReply
 from .live_session import LiveSession, VOICE
 from .playback import RATE as RENDER_RATE
 from .playback import VOICE_OUTPUT_GAIN_DB
-from .streaming_aec import StreamingEcho
+from .streaming_aec import ConfirmedRenderInput, StreamingEcho
 
 VOICE_STYLE = (
     "You are Jarvis, a concise British-style voice assistant. "
@@ -63,6 +63,38 @@ class CleanInput:
         self.error = None
         self.capture_start = None
         self.released_samples = 0
+        self.reply_render = None
+        self.reply_clock_offset = None
+        self.delay_ms = delay_ms
+        self.reply_capture_samples = 0
+        self.max_unconfirmed_samples = 0
+
+    def begin_reply_render(self, reply):
+        if self.reply_render is not None and not self.reply_render.finished:
+            raise RuntimeError("The previous reply has no confirmed render boundary")
+        self.passthrough_after = None
+        self.reply_render = ConfirmedRenderInput(reply.player, reply.pcm, self.delay_ms, echo=self.echo)
+        reply.player.on_render_progress = self.confirm_reply_render
+
+    def confirm_reply_render(self):
+        if self.reply_render is None or self.error:
+            return
+        clean = self.reply_render.release_confirmed(self.reply_clock_offset)
+        self.max_unconfirmed_samples = max(self.max_unconfirmed_samples, self.reply_render.max_waiting_samples)
+        if self.reply_render.error:
+            self.error = "reply_echo_reference_failed: " + self.reply_render.error
+            self.pending.clear()
+        else:
+            self.append_clean(clean)
+        self.changed.set()
+
+    def finish_reply_render(self):
+        self.confirm_reply_render()
+        if self.error or self.reply_render is None or not self.reply_render.finished:
+            raise RuntimeError(self.error or "The reply echo reference did not finish")
+        player = self.reply_render.player
+        player.on_render_progress = None
+        self.passthrough_after = (player.last_rendered_ms + self.reply_clock_offset + self.delay_ms) / 1000 + .18
 
     def offer(self, frame, clock_offset_ms):
         if self.error:
@@ -75,17 +107,33 @@ class CleanInput:
                 if self.sample_origin is None:
                     self.sample_origin = frame.first_sample
                 frame = replace(frame, first_sample=frame.first_sample - self.sample_origin)
-            clean = self.echo.capture(frame, clock_offset_ms)
             if self.capture_start is None:
                 self.capture_start = captured_at
+            self.raw_pending.extend(frame.samples.tobytes())
+            self.reply_clock_offset = clock_offset_ms
+            if self.reply_render is not None:
+                clean = self.reply_render.offer(frame, clock_offset_ms)
+                self.reply_capture_samples += len(frame.samples)
+                self.max_unconfirmed_samples = max(self.max_unconfirmed_samples, self.reply_render.max_waiting_samples)
+                if self.reply_render.error:
+                    raise RuntimeError(self.reply_render.error)
+            else:
+                clean = self.echo.capture(frame, clock_offset_ms)
+            self.append_clean(clean)
+        except (RuntimeError, ValueError):
+            self.error = "opening_echo_or_queue_failed"
+            self.pending.clear()
+        self.changed.set()
+
+    def append_clean(self, clean):
+        try:
+            # Track the unfiltered counterpart even while AEC is active, so
+            # partial 10 ms blocks stay aligned across render generations.
+            if len(clean) > len(self.raw_pending):
+                raise RuntimeError("Echo processor output lost its capture alignment")
+            raw = bytes(self.raw_pending[:len(clean)])
+            del self.raw_pending[:len(clean)]
             if self.passthrough_after is not None:
-                # AEC emits whole 10 ms blocks even when the device supplies
-                # 16 ms blocks. Keep the exact unfiltered counterpart in order.
-                self.raw_pending.extend(frame.samples.tobytes())
-                if not 0 <= len(self.raw_pending) - len(clean) < 320:
-                    raise RuntimeError("Echo processor output lost its capture alignment")
-                raw = bytes(self.raw_pending[:len(clean)])
-                del self.raw_pending[:len(clean)]
                 cutoff = math.ceil((self.passthrough_after - self.capture_start) * RATE)
                 boundary = min(len(clean) // 2, max(0, cutoff - self.processed_samples))
                 clean = clean[:2 * boundary] + raw[2 * boundary:]
@@ -111,6 +159,13 @@ class CleanInput:
                 raise RuntimeError(self.error)
             self.changed.clear()
             await asyncio.wait_for(self.changed.wait(), .35)
+        return self.take_packet()
+
+    def take_packet(self):
+        if self.error:
+            raise RuntimeError(self.error)
+        if len(self.pending) < 640:
+            raise RuntimeError("A complete microphone packet is not available")
         packet = bytes(self.pending[:640])
         del self.pending[:640]
         self.released_samples += 320
@@ -309,7 +364,7 @@ class FollowUpEnded(TimeoutError):
 async def stream_reply(device, session, result, stream, set_output, phase, listening_phase, *, gain_db, max_age_ms,
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None,
                        idle_seconds=DEFAULT_IDLE_SECONDS, closure_policy=None, assist=False,
-                       output_gain_db=VOICE_OUTPUT_GAIN_DB):
+                       output_gain_db=VOICE_OUTPUT_GAIN_DB, duplex=False):
     reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
     sender = None
@@ -318,6 +373,47 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
     sent = peak_before = peak_after = clipped = 0
     first_sent_at = None
     first_age = max_age = None
+
+    async def send_packet():
+        nonlocal origin, sent, first_sent_at, first_age, max_age, peak_before, peak_after, clipped
+        packet, captured_at = await stream.packet()
+        now = time.monotonic()
+        if sent == 0:
+            origin = now
+        elif (early_echo or duplex) and now > origin + sent / RATE:
+            origin = now - sent / RATE
+        due = origin + sent / RATE
+        await asyncio.sleep(max(0, due - time.monotonic()))
+        if time.monotonic() - due > .1:
+            raise RuntimeError("Microphone input pacing exceeded 100 ms")
+        if reply.first_voice_at is not None and not duplex:
+            return
+        sent_at = time.monotonic()
+        age = (sent_at - captured_at) * 1000
+        if not -100 <= age <= max_age_ms:
+            raise RuntimeError("Microphone input exceeded its capture-age bound; retry the turn")
+        first_age = age if first_age is None else first_age
+        max_age = age if max_age is None else max(max_age, age)
+        transmitted, before, after, overload = gain_packet(packet, gain_db)
+        await session.send_audio(transmitted)
+        if first_sent_at is None:
+            first_sent_at = sent_at
+        peak_before = max(peak_before, before)
+        peak_after = max(peak_after, after)
+        clipped += overload
+        vad_pcm = transmitted if vad_gain_db == gain_db else gain_packet(packet, vad_gain_db)[0]
+        if endpoint.observe(vad_pcm, captured_at, sent_at):
+            policy.user_speech(sent_at)
+        sent += 320
+
+    async def track_render(chunks):
+        bound = False
+        async for chunk in chunks:
+            if not bound:
+                stream.begin_reply_render(reply)
+                bound = True
+            yield chunk
+
     try:
         device.pcm_consumer = stream.offer
         device.playback = reply.player
@@ -326,6 +422,8 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         result["reply_output_gain_db"] = output_gain_db
         result["reply_source_reserve_ms"] = source_prime_packets * 10
         chunks = stream.reply_chunks(reply) if early_echo else reply.chunks()
+        if duplex:
+            chunks = track_render(chunks)
         sender = asyncio.create_task(reply.player.send_stream(chunks, prime_packets=5,
                                                                source_prime_packets=source_prime_packets,
                                                                recover_reply_stalls=True))
@@ -354,38 +452,11 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                 raise FollowUpEnded("inactivity", f"No detected speech for {idle_seconds:g} seconds")
             if input_deadline is None and now >= deadline and not policy.pending_work:
                 raise TimeoutError("No spoken reply before the preview time limit")
-            packet, captured_at = await stream.packet()
-            now = time.monotonic()
-            if sent == 0:
-                origin = now
-            elif early_echo and now > origin + sent / RATE:
-                # Continue at the original sample rate after waiting for a
-                # speaker report instead of trying to send the queue faster.
-                origin = now - sent / RATE
-            due = origin + sent / RATE
-            await asyncio.sleep(max(0, due - time.monotonic()))
-            if time.monotonic() - due > .1:
-                raise RuntimeError("Microphone input pacing exceeded 100 ms")
-            if reply.first_voice_at is None:
-                sent_at = time.monotonic()
-                age = (sent_at - captured_at) * 1000
-                if not -100 <= age <= max_age_ms:
-                    raise RuntimeError("Microphone input exceeded its capture-age bound; retry the turn")
-                first_age = age if first_age is None else first_age
-                max_age = age if max_age is None else max(max_age, age)
-                transmitted, before, after, overload = gain_packet(packet, gain_db)
-                await session.send_audio(transmitted)
-                if first_sent_at is None:
-                    first_sent_at = sent_at
-                peak_before = max(peak_before, before)
-                peak_after = max(peak_after, after)
-                clipped += overload
-                vad_pcm = transmitted if vad_gain_db == gain_db else gain_packet(packet, vad_gain_db)[0]
-                if endpoint.observe(vad_pcm, captured_at, sent_at):
-                    policy.user_speech(sent_at)
-                sent += 320
-        device.pcm_consumer = None
+            await send_packet()
+        if not duplex:
+            device.pcm_consumer = None
         result["speech_endpoint"] = endpoint.timing(reply.first_voice_at)
+        sent_before_reply = sent
         result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
         phase("playing the GPT-Live reply")
         async with asyncio.timeout(REPLY_DRAIN_SECONDS):
@@ -395,12 +466,23 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                     raise RuntimeError("Reply playback stopped early")
                 if session.metrics.error:
                     raise RuntimeError("GPT-Live stopped before the reply finished")
-                await asyncio.sleep(.025)
+                if device.errors or output_route(device.info) is None:
+                    raise RuntimeError("The microphone or speaker playback failed")
+                if duplex:
+                    await send_packet()
+                else:
+                    await asyncio.sleep(.025)
             set_output(None)
             await reply.finish()
             await sender
         if reply.player.frames_rendered != reply.player.frames_sent:
             raise RuntimeError("Voice PE did not confirm the complete reply")
+        if duplex:
+            stream.finish_reply_render()
+            result["duplex_input"] = {"forwarded_during_reply": sent > sent_before_reply,
+                "samples_forwarded_during_reply": sent - sent_before_reply,
+                "max_unconfirmed_capture_ms": round(stream.max_unconfirmed_samples * 1000 / RATE, 1),
+                "render_reference_confirmed": True}
         return reply
     finally:
         set_output(None)
@@ -418,6 +500,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                                   "vad_gain_db": vad_gain_db,
                                   "capture_samples_after_echo_guard": stream.passthrough_samples}
         device.pcm_consumer = None
+        reply.player.on_render_progress = None
         if sender is not None:
             if not sender.done():
                 sender.cancel()
@@ -432,7 +515,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                          follow_up=False, wait_for_preconnected_wake=None, standby=False,
                          assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS,
                          standby_context=None, voice=VOICE, personality="classic",
-                         output_gain_db=VOICE_OUTPUT_GAIN_DB):
+                         output_gain_db=VOICE_OUTPUT_GAIN_DB, duplex=False):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -552,7 +635,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                                       source_prime_packets=20 if preconnect else 12,
                                       closure_policy=closure_policy,
                                       input_deadline=input_deadline if assist else None, assist=assist,
-                                      output_gain_db=output_gain_db)]
+                                      output_gain_db=output_gain_db, duplex=duplex)]
         finish_turn()
         terminal = device.wake_playback_terminal
         terminal_at = getattr(device, "wake_render_terminal_at", None)
@@ -566,8 +649,11 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             if input_deadline is not None and time.monotonic() >= input_deadline:
                 result["conversation_end"] = "session_limit"
                 break
-            stream = warm_input_after_render(device, replies[-1], delay_ms)
-            reference = "confirmed_render_tail" if stream is not None else "quiet_tail_guard"
+            if duplex:
+                reference = "continuous_capture_and_render"
+            else:
+                stream = warm_input_after_render(device, replies[-1], delay_ms)
+                reference = "confirmed_render_tail" if stream is not None else "quiet_tail_guard"
             if stream is None:
                 phase("clearing the speaker echo tail")
                 await asyncio.sleep(.18)
@@ -580,9 +666,10 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                     session.begin_turn()
                 replies.append(await stream_reply(device, session, warm, stream, set_output, phase,
                                                   "listening for your warm follow-up", gain_db=gain_db,
-                                                  max_age_ms=250, warm_follow_up=True, input_deadline=input_deadline,
+                                                  max_age_ms=opening.max_ms if duplex else 250,
+                                                  warm_follow_up=True, input_deadline=input_deadline,
                                                   idle_seconds=idle_seconds, closure_policy=closure_policy, assist=assist,
-                                                  output_gain_db=output_gain_db))
+                                                  output_gain_db=output_gain_db, duplex=duplex))
                 finish_turn()
             except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 if standby and isinstance(exc, FollowUpEnded):

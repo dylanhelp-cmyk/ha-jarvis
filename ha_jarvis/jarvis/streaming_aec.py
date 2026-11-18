@@ -171,9 +171,9 @@ def residual_echo_similarity(clean_pcm, render):
 class ConfirmedRenderInput:
     """Release microphone samples only when the matching DMA reference is known."""
 
-    def __init__(self, player, pcm, delay_ms):
+    def __init__(self, player, pcm, delay_ms, *, echo=None):
         self.player, self.pcm = player, pcm
-        self.echo = StreamingEcho(delay_ms)
+        self.echo = echo if echo is not None else StreamingEcho(delay_ms)
         self.waiting = deque()
         self.waiting_samples = self.max_waiting_samples = 0
         self.rendered_frames = self.processed_during_playback = 0
@@ -198,7 +198,7 @@ class ConfirmedRenderInput:
 
     def release_confirmed(self, offset_ms):
         """Recheck queued capture as soon as a new DMA report arrives."""
-        if self.error or not self.waiting:
+        if self.error:
             return b""
         try:
             if self.waiting_samples > SAMPLE_RATE // 2:

@@ -143,6 +143,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(device.wake_event.is_set())
             self.assertTrue(kwargs["follow_up"])
             self.assertTrue(kwargs["after_greeting"])
+            self.assertTrue(kwargs["duplex"])
             self.assertEqual(kwargs["idle_seconds"], 6)
             self.assertEqual(result["standby_idle_seconds"], 6)
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
@@ -158,6 +159,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         ready = {"connected": True, "muted": False, "raw_ready": True,
                  "jack_plugged": True, "wake_capture_protocol": 1, "playback_protocol": 1}
         self.bench.cloud_settings.set_key("sk-local-standby-test-key")
+        self.bench.continuous_input_ready = True
         response = await self.ui.put("/api/config", json={"standby_idle_seconds": 2})
         self.assertEqual(response.status, 400)
         response = await self.ui.put("/api/config", json={"standby_idle_seconds": 6})
@@ -172,7 +174,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.server.verified_render", return_value=("clip", b"pcm")),
               patch("jarvis.conversation_trial.run_voice_turn", side_effect=voice_turn) as cloud):
             body = {"kind": "voice_turn", "standby": True, "after_greeting": True, "confirm_paid": True,
-                    "allow_room_audio_to_openai": True, "comfortable_volume_confirmed": True}
+                    "allow_room_audio_to_openai": True, "comfortable_volume_confirmed": True, "duplex": True}
             response = await self.ui.post("/api/tests", json=body)
             self.assertEqual(response.status, 400)
             self.assertIsNone(self.bench.task)
@@ -185,6 +187,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
             assist_client.assert_not_called()
             body["allow_assist_standby"] = True
+            self.bench.continuous_input_ready = False
+            response = await self.ui.post("/api/tests", json=body)
+            self.assertEqual(response.status, 400)
+            cloud.assert_not_called()
+            self.bench.continuous_input_ready = True
             response = await self.ui.post("/api/tests", json=body)
             self.assertEqual(response.status, 202)
             await asyncio.wait_for(second_arm.wait(), 1)
