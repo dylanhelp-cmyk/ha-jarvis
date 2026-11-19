@@ -220,8 +220,10 @@ class ConfirmedRenderInput:
             if player.terminal_confirmed:
                 raise RuntimeError("Playback ended without a timed DMA reference")
             return b""
-        if abs(last - first - count / 48) > 15 or count * 4 > len(self.pcm):
-            raise RuntimeError("DMA timestamps do not match the available reference samples")
+        if count * 4 > len(self.pcm):
+            raise RuntimeError("DMA count exceeds the available reference samples")
+        if abs(last - first - count / 48) > 15:
+            raise RuntimeError("DMA clock span differs from the PCM duration by more than 15 ms")
         if count > self.rendered_frames:
             self.echo.render(bytes(self.pcm[self.rendered_frames * 4:count * 4]),
                              (first + offset_ms) / 1000, first_frame=self.rendered_frames)

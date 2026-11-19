@@ -234,6 +234,30 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.ui.get(path)
                 self.assertNotIn(token, await response.text())
 
+    async def test_conversation_stability_runs_locally_without_paid_or_room_upload_consent(self):
+        from unittest.mock import AsyncMock
+
+        self.bench.device.info.update(jack_plugged=False, playback_protocol=1, firmware="0.2.7", output_route="voice_pe_internal")
+        ready = {"connected": True, "muted": False, "raw_ready": True,
+                 "jack_plugged": False, "playback_protocol": 1, "output_route": "voice_pe_internal"}
+
+        async def measure(result, *, conversation_load):
+            self.assertTrue(conversation_load)
+            result["status"] = "measured"
+
+        with (patch.object(self.bench.device, "snapshot", return_value=ready),
+              patch.object(self.bench.device, "begin", new_callable=AsyncMock) as capture,
+              patch.object(self.bench.device, "end", new_callable=AsyncMock),
+              patch.object(self.bench, "acknowledgment_status", return_value={"verified": True}),
+              patch.object(self.bench, "measure_render_alignment", side_effect=measure)):
+            response = await self.ui.post("/api/tests", json={"kind": "duplex_stability",
+                "comfortable_volume_confirmed": True, "repetitions": 1})
+            self.assertEqual(response.status, 202, await response.text())
+            await self.bench.task
+            capture.assert_awaited_once()
+            self.assertEqual(self.bench.results[0]["status"], "measured")
+            self.assertEqual(self.bench.cloud_settings.attempt_count, 0)
+
     async def test_alignment_retries_a_discontinuous_render_and_requires_two_matches(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

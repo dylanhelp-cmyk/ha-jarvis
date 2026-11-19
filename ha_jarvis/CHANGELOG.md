@@ -1,3 +1,9 @@
+# 0.2.78
+
+- Give experimental listening-during-replies playback a 100 ms reserve. Keep the strict clock-span and gap checks.
+- Retain device-confirmed reply level measurements on failed and cancelled turns, including per-second PCM levels.
+- Add a local conversation-playback stability check with longer clips and controlled source jitter before the next spoken trial.
+
 # 0.2.77
 
 - Seal cancelled reply queues before stopping playback and ignore late audio for that reply.

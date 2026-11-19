@@ -5,7 +5,7 @@ const labels = {latency: 'Playback latency', stop: 'Stop response', interrupt: '
   interrupt_speech: 'Spoken reply interruption',
   interrupt_acoustic: 'Acoustic interruption check',
   interrupt_control: 'Playback-only interruption check', synthetic_interrupt: 'Generated interruption control',
-  reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', synthetic_sessions: 'Conversation checks', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
+  reply_stall: 'Speech recovery', synthetic_replies: 'Synthetic reply timing', synthetic_sessions: 'Conversation checks', wake_ack: 'Wake acknowledgment', render_alignment: 'Echo reference alignment', duplex_stability: 'Conversation playback stability', voice_turn: 'Voice preview', echo: 'Quiet-room echo test', connection: 'Microphone connection'};
 let kind = 'latency';
 let state;
 let busy = false;
@@ -65,7 +65,7 @@ function readiness() {
   else if (kind.startsWith('interrupt') && !state.echo_alignment_ready) reason = 'Run Echo reference alignment before the interruption check.';
   else if (kind.startsWith('interrupt_') && !state.interruption_profile_ready) reason = 'Repeat Echo reference alignment in a quiet room.';
   else if (acoustic && !$('separate-speaker-confirmed').checked) reason = 'Confirm the separate speaker for browser audio.';
-  else if (kind === 'render_alignment' && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
+  else if (['render_alignment', 'duplex_stability'].includes(kind) && !state?.acknowledgment.verified) reason = 'Verify the wake clip before testing render alignment.';
   else if (kind === 'wake_ack' && !state?.acknowledgment.cached_on_device) reason = 'Verify and preload the wake acknowledgment first.';
   else if (wakeTest && startup.value && (!state?.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
@@ -271,6 +271,18 @@ function showResults(results) {
         (cold == null ? '' : ' / first sound ' + cold + ' ms after command'));
     }
     if (result.playback) add(card, 'p', result.playback.frames_accepted + ' frames accepted by the speaker API.');
+    if (result.reply_output_signal?.status === 'measured') {
+      const signal = result.reply_output_signal;
+      const details = document.createElement('details');
+      add(details, 'summary', 'Reply level measurements');
+      add(details, 'p', signal.scope);
+      add(details, 'p', 'Output gain ' + signal.output_gain_db + ' dB; peak ' + signal.peak_pcm +
+        ' PCM; full-scale samples ' + signal.full_scale_samples + '.');
+      for (const window of signal.windows) add(details, 'p', (window.start_ms / 1000).toFixed(1) +
+        ' s: ' + (window.rms_dbfs == null ? 'silent PCM' : 'RMS ' + window.rms_dbfs + ' dBFS') +
+        ', peak ' + window.peak_pcm + ' PCM.');
+      card.append(details);
+    }
     if (result.kind === 'reply_stall' && result.playback?.schedule_rebases) {
       add(card, 'p', 'Sender shifted its schedule by ' + result.playback.schedule_shift_ms + ' ms.');
     }

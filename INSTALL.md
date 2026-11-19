@@ -30,6 +30,8 @@ To test Assist in standby, select **Stay ready for “Hey Jarvis”** and **Allo
 
 App **0.2.76** adds **Listen during replies (experimental)** in Voice preview. Run **Echo reference alignment** first and check that the continuous microphone check passes. For one focused trial, enable the warm follow-up and this option, approve the room-audio consent and ask a question. While Jarvis answers, ask a short follow-up. This tests continuous capture and provider listening; reliable immediate playback cancellation is still being developed. Leave the option off to use the previous preview path.
 
+App **0.2.78** increases the playback reserve only for **Listen during replies**. Run the local **Conversation playback stability** check first. It plays two longer references while microphone cleanup runs, with no OpenAI connection. A failed voice trial now keeps **Reply level measurements** in its result, so a volume change can be investigated without retaining audio.
+
 ## Recovery
 
 Keep a Supervisor backup of the previous App and its data, and a matching firmware build or fixed source checkout, before upgrading. The rollback pair is App **0.1.36** and firmware **0.1.6**, from commit [ae6d932](https://github.com/dylanhelp-cmyk/ha-jarvis/tree/ae6d932). Restore the App and firmware together. Use the fixed source from that commit if Builder's usual repository entry now points to the wired firmware. Keep the existing device name and secrets. If OTA recovery is unavailable, install the fixed firmware through USB.

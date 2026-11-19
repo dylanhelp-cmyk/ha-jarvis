@@ -425,7 +425,9 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         chunks = stream.reply_chunks(reply) if early_echo else reply.chunks()
         if duplex:
             chunks = track_render(chunks)
-        sender = asyncio.create_task(reply.player.send_stream(chunks, prime_packets=5,
+        prime_packets = 10 if duplex else 5
+        result["reply_playback_prime_ms"] = prime_packets * 10
+        sender = asyncio.create_task(reply.player.send_stream(chunks, prime_packets=prime_packets,
                                                                source_prime_packets=source_prime_packets,
                                                                recover_reply_stalls=True))
         phase(listening_phase)
@@ -512,6 +514,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
             with suppress(RuntimeError, OSError, TimeoutError):
                 await reply.player.stop()
             result["playback"] = reply.player.snapshot()
+        result["reply_output_signal"] = reply.signal_report()
         device.playback = None
 
 

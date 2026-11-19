@@ -82,6 +82,9 @@ class SimulatedReply:
     def discard(self):
         self.draining.set()
 
+    def signal_report(self):
+        return {"status": "simulated"}
+
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_continuous_input_keeps_partial_blocks_and_aec_across_two_replies(self):
@@ -132,6 +135,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplex_forwards_ordered_input_while_reply_is_playing(self):
         sent, observed = [], []
+        primes = []
         target = None
 
         class Reply(SimulatedReply):
@@ -140,6 +144,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 await self.draining.wait()
 
             async def send_stream(self, chunks, **kwargs):
+                primes.append(kwargs["prime_packets"])
                 async for _ in chunks:
                     pass
 
@@ -174,6 +179,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(observed))
         stream.begin_reply_render.assert_called_once()
         stream.finish_reply_render.assert_called_once()
+        self.assertEqual(primes, [10])
+        self.assertEqual(result["reply_playback_prime_ms"], 100)
         self.assertTrue(result["duplex_input"]["render_reference_confirmed"])
 
     async def test_missing_reply_reference_stops_input_instead_of_releasing_raw_speech(self):

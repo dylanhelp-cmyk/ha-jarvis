@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -100,6 +101,43 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.commands, ["play_start", "play_drain"])
         self.assertIn("source_prime_wait_ms", player.snapshot())
         self.assertIn("play_start_wait_after_prime_ms", player.snapshot())
+
+    async def test_100_ms_playback_reserve_keeps_the_six_packet_transport_window(self):
+        full = asyncio.Event()
+
+        class Socket(FakeSocket):
+            accepting = False
+
+            async def send_bytes(self, packet):
+                if self.accepting:
+                    return await super().send_bytes(packet)
+                self.packets.append(HEADER.unpack_from(packet))
+                if len(self.packets) == 6:
+                    full.set()
+
+        ws = Socket()
+        ws.player = player = JackPlayback(SimpleNamespace(ws=ws), "larger-reserve")
+
+        async def chunks():
+            for _ in range(24):
+                yield bytes(480 * 4)
+
+        task = asyncio.create_task(player.send_stream(chunks(), prime_packets=10, source_prime_packets=12))
+        try:
+            await asyncio.wait_for(full.wait(), .5)
+            await asyncio.sleep(.01)
+            self.assertEqual(len(ws.packets), 6)
+            ws.accepting = True
+            for packet in ws.packets[:6]:
+                player.receive({"type": "play_render", "playback_id": player.id, "generation": player.generation,
+                    "first_sample": packet[6], "samples": packet[3], "device_time_ms": 1000 + packet[6] // 48})
+            await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(player.max_in_flight, 6 * 480)
+        self.assertEqual([packet[6] for packet in ws.packets], [i * 480 for i in range(24)])
 
     async def test_reply_stall_preserves_order_and_resumes_at_normal_cadence(self):
         for recover, delay, should_drain in [(True, .25, True), (False, .25, False), (True, .6, False)]:

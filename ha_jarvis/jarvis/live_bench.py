@@ -205,6 +205,7 @@ class BenchReply:
         self.first_voice_sample = None
         self.leading_pcm = b""
         self.output_scale = 10 ** (output_gain_db / 20)
+        self.output_gain_db = output_gain_db
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=RENDER_RATE)
         self.accepting_audio = True
         self.discarded = False
@@ -272,6 +273,25 @@ class BenchReply:
         self.queue.put_nowait(None)
         # Keep the PCM reference until DMA stop is confirmed and its echo
         # tail is processed. Queued PCM is never yielded again.
+
+    def signal_report(self):
+        count = self.player.frames_rendered or 0
+        report = {"scope": "device-confirmed digital PCM; acoustic loudness is not measured",
+                  "output_gain_db": self.output_gain_db, "received_frames": len(self.pcm) // 4,
+                  "rendered_frames": count}
+        if not 0 < count <= len(self.pcm) // 4:
+            return {**report, "status": "unavailable", "reason": "No confirmed rendered PCM to measure"}
+        samples = np.frombuffer(self.pcm, dtype="<i2", count=2 * count)[::2].astype(np.int32)
+        windows = []
+        for start in range(0, count, RENDER_RATE):
+            block = samples[start:start + RENDER_RATE]
+            rms = float(np.sqrt(np.mean(block.astype(np.float64) ** 2)))
+            windows.append({"start_ms": round(start / 48, 1), "samples": len(block),
+                            "rms_dbfs": round(20 * np.log10(rms / 32768), 1) if rms else None,
+                            "peak_pcm": int(np.max(np.abs(block), initial=0))})
+        return {**report, "status": "measured", "peak_pcm": int(np.max(np.abs(samples), initial=0)),
+                "full_scale_samples": int(np.count_nonzero((samples == -32768) | (samples == 32767))),
+                "windows": windows}
 
 
 REPLY_PROFILES = {

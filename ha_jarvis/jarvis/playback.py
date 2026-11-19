@@ -16,6 +16,8 @@ CHANNELS = 2
 PACKET_FRAMES = 480
 HEADER = struct.Struct("<4sBBHIIQ")
 MAX_IN_FLIGHT = 6 * PACKET_FRAMES
+# PCM ahead of playback is separate from packets awaiting device acceptance.
+MAX_PRIME_PACKETS = 10
 MAX_SEND_LAG_MS = 100
 MAX_REPLY_RECOVERY_LAG_MS = 500
 WAKE_CACHE_WINDOW = 4
@@ -217,8 +219,8 @@ class JackPlayback:
             if partial:
                 yield bytes(partial)
 
-        if not 1 <= prime_packets <= MAX_IN_FLIGHT // PACKET_FRAMES:
-            raise ValueError("Playback prime exceeds the bounded device window")
+        if not 1 <= prime_packets <= MAX_PRIME_PACKETS:
+            raise ValueError("Playback prime exceeds 100 ms")
         source_prime = prime_packets if source_prime_packets is None else source_prime_packets
         if not prime_packets <= source_prime <= 20:
             raise ValueError("Playback source prime exceeds 200 ms")

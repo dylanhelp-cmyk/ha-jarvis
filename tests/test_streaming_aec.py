@@ -19,6 +19,15 @@ class ReferenceRecorder:
 
 
 class StreamingEchoTests(unittest.TestCase):
+    def test_accumulated_small_playback_gaps_still_invalidate_the_reference(self):
+        player = SimpleNamespace(first_rendered_ms=1000, last_rendered_ms=1120, frames_rendered=4800,
+            render_clock_invalid=False, schedule_rebases=0, max_render_discontinuity_us=10000,
+            terminal_confirmed=False)
+        stream = ConfirmedRenderInput(player, bytes(4800 * 4), 35)
+        clean = stream.offer(PCMFrame(0, 0, 1000, np.zeros(256, dtype="<i2")), 0)
+        self.assertEqual(clean, b"")
+        self.assertIn("clock span", stream.error)
+
     def test_residual_echo_similarity_distinguishes_delayed_echo_from_independent_input(self):
         rng = np.random.default_rng(11)
         reference = rng.integers(-700, 700, size=3000, dtype=np.int16)

@@ -10,6 +10,26 @@ from jarvis.playback import stereo_pcm
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    def test_level_report_excludes_received_audio_the_device_did_not_render(self):
+        reply = BenchReply(SimpleNamespace(ws=None), "partial", output_gain_db=-6)
+        mono = np.repeat(np.array([1000, 4000, 30000], dtype="<i2"), 48000)
+        reply.pcm.extend(np.repeat(mono, 2).astype("<i2").tobytes())
+        reply.player.frames_rendered = 96000
+        report = reply.signal_report()
+        self.assertEqual(report["received_frames"], 144000)
+        self.assertEqual(report["rendered_frames"], 96000)
+        self.assertEqual(report["peak_pcm"], 4000)
+        self.assertEqual(report["full_scale_samples"], 0)
+        self.assertEqual(len(report["windows"]), 2)
+        self.assertAlmostEqual(report["windows"][1]["rms_dbfs"] - report["windows"][0]["rms_dbfs"], 12, delta=.1)
+
+    def test_level_report_without_confirmed_playback_is_unavailable(self):
+        reply = BenchReply(SimpleNamespace(ws=None), "unconfirmed")
+        reply.pcm.extend(bytes(4800 * 4))
+        report = reply.signal_report()
+        self.assertEqual(report["status"], "unavailable")
+        self.assertNotIn("peak_pcm", report)
+
     async def test_cancelled_reply_seals_queued_and_late_audio_without_losing_its_reference(self):
         reply = BenchReply(SimpleNamespace(ws=None), "cancelled")
         source = np.full(1600, 1500, dtype="<i2").tobytes()

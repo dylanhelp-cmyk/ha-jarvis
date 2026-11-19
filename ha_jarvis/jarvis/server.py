@@ -527,11 +527,8 @@ class Bench:
             result["wake_to_first_capture_sample_ms"] = round((capture_start - detected_at) * 1000, 1)
         turns = [result, result.get("warm_reply"), *result.get("additional_warm_replies", [])]
         for index, (reply, turn) in enumerate(zip(replies, turns)):
-            output = np.frombuffer(reply.pcm, dtype="<i2")[::2]
-            turn["reply_output_signal"] = {
-                "peak_pcm": int(np.max(np.abs(output.astype(np.int32)), initial=0)),
-                "full_scale_samples": int(np.count_nonzero((output == -32768) | (output == 32767))),
-            }
+            if "reply_output_signal" not in turn:
+                turn["reply_output_signal"] = reply.signal_report()
             match = await asyncio.to_thread(
                 match_streamed_reply, captured, capture_start, reply, reply.first_voice_at, device.clock_offset_ms,
                 alignment_ms=delay, clock_uncertainty_ms=result["clock_uncertainty_ms"])
@@ -551,7 +548,7 @@ class Bench:
         if follow_up and any(t["status"] == "detected" for t in result["trials"]):
             result["status"] = "measured"
 
-    async def measure_render_alignment(self, result):
+    async def measure_render_alignment(self, result, *, conversation_load=False):
         from types import SimpleNamespace
         from .conversation_trial import CleanInput
         from .interruption import calibrate_echo_bands
@@ -563,6 +560,8 @@ class Bench:
         if cached is None:
             raise ValueError("Verify the wake acknowledgment before checking render alignment")
         ident, pcm = cached
+        if conversation_load:
+            pcm *= 3
         self.echo_alignment = None
         self.echo_band_profile = None
         reference = await asyncio.to_thread(render_reference, pcm)
@@ -600,7 +599,17 @@ class Bench:
             if continuous is not None and not continuous.error:
                 continuous.begin_reply_render(SimpleNamespace(player=player, pcm=pcm))
             try:
-                await player.send(pcm, prime_packets=5)
+                if conversation_load:
+                    async def chunks():
+                        origin = time.monotonic()
+                        for position in range(0, len(pcm), 480 * 4):
+                            await asyncio.sleep(max(0., origin + position / (48000 * 4) - time.monotonic()))
+                            if position and position % (48000 * 4) == 0:
+                                await asyncio.sleep(.035)
+                            yield pcm[position:position + 480 * 4]
+                    await player.send_stream(chunks(), prime_packets=10, source_prime_packets=12)
+                else:
+                    await player.send(pcm, prime_packets=5)
             finally:
                 with suppress(RuntimeError, OSError, TimeoutError):
                     await player.stop()
@@ -649,7 +658,11 @@ class Bench:
         offset = device.clock_offset_ms
         renders, delays = [], []
         result["metric"] = "dma_start_to_acoustic_reference"
-        result["playback_prime_ms"] = 50
+        result["playback_prime_ms"] = 100 if conversation_load else 50
+        if conversation_load:
+            result["source_prime_ms"] = 120
+            result["injected_source_jitter_ms"] = 35
+            result["source"] = "paced local clip; no OpenAI connection"
         for index, (player, span, reason) in enumerate(plays, 1):
             if reason is not None:
                 match = {"status": "unavailable", "reason": reason}
@@ -1269,8 +1282,8 @@ class Bench:
                                               assist_delegation=assist_delegation, after_greeting=after_greeting,
                                               standby_context=standby_context, duplex=duplex)
                 return
-            if kind == "render_alignment":
-                await self.measure_render_alignment(result)
+            if kind in ("render_alignment", "duplex_stability"):
+                await self.measure_render_alignment(result, conversation_load=kind == "duplex_stability")
                 return
             if kind in ("interrupt", "interrupt_speech", "interrupt_control", "interrupt_acoustic"):
                 await self.measure_interrupt(result, spoken_reply=kind != "interrupt",
@@ -1650,7 +1663,7 @@ def create_ui(bench):
         if bench.test["running"]:
             raise web.HTTPConflict(text="A test is already running")
         kind, repetitions = data.get("kind"), data.get("repetitions", bench.config["repetitions"])
-        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment",
+        if kind not in ("latency", "stop", "stability", "echo", "connection", "wake_ack", "render_alignment", "duplex_stability",
                         "reply_stall", "interrupt", "interrupt_speech", "interrupt_control", "interrupt_acoustic",
                         "voice_turn"):
             raise ValueError("Unsupported local test")
@@ -1728,7 +1741,7 @@ def create_ui(bench):
                 raise ValueError("Choose an available interruption test phrase")
         if kind == "interrupt_acoustic" and (source_variant is None or data.get("confirm_separate_speaker") is not True):
             raise ValueError("Confirm the separate browser speaker and choose a test phrase")
-        if kind == "render_alignment" and not bench.acknowledgment_status()["verified"]:
+        if kind in ("render_alignment", "duplex_stability") and not bench.acknowledgment_status()["verified"]:
             raise ValueError("Verify the wake clip before testing its render alignment")
         startup_transport = data.get("startup_transport")
         if startup_transport is not None:
