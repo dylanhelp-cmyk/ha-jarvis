@@ -79,6 +79,15 @@ def parse_diagnostics(value):
         parsed["last_fault"] = fault(value.get("last_fault"))
         parsed["transport_fault"] = fault(value.get("transport_fault"))
         parsed["pcm_send"] = pcm_send(value.get("pcm_send"))
+        stacks = value.get("stack_headroom_bytes")
+        parsed["stack_headroom_bytes"] = None
+        if isinstance(stacks, dict):
+            try:
+                parsed["stack_headroom_bytes"] = {
+                    key: uint(stacks[key]) if stacks.get(key) is not None else None
+                    for key in ("loop", "network", "websocket_data", "microphone")}
+            except (ValueError, KeyError, TypeError):
+                pass  # An optional invalid reading cannot erase other fault evidence.
         return parsed
     except (ValueError, KeyError, TypeError):
         return None

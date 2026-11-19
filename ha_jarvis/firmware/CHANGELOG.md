@@ -1,3 +1,8 @@
+# 0.2.8
+
+- Move large send, receive and microphone packet buffers into separate task-owned storage instead of task stacks. Preserve queue sizes, packet order and playback gain.
+- Report lifetime minimum free stack bytes for the loop, network worker, WebSocket data task and microphone task. Sample at most once per second per task; unobserved readings stay unavailable.
+
 # 0.2.7
 
 - Enable the onboard speaker amplifier during playback when the jack is unplugged. Stop current playback if the output changes.

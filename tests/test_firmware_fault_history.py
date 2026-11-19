@@ -164,8 +164,12 @@ int main() {
   hello["device_id"] = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
   hello["token"] = std::string(253, 't') + std::string(3, '"');
   hello["sample_rate"] = 16000; hello["channels"] = 1;
-  hello["firmware"] = "0.1.6"; hello["firmware_project"] = "jarvis.voice_pe_testbench";
+  hello["firmware"] = "0.2.8"; hello["firmware_project"] = "jarvis.voice_pe_testbench";
   hello["xmos_version"] = "1.3.1"; hello["muted"] = false; hello["raw_stage"] = "NONE";
+  hello["playback_protocol"] = 1; hello["jack_plugged"] = false;
+  hello["output_route"] = "voice_pe_internal"; hello["wake_capture_protocol"] = 1;
+  hello["capture_gain"] = 4; hello["ack_cache_protocol"] = 1;
+  hello["ack_cache_max_frames"] = 144000; hello["ack_cache_id"] = std::string(64, 'f');
   write_fault_diagnostics(hello["diagnostics"].to<JsonObject>(), state, "ffffffffffffffff", UINT32_MAX, UINT32_MAX, UINT32_MAX);
   PcmSendSnapshot pcm;
   pcm.valid = pcm.has_failure = true;
@@ -173,6 +177,8 @@ int main() {
   pcm.max_success_duration_ms = pcm.max_failed_duration_ms = pcm.max_queue_age_ms = UINT32_MAX;
   pcm.last_failed_send = {INT_MIN, UINT32_MAX, UINT32_MAX, UINT32_MAX};
   write_pcm_send_diagnostics(hello["diagnostics"].as<JsonObject>(), pcm);
+  JsonObject stacks = hello["diagnostics"]["stack_headroom_bytes"].to<JsonObject>();
+  for (const char *key : {"loop", "network", "websocket_data", "microphone"}) stacks[key] = UINT32_MAX - 1;
   assert(!hello["diagnostics"]["root_fault"].containsKey("errno"));
   assert(hello["diagnostics"]["transport_fault"]["errno"] == INT_MIN);
   assert(hello["diagnostics"]["last_fault"]["errno"] == INT_MIN);

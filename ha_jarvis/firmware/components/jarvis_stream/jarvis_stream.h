@@ -19,6 +19,7 @@
 #include "ack_cache.h"
 #include "wake_capture.h"
 #include "render_clock.h"
+#include "task_stack.h"
 
 namespace esphome::jarvis_stream {
 struct FaultLock {
@@ -87,6 +88,7 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   void record_fault_at_(FaultReason reason, uint32_t connection_generation, uint32_t capture_generation,
                         const esp_websocket_event_data_t *data = nullptr);
   void diagnostics_json_(JsonObject out);
+  static void sample_stack_(TaskStackMinimum &minimum, uint32_t &last_ms, uint32_t now);
   static uint32_t now_ms_();
   uint8_t capture_gain_{1};
   microphone::MicrophoneSource *mic_{nullptr};
@@ -95,6 +97,14 @@ class JarvisStream : public Component, public i2c::I2CDevice {
   QueueHandle_t audio_queue_{nullptr}, control_queue_{nullptr}, outgoing_queue_{nullptr};
   QueueHandle_t playback_queue_{nullptr};
   TaskHandle_t network_worker_handle_{nullptr};
+  // Queue sends copy their item before returning. Each scratch buffer has one
+  // task owner; never reuse the loop's pending playback packet in the RX task.
+  Outgoing loop_outgoing_{}, worker_outgoing_{};
+  AudioPacket worker_audio_packet_{}, microphone_audio_packet_{};
+  PlaybackPacket incoming_playback_packet_{};
+  TaskStackMinimum loop_stack_, network_stack_, websocket_stack_, microphone_stack_;
+  uint32_t last_loop_stack_ms_{0}, last_network_stack_ms_{0};
+  uint32_t last_websocket_stack_ms_{0}, last_microphone_stack_ms_{0};
   std::string server_url_, device_id_, token_, capture_id_, incoming_;
   std::atomic<bool> active_{false}, authenticated_{false}, connected_{false}, muted_{true}, transport_fault_{false};
   std::atomic<bool> network_ready_{false}, worker_reset_{false}, shutting_down_{false};

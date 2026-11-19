@@ -10,6 +10,8 @@ Validate, compile and install through Builder. Firmware 0.2.7 enables the intern
 
 Playback uses 48 kHz stereo PCM16LE over the paired connection. The device expands PCM to the board’s 32-bit I²S format. An eight-frame input queue and a 40 ms ESPHome speaker buffer bound the initial configuration. The firmware reports speaker-buffer acceptance and I²S DMA completion separately. Measure audible delay and stop-to-silence with the microphone. Unplug, mute, disconnect, and cancellation clear the playback queue.
 
+Firmware **0.2.8** moves large packet buffers out of task stacks. Pair it with App **0.2.81** for `stack_headroom_bytes` in diagnostic exports: each reading is the lifetime minimum free stack on that boot, in bytes; `null` means not observed. These readings do not identify the task responsible for an earlier crash. Run one local **Conversation playback stability** check after updating both.
+
 If recovery is needed, use the App and firmware from the same rollback revision named in the [root install guide](../../INSTALL.md). Temporarily pin both Git references in the Builder entry to that revision, leaving device identity and local secrets in place.
 
 Hardware derives from [official Voice PE YAML](https://github.com/esphome/home-assistant-voice-pe/blob/d4e6fa43d6a1a7d342b7d4d403567e06516719de/home-assistant-voice.yaml) at `d4e6fa43d6a1a7d342b7d4d403567e06516719de`, including its license. The same commit supplies `voice_kit`. [XMOS v1.3.1](https://github.com/esphome/voice-kit-xmos-firmware/releases/tag/v1.3.1) implements `NONE/AEC/IC/NS/AGC` selection. **On future first boot, upstream automatically updates XMOS if its version differs**, with its checksum-verified official image.

@@ -15,6 +15,12 @@ namespace esphome::jarvis_stream {
 static const char *const TAG = "jarvis_stream";
 uint32_t JarvisStream::now_ms_() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
+void JarvisStream::sample_stack_(TaskStackMinimum &minimum, uint32_t &last_ms, uint32_t now) {
+  if (last_ms && now - last_ms < 1000) return;
+  minimum.observe(uxTaskGetStackHighWaterMark(nullptr));  // ESP-IDF reports bytes.
+  last_ms = now;
+}
+
 void JarvisStream::setup() {
   std::snprintf(boot_id_, sizeof(boot_id_), "%08lx%08lx", static_cast<unsigned long>(esp_random()),
                 static_cast<unsigned long>(esp_random()));
@@ -72,6 +78,7 @@ void JarvisStream::network_worker_() {
   NetworkLifecycle lifecycle;
   for (;;) {
     const uint32_t now = now_ms_();
+    sample_stack_(network_stack_, last_network_stack_ms_, now);
     const auto action = lifecycle.next(network_ready_, worker_reset_, shutting_down_, now);
     switch (action) {
       case NetworkAction::INITIALIZE:
@@ -104,7 +111,7 @@ void JarvisStream::network_worker_() {
         break;
     }
     if (!shutting_down_ && connected_) {
-      Outgoing outgoing{};
+      auto &outgoing = worker_outgoing_;
       for (int i = 0; i < 8 && xQueueReceive(outgoing_queue_, &outgoing, 0) == pdTRUE; ++i) {
         if (outgoing.epoch != epoch_) continue;
         if (outgoing.capture_generation && (!active_ || outgoing.capture_generation != generation_)) continue;
@@ -132,7 +139,7 @@ void JarvisStream::network_worker_() {
         }
         if (outgoing.capture_generation) acknowledged_generation_ = outgoing.capture_generation;
       }
-      AudioPacket packet{};
+      auto &packet = worker_audio_packet_;
       for (int i = 0; i < 4 && active_ && !muted_ && authenticated_ && connected_ &&
                            acknowledged_generation_ == generation_ &&
                            xQueueReceive(audio_queue_, &packet, 0) == pdTRUE; ++i) {
@@ -194,6 +201,9 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
     ++epoch_;
     return;
   } else if (event == WEBSOCKET_EVENT_DATA) {
+    // SDK send failures may dispatch other events on the network worker.
+    // Only DATA belongs to the WebSocket receive task.
+    sample_stack_(websocket_stack_, last_websocket_stack_ms_, now_ms_());
     // Handle bounded text controls and binary playback, including SDK chunking.
     if (data == nullptr) { record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return; }
     if (data->op_code == 0x9 || data->op_code == 0xA) return;
@@ -215,7 +225,7 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
     if (!data->fin) { record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return; }
     if (binary) {
       if (!authenticated_) return;
-      PlaybackPacket packet{};
+      auto &packet = incoming_playback_packet_;
       const auto *wire = reinterpret_cast<const uint8_t *>(incoming_.data());
       if (!decode_playback_header(wire, incoming_.size(), packet.header)) {
         record_fault_(FaultReason::MALFORMED_MESSAGE); request_transport_reset_(); return;
@@ -236,7 +246,7 @@ void JarvisStream::receive_event_(int32_t event, esp_websocket_event_data_t *dat
 
 bool JarvisStream::send_json_(const std::string &text, bool capture_start, bool refresh_diagnostics) {
   if (!connected_ || shutting_down_) return false;
-  Outgoing outgoing{};
+  auto &outgoing = loop_outgoing_;
   if (text.size() >= sizeof(outgoing.text)) {
     record_fault_(FaultReason::OUTGOING_MESSAGE_TOO_LARGE); request_transport_reset_(); return false;
   }
@@ -245,6 +255,7 @@ bool JarvisStream::send_json_(const std::string &text, bool capture_start, bool 
   outgoing.refresh_diagnostics = refresh_diagnostics;
   outgoing.length = text.size();
   std::memcpy(outgoing.text, text.data(), text.size());
+  outgoing.text[text.size()] = '\0';
   if (xQueueSend(outgoing_queue_, &outgoing, 0) != pdTRUE) {
     record_fault_(FaultReason::OUTGOING_QUEUE_FULL); request_transport_reset_(); return false;
   }
@@ -308,6 +319,16 @@ void JarvisStream::diagnostics_json_(JsonObject out) {
   const auto snapshot = fault_history_.snapshot();
   write_fault_diagnostics(out, snapshot, boot_id_, now_ms_(), connection_generation_.load(), generation_.load());
   write_pcm_send_diagnostics(out, pcm_send_history_.snapshot());
+  JsonObject stacks = out["stack_headroom_bytes"].to<JsonObject>();
+  const auto write_stack = [&](const char *name, const TaskStackMinimum &minimum) {
+    const uint32_t value = minimum.value();
+    if (value == TaskStackMinimum::UNKNOWN) stacks[name] = nullptr;
+    else stacks[name] = value;
+  };
+  write_stack("loop", loop_stack_);
+  write_stack("network", network_stack_);
+  write_stack("websocket_data", websocket_stack_);
+  write_stack("microphone", microphone_stack_);
 }
 
 void JarvisStream::send_state_() {
@@ -735,6 +756,7 @@ void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
   // MicrophoneSource supplies 16-bit, mono, gain=1. Never block its high-priority task on Wi-Fi.
   const size_t samples = data.size() / 2;
   const uint32_t callback_ms = now_ms_();
+  sample_stack_(microphone_stack_, last_microphone_stack_ms_, callback_ms);
   size_t offset = 0;
   uint32_t callback_generation;
   portENTER_CRITICAL(&capture_lock_);
@@ -742,7 +764,7 @@ void JarvisStream::microphone_data_(const std::vector<uint8_t> &data) {
   if (capture_from_wake_) offset = wake_capture_sample_offset(samples, callback_ms, capture_wake_ms_);
   portEXIT_CRITICAL(&capture_lock_);
   for (; offset < samples; offset += MAX_SAMPLES) {
-    AudioPacket packet{};
+    auto &packet = microphone_audio_packet_;
     packet.samples = std::min(MAX_SAMPLES, samples - offset);
     uint64_t first_sample;
     uint32_t sequence;
@@ -834,6 +856,7 @@ void JarvisStream::wake_word(const std::string &word) {
 
 void JarvisStream::loop() {
   const uint32_t now = now_ms_();
+  sample_stack_(loop_stack_, last_loop_stack_ms_, now);
   const bool network_ready = network::is_connected();
   if (!network_ready && network_ready_.exchange(false)) {
     record_fault_(FaultReason::WIFI_LOST);

@@ -1,3 +1,7 @@
+# 0.2.81
+
+- Retain bounded per-task stack-headroom readings from Voice PE firmware 0.2.8 in diagnostics, including real zero readings and unavailable values.
+
 # 0.2.80
 
 - Replay longer local echo references incrementally through the existing bounded history, preserving the confirmed clock span and microphone order.

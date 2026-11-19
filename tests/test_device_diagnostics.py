@@ -25,6 +25,19 @@ def pcm_summary():
 
 
 class FirmwareDiagnosticsTests(unittest.TestCase):
+    def test_stack_headroom_preserves_zero_and_missing_readings_without_secrets(self):
+        value = diagnostics()
+        stacks = {"loop": 0, "network": 6000, "websocket_data": None, "microphone": 2300,
+                  "token": "never-export"}
+        parsed = parse_diagnostics({**value, "stack_headroom_bytes": stacks})
+        self.assertEqual(parsed["stack_headroom_bytes"], {key: stacks[key] for key in
+            ("loop", "network", "websocket_data", "microphone")})
+        self.assertIsNone(parse_diagnostics(value)["stack_headroom_bytes"])
+        for bad in (True, -1, 2 ** 32, "3000"):
+            parsed = parse_diagnostics({**value, "stack_headroom_bytes": {**stacks, "network": bad}})
+            self.assertIsNone(parsed["stack_headroom_bytes"])
+            self.assertEqual(parsed["root_fault"]["reason"], "pcm_send_failed")
+
     def test_wake_telemetry_counts_only_expected_unmuted_word(self):
         device = Device()
         wake = {"type": "wake_word", "wake_word": "Hey Jarvis"}
