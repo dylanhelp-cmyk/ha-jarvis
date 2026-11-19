@@ -11,9 +11,11 @@ from jarvis.streaming_aec import (ConfirmedRenderInput, StreamingEcho, check_con
 
 class ReferenceRecorder:
     def __init__(self):
+        self.captures = []
         self.references = []
 
     def process(self, capture, render):
+        self.captures.append(np.frombuffer(capture, dtype="<i2"))
         self.references.append(np.frombuffer(render, dtype="<i2"))
         return capture
 
@@ -148,6 +150,43 @@ class StreamingEchoTests(unittest.TestCase):
         self.assertEqual(int(np.median(recorder.references[2])), 1000)
         self.assertFalse(np.any(recorder.references[300]))
         self.assertEqual(int(np.median(recorder.references[602])), 2000)
+
+    def test_offline_alignment_preserves_long_reference_order_and_confirmed_clock_span(self):
+        recorder = ReferenceRecorder()
+        levels = (np.arange(600) * 31 - 9000).astype("<i2")
+        long_pcm = np.repeat(levels, 480 * 2).tobytes()
+        short_pcm = np.full((960, 2), 2500, dtype="<i2").tobytes()
+        samples = np.random.default_rng(15).integers(-2000, 2000, size=99_883, dtype="<i2")
+        frames = [PCMFrame(i, start, 1000 + i * 16, samples[start:start + 256])
+                  for i, start in enumerate(range(0, len(samples), 256))]
+        renders = [(long_pcm, 1020, 7032), (short_pcm, 7070, 7090)]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=recorder):
+            result = check_confirmed_references(frames, renders, 123, 80)
+        self.assertEqual(result["status"], "processed", result)
+        self.assertEqual(result["confirmed_bursts"], 2)
+        self.assertEqual(result["processed_samples"], 99_840)
+        self.assertEqual(result["partial_final_block_samples"], 43)
+        np.testing.assert_array_equal(np.concatenate(recorder.captures), samples[:99_840])
+
+        reference = np.concatenate(recorder.references)
+        reference_ms = 1000 + np.arange(len(reference)) / 16 - 40
+        long_play = (1020 <= reference_ms) & (reference_ms < 7032)
+        short_play = (7070 <= reference_ms) & (reference_ms < 7090)
+        np.testing.assert_array_equal(reference[~(long_play | short_play)], 0)
+        np.testing.assert_array_equal(reference[(7071 <= reference_ms) & (reference_ms < 7089)], 2500)
+        source_frames = (reference_ms[long_play] - 1020) * 288_000 / 6012
+        # Away from the resampler's filter transitions, every level must be in order
+        # on the measured render clock, including the original four-second boundary.
+        plateau = (48 <= source_frames % 480) & (source_frames % 480 < 432)
+        level_index = (source_frames[plateau] // 480).astype(int)
+        np.testing.assert_array_equal(reference[long_play][plateau], levels[level_index])
+
+    def test_offline_alignment_rejects_a_long_reference_with_an_invalid_clock_span(self):
+        frames = [PCMFrame(0, 0, 1000, np.zeros(160, dtype="<i2"))]
+        with patch("jarvis.streaming_aec.HostAEC3", return_value=ReferenceRecorder()):
+            result = check_confirmed_references(frames, [(bytes(288_000 * 4), 1000, 7020)], 0, 0)
+        self.assertEqual(result["status"], "unavailable", result)
+        self.assertIn("clock span", result["reason"])
 
     def test_missing_render_frames_invalidate_the_reference(self):
         echo = StreamingEcho(100, processor=ReferenceRecorder())

@@ -12,11 +12,19 @@ from .aec import FRAME_SAMPLES, HostAEC3, SAMPLE_RATE
 MAX_CAPTURE_DRIFT_PPM = 5000
 
 
+def _validate_render_boundary(start, ended_at, rendered_frames):
+    if not math.isfinite(ended_at) or ended_at <= start:
+        raise RuntimeError("Incomplete speaker render cannot establish an echo boundary")
+    if abs((ended_at - start) - rendered_frames / 48000) > .015:
+        raise RuntimeError("Speaker render clock span cannot establish an echo boundary")
+
+
 class RenderBurst:
     """One continuous I2S render generation with an explicit terminal report."""
 
-    def __init__(self, start):
+    def __init__(self, start, *, replay_boundary=None):
         self.start = start
+        self._replay_boundary = replay_boundary
         self.converter = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         self.history = np.zeros(4 * SAMPLE_RATE, dtype="<i2")
         self.end = self.frames = 0
@@ -43,13 +51,15 @@ class RenderBurst:
         self.ended_at = ended_at
 
     def read(self, times, values):
+        ended_at, samples = self.ended_at, self.end
+        if ended_at is None and self._replay_boundary is not None:
+            ended_at, samples = self._replay_boundary
         selected = times >= self.start
-        if self.ended_at is not None:
-            selected &= times < self.ended_at
+        if ended_at is not None:
+            selected &= times < ended_at
         if not np.any(selected):
             return
-        duration = (self.ended_at - self.start if self.ended_at is not None else None)
-        rate = self.end / duration if duration else SAMPLE_RATE
+        rate = samples / (ended_at - self.start) if ended_at is not None else SAMPLE_RATE
         positions = (times[selected] - self.start) * rate
         indices = np.floor(positions).astype(np.int64)
         if (indices[0] < max(0, self.end - len(self.history))
@@ -80,7 +90,7 @@ class StreamingEcho:
         self._pending = np.empty(0, dtype="<i2")
         self.capture_drift_ppm = 0.0
 
-    def render(self, pcm, rendered_at, *, first_frame):
+    def render(self, pcm, rendered_at, *, first_frame, _replay_boundary=None):
         """Accept ordered device-confirmed 48 kHz stereo PCM16LE."""
         if not pcm or len(pcm) % 4 or not math.isfinite(rendered_at):
             raise ValueError("Invalid wired render frame")
@@ -91,7 +101,7 @@ class StreamingEcho:
             while self._bursts and (len(self._bursts) >= 8
                     or rendered_at - self._bursts[0].ended_at >= 4):
                 self._render_floor = self._bursts.popleft().ended_at
-            burst = RenderBurst(rendered_at)
+            burst = RenderBurst(rendered_at, replay_boundary=_replay_boundary)
             self._bursts.append(burst)
         if first_frame != burst.frames:
             raise RuntimeError("Speaker discontinuity invalidated live echo alignment")
@@ -100,11 +110,9 @@ class StreamingEcho:
     def finish_render(self, rendered_frames, ended_at):
         """Confirm the boundary between this rendered generation and known silence."""
         burst = self._bursts[-1] if self._bursts else None
-        if (burst is None or burst.ended_at is not None or rendered_frames != burst.frames
-                or not math.isfinite(ended_at) or ended_at <= burst.start):
+        if burst is None or burst.ended_at is not None or rendered_frames != burst.frames:
             raise RuntimeError("Incomplete speaker render cannot establish an echo boundary")
-        if abs((ended_at - burst.start) - rendered_frames / 48000) > .015:
-            raise RuntimeError("Speaker render clock span cannot establish an echo boundary")
+        _validate_render_boundary(burst.start, ended_at, rendered_frames)
         burst.finish(ended_at)
 
     def _reference(self, capture_at, period):
@@ -117,7 +125,7 @@ class StreamingEcho:
             burst.read(times, values)
         return values.tobytes()
 
-    def capture(self, frame, clock_offset_ms):
+    def capture(self, frame, clock_offset_ms, *, _prepare_render=None):
         """Return cleaned 10 ms blocks without dropping or resampling speech."""
         if frame.first_sample != self._next_capture:
             raise RuntimeError("Microphone discontinuity invalidated live echo alignment")
@@ -139,6 +147,8 @@ class StreamingEcho:
         cleaned = []
         for offset in range(0, end, FRAME_SAMPLES):
             capture_at = self._capture_start + self._processed * period
+            if _prepare_render is not None:
+                _prepare_render(capture_at - self.delay_seconds + (FRAME_SAMPLES - 1) * period)
             reference = self._reference(capture_at, period)
             cleaned.append(self.processor.process(pcm[offset:offset + FRAME_SAMPLES].tobytes(), reference))
             self._processed += FRAME_SAMPLES
@@ -256,21 +266,49 @@ def check_confirmed_references(frames, renders, clock_offset_ms, delay_ms):
         return {"status": "unavailable", "scope": scope, "reason": "Unreliable render-to-microphone alignment"}
     try:
         echo = StreamingEcho(delay_ms)
-        pending = deque(renders)
-        capture_start_ms = frames[0].capture_ms
         max_period_ms = (1 + MAX_CAPTURE_DRIFT_PPM / 1e6) * 1000 / SAMPLE_RATE
-        processed = 0
-        for frame in frames:
-            # Add references before capture can reach them, while letting the
-            # live processor retire old bursts on its usual bounded timeline.
-            horizon_ms = capture_start_ms + (frame.first_sample + len(frame.samples)) * max_period_ms
-            while pending and pending[0][1] <= horizon_ms:
-                pcm, first_ms, last_ms = pending.popleft()
-                echo.render(pcm, (first_ms + clock_offset_ms) / 1000, first_frame=0)
-                echo.finish_render(len(pcm) // 4, (last_ms + clock_offset_ms) / 1000)
-            processed += len(echo.capture(frame, clock_offset_ms)) // 2
-        if pending:
-            raise ValueError("The microphone capture ended before a confirmed reference began")
+        last_capture = frames[-1]
+        capture_end_ms = frames[0].capture_ms + (last_capture.first_sample + len(last_capture.samples)) * max_period_ms
+        pending = deque()
+        for pcm, first_ms, last_ms in renders:
+            if first_ms > capture_end_ms:
+                raise ValueError("The microphone capture ended before a confirmed reference began")
+            start, end = (first_ms + clock_offset_ms) / 1000, (last_ms + clock_offset_ms) / 1000
+            if not pcm or len(pcm) % 4 or not math.isfinite(start):
+                raise ValueError("Invalid wired render frame")
+            if pending and start < pending[-1][2]:
+                raise RuntimeError("Speaker discontinuity invalidated live echo alignment")
+            _validate_render_boundary(start, end, len(pcm) // 4)
+            pending.append((pcm, start, end))
+
+        rendered_frames = 0
+        chunk_frames = 4800  # 100 ms at the render rate
+        lookahead_frames = 960  # 20 ms for the filter and sample interpolation
+
+        def prepare_render(reference_until):
+            nonlocal rendered_frames
+            while pending and pending[0][1] <= reference_until:
+                pcm, start, end = pending[0]
+                count = len(pcm) // 4
+                # Use the confirmed clock span even before the converter reaches the end.
+                position = (reference_until - start) * count / (end - start)
+                target = min(count, math.ceil((position + lookahead_frames) / chunk_frames) * chunk_frames)
+                # The resampler rounds settled output to the nearest 16 kHz sample.
+                # Short bursts flush before any reference read and use the exact count.
+                boundary = (end, (count + 1) // 3)
+                while rendered_frames < target:
+                    next_frame = min(target, rendered_frames + chunk_frames)
+                    echo.render(pcm[rendered_frames * 4:next_frame * 4], start,
+                                first_frame=rendered_frames, _replay_boundary=boundary)
+                    rendered_frames = next_frame
+                if rendered_frames < count:
+                    break
+                echo.finish_render(count, end)
+                pending.popleft()
+                rendered_frames = 0
+
+        processed = sum(len(echo.capture(frame, clock_offset_ms, _prepare_render=prepare_render)) // 2
+                        for frame in frames)
     except (ImportError, RuntimeError, ValueError) as exc:
         return {"status": "unavailable", "scope": scope, "reason": str(exc) or type(exc).__name__}
     total = sum(len(frame.samples) for frame in frames)

@@ -120,8 +120,8 @@ class CleanInput:
             else:
                 clean = self.echo.capture(frame, clock_offset_ms)
             self.append_clean(clean)
-        except (RuntimeError, ValueError):
-            self.error = "opening_echo_or_queue_failed"
+        except (RuntimeError, ValueError) as exc:
+            self.error = "opening_echo_or_queue_failed: " + str(exc)
             self.pending.clear()
         self.changed.set()
 
@@ -148,8 +148,8 @@ class CleanInput:
             if len(self.pending) + len(clean) > 3 * RATE * 2:
                 raise RuntimeError("clean_opening_queue_overflow")
             self.pending.extend(clean)
-        except (RuntimeError, ValueError):
-            self.error = "opening_echo_or_queue_failed"
+        except (RuntimeError, ValueError) as exc:
+            self.error = "opening_echo_or_queue_failed: " + str(exc)
             self.pending.clear()
         self.changed.set()
 

@@ -87,6 +87,23 @@ class SimulatedReply:
 
 
 class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_input_failure_preserves_the_cause_and_discards_queued_audio(self):
+        with patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            stream = CleanInput(31)
+        stream.pending.extend(bytes(640))
+        frame = PCMFrame(0, 0, 1000, np.zeros(256, dtype="<i2"))
+        with patch.object(LocalEcho, "capture", side_effect=RuntimeError("Speaker clock span is discontinuous")):
+            stream.offer(frame, 0)
+        self.assertEqual(stream.error, "opening_echo_or_queue_failed: Speaker clock span is discontinuous")
+        self.assertEqual(stream.pending, b"")
+        self.assertTrue(stream.changed.is_set())
+
+        with patch("jarvis.conversation_trial.StreamingEcho", LocalEcho):
+            queue = CleanInput(31)
+        queue.append_clean(bytes(320))
+        self.assertEqual(queue.error, "opening_echo_or_queue_failed: Echo processor output lost its capture alignment")
+        self.assertEqual(queue.pending, b"")
+
     async def test_continuous_input_keeps_partial_blocks_and_aec_across_two_replies(self):
         class Processor:
             def process(self, capture, render):

@@ -1,3 +1,8 @@
+# 0.2.80
+
+- Replay longer local echo references incrementally through the existing bounded history, preserving the confirmed clock span and microphone order.
+- Keep the specific echo or queue failure in conversation diagnostics while clearing queued audio.
+
 # 0.2.79
 
 - Match the local conversation check to reply playback's bounded stall recovery and retain playback counters if it fails. Strict echo-reference validation still applies.
