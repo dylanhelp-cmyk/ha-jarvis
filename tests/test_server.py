@@ -258,6 +258,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.bench.results[0]["status"], "measured")
             self.assertEqual(self.bench.cloud_settings.attempt_count, 0)
 
+    async def test_conversation_stability_keeps_failure_diagnostics_and_uses_reply_stall_policy(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        player = SimpleNamespace(
+            send_stream=AsyncMock(side_effect=RuntimeError("delivery stalled")), stop=AsyncMock(),
+            snapshot=lambda: {"max_send_lag_ms": 501, "frames_rendered": 96000})
+        result = {"id": "stalled", "route": "voice_pe_internal", "trials": []}
+        with (patch.object(self.bench, "wake_render", new_callable=AsyncMock, return_value=("clip", b"pcm")),
+              patch("jarvis.server.JackPlayback", return_value=player),
+              patch("jarvis.server.asyncio.sleep", new_callable=AsyncMock),
+              patch("jarvis.live_bench.render_reference", return_value=np.zeros(RATE, dtype=np.int16)),
+              patch("jarvis.live_bench.voiced_bounds", return_value=(0, RATE))):
+            with self.assertRaisesRegex(RuntimeError, "delivery stalled"):
+                await self.bench.measure_render_alignment(result, conversation_load=True)
+        self.assertEqual(player.send_stream.call_args.kwargs,
+                         {"prime_packets": 10, "source_prime_packets": 12, "recover_reply_stalls": True})
+        player.stop.assert_awaited_once()
+        self.assertEqual(result["playback"]["max_send_lag_ms"], 501)
+        self.assertEqual(result["playback_prime_ms"], 100)
+        self.assertEqual(result["injected_source_jitter_ms"], 35)
+
     async def test_alignment_retries_a_discontinuous_render_and_requires_two_matches(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

@@ -560,8 +560,12 @@ class Bench:
         if cached is None:
             raise ValueError("Verify the wake acknowledgment before checking render alignment")
         ident, pcm = cached
+        result["metric"] = "dma_start_to_acoustic_reference"
+        result["playback_prime_ms"] = 100 if conversation_load else 50
         if conversation_load:
             pcm *= 3
+            result.update(source_prime_ms=120, injected_source_jitter_ms=35,
+                          source="paced local clip; no OpenAI connection")
         self.echo_alignment = None
         self.echo_band_profile = None
         reference = await asyncio.to_thread(render_reference, pcm)
@@ -607,12 +611,14 @@ class Bench:
                             if position and position % (48000 * 4) == 0:
                                 await asyncio.sleep(.035)
                             yield pcm[position:position + 480 * 4]
-                    await player.send_stream(chunks(), prime_packets=10, source_prime_packets=12)
+                    await player.send_stream(chunks(), prime_packets=10, source_prime_packets=12,
+                                             recover_reply_stalls=True)
                 else:
                     await player.send(pcm, prime_packets=5)
             finally:
                 with suppress(RuntimeError, OSError, TimeoutError):
                     await player.stop()
+                result["playback"] = player.snapshot()
                 if continuous is not None and not continuous.error:
                     try:
                         continuous.finish_reply_render()
@@ -657,12 +663,6 @@ class Bench:
         captured, capture_start = device.recording()
         offset = device.clock_offset_ms
         renders, delays = [], []
-        result["metric"] = "dma_start_to_acoustic_reference"
-        result["playback_prime_ms"] = 100 if conversation_load else 50
-        if conversation_load:
-            result["source_prime_ms"] = 120
-            result["injected_source_jitter_ms"] = 35
-            result["source"] = "paced local clip; no OpenAI connection"
         for index, (player, span, reason) in enumerate(plays, 1):
             if reason is not None:
                 match = {"status": "unavailable", "reason": reason}

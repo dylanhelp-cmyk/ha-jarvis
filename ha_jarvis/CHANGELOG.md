@@ -1,3 +1,7 @@
+# 0.2.79
+
+- Match the local conversation check to reply playback's bounded stall recovery and retain playback counters if it fails. Strict echo-reference validation still applies.
+
 # 0.2.78
 
 - Give experimental listening-during-replies playback a 100 ms reserve. Keep the strict clock-span and gap checks.
