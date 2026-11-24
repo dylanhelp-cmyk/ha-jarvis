@@ -131,6 +131,10 @@ class JackPlayback:
         self.max_source_wait_ms = 0.0
         self.source_prime_wait_ms = None
         self.play_start_wait_ms = None
+        # Keep numeric sender timings for recent packets only. One DMA report
+        # normally covers 100 ms; older samples can have unavailable coverage.
+        self.recent_sends = deque(maxlen=128)
+        self.first_clock_gap = None
 
     def receive(self, message):
         if message.get("generation") != self.generation:
@@ -154,6 +158,7 @@ class JackPlayback:
             if (type(rendered) is int and (self.frames_rendered or 0) <= rendered <= self.frames_sent
                     and type(stamp) is int and 0 <= stamp <= 0xFFFFFFFF):
                 advanced = rendered > (self.frames_rendered or 0)
+                previous_count, previous_end = self.frames_rendered or 0, self.last_rendered_ms
                 self.frames_rendered = rendered
                 self.last_rendered_ms = stamp
                 if rendered:
@@ -170,6 +175,9 @@ class JackPlayback:
                         else:
                             self.first_rendered_ms = first
                             self.max_render_discontinuity_us = gap
+                            if advanced and self.first_clock_gap is None and (
+                                    gap > 15_000 or abs(stamp - first - rendered * 1000 / RATE) > 15):
+                                self.first_clock_gap = self._clock_gap(previous_count, previous_end, rendered, stamp)
             if kind == "play_clock" and advanced and self.on_render_progress is not None:
                 self.on_render_progress()
             if kind == "play_started":
@@ -180,6 +188,33 @@ class JackPlayback:
                 self.finished.set()
                 self.progress.set()
                 self.started.set()
+
+    def _clock_gap(self, begin, previous_end, end, end_ms):
+        """Relate the first bad DMA interval to the corresponding wire packets."""
+        start_ms = self.first_rendered_ms if previous_end is None else previous_end
+        ms_per_frame = 1000 / RATE
+        report = {"first_frame": begin, "end_frame": end,
+                  "interval_excess_ms": round(end_ms - start_ms - (end - begin) * ms_per_frame, 1)}
+        accepted = [(index, first, stamp) for index, (first, count, stamp) in enumerate(self.accepted)
+                    if first < end and first + count > begin]
+        report["accepted_packets_observed"] = len(accepted)
+        if not accepted:
+            return report
+        # Acknowledgments timestamp the full packet entering the speaker buffer.
+        # Both these values are on the device clock (no network offset estimate).
+        _, first, stamp = min(accepted, key=lambda item: (item[1] - begin) * ms_per_frame - item[2])
+        report.update(least_acceptance_lead_frame=first, least_acceptance_lead_ms=round(
+            start_ms + (first - begin) * ms_per_frame - stamp, 1))
+        intervals = [(stamp - self.accepted[index - 1][2], first) for index, first, stamp in accepted if index]
+        if intervals:
+            report["max_acceptance_interval_ms"], report["max_acceptance_interval_frame"] = max(intervals)
+        sends = [entry for entry in self.recent_sends if accepted[0][1] <= entry[0] <= accepted[-1][1]]
+        if len(sends) == len(accepted):
+            longest = max(sends, key=lambda item: item[1])
+            report.update(max_send_interval_ms=round(longest[1], 1), max_send_interval_frame=longest[0],
+                          max_credit_wait_ms=round(max(item[2] for item in sends), 1),
+                          max_source_wait_ms=round(max(item[3] for item in sends), 1))
+        return report
 
     async def command(self, kind):
         if self.ws is not self.device.ws or self.ws is None or self.ws.closed:
@@ -254,11 +289,15 @@ class JackPlayback:
         sequence = 0
         payload = prime.popleft()
         advance_frames = (prime_packets - 1) * PACKET_FRAMES
+        last_send_at = None
+        source_wait_ms = 0.0
         while payload is not None:
+            credit_wait_at = time.monotonic()
             while self.frames_sent - self.frames_accepted >= MAX_IN_FLIGHT:
                 self.progress.clear()
                 self.ensure_playing()
                 await asyncio.wait_for(self.progress.wait(), .15)
+            credit_wait_ms = (time.monotonic() - credit_wait_at) * 1000
             due = anchor + max(0, self.frames_sent - advance_frames) / RATE
             await asyncio.sleep(max(0.0, due - time.monotonic()))
             self.ensure_playing()
@@ -278,17 +317,23 @@ class JackPlayback:
                 self.schedule_shift_ms += shift_ms
             count = len(payload) // frame_bytes
             header = HEADER.pack(b"JPLY", 1, CHANNELS, count, self.generation, sequence, self.frames_sent)
+            sent_at = time.monotonic()
+            interval_ms = 0.0 if last_send_at is None else (sent_at - last_send_at) * 1000
+            self.recent_sends.append((self.frames_sent, interval_ms, credit_wait_ms, source_wait_ms))
+            last_send_at = sent_at
             self.frames_sent += count
             sequence += 1
             self.max_in_flight = max(self.max_in_flight, self.frames_sent - self.frames_accepted)
             await asyncio.wait_for(self.ws.send_bytes(header + payload), .15)
             if prime:
                 payload = prime.popleft()
+                source_wait_ms = 0.0
             else:
                 waiting_at = time.monotonic()
                 payload = await anext(source, None)
                 if payload is not None:
-                    self.max_source_wait_ms = max(self.max_source_wait_ms, (time.monotonic() - waiting_at) * 1000)
+                    source_wait_ms = (time.monotonic() - waiting_at) * 1000
+                    self.max_source_wait_ms = max(self.max_source_wait_ms, source_wait_ms)
         await self.command("play_drain")
         await asyncio.wait_for(self.finished.wait(), 3)
         if self.reason != "drained" or self.frames_accepted != self.frames_sent:
@@ -331,6 +376,8 @@ class JackPlayback:
                 "clock_scope": "speaker acceptance and firmware output counters, not acoustic output"}
         if self.source_prime_wait_ms is not None:
             result["source_prime_wait_ms"] = round(self.source_prime_wait_ms, 1)
+        if self.first_clock_gap is not None:
+            result["first_clock_gap"] = self.first_clock_gap
         if self.play_start_wait_ms is not None:
             result["play_start_wait_after_prime_ms"] = round(self.play_start_wait_ms, 1)
         if self.first_rendered_ms is not None or self.render_clock_invalid:

@@ -1,3 +1,7 @@
+# 0.2.82
+
+- Report the first gap in the speaker output clock alongside sender waits and speaker-buffer acceptance times for the corresponding packets.
+
 # 0.2.81
 
 - Retain bounded per-task stack-headroom readings from Voice PE firmware 0.2.8 in diagnostics, including real zero readings and unavailable values.

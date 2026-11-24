@@ -241,6 +241,42 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.commands, [])
         self.assertEqual(new.commands, [])
 
+    def test_first_dma_gap_uses_only_overlapping_packets_and_device_clock(self):
+        player = JackPlayback(SimpleNamespace(ws=FakeSocket()), "gap")
+        player.frames_sent = 5 * 480
+        base = {"playback_id": player.id, "generation": player.generation}
+        for i, stamp in enumerate([880, 890, 990, 1044, 1045]):
+            player.receive({**base, "type": "play_render", "first_sample": i * 480,
+                            "samples": 480, "device_time_ms": stamp})
+        player.recent_sends.extend([(0, 100., 80., 80.), (480, 90., 90., 90.),
+                                    (960, 11., 5., 0.), (1440, 37., 22., 15.), (1920, 1., 0., 0.)])
+        report = {**base, "type": "play_clock", "first_rendered_ms": 1000,
+                  "rendered_samples": 960, "last_rendered_ms": 1020, "max_render_discontinuity_us": 0}
+        player.receive(report)
+        self.assertNotIn("first_clock_gap", player.snapshot())
+        player.receive({**report, "rendered_samples": 1920, "last_rendered_ms": 1060,
+                        "max_render_discontinuity_us": 20000})
+        player.receive({**report, "type": "play_drained", "rendered_samples": 2400,
+                        "last_rendered_ms": 1080, "max_render_discontinuity_us": 20000})
+        self.assertEqual(player.snapshot()["first_clock_gap"], {
+            "first_frame": 960, "end_frame": 1920, "interval_excess_ms": 20,
+            "accepted_packets_observed": 2, "least_acceptance_lead_frame": 1440,
+            "least_acceptance_lead_ms": -14, "max_acceptance_interval_ms": 100,
+            "max_acceptance_interval_frame": 960, "max_send_interval_ms": 37,
+            "max_send_interval_frame": 1440, "max_credit_wait_ms": 22, "max_source_wait_ms": 15})
+
+    def test_first_dma_report_with_cumulative_gap_and_expired_host_timing(self):
+        player = JackPlayback(SimpleNamespace(ws=FakeSocket()), "old")
+        player.frames_sent = 960
+        player.accepted = [(0, 480, 995), (480, 480, 1005)]
+        player.recent_sends.append((480, 10., 0., 0.))
+        player.receive({"playback_id": player.id, "generation": player.generation, "type": "play_drained",
+                        "rendered_samples": 960, "first_rendered_ms": 1000, "last_rendered_ms": 1040,
+                        "max_render_discontinuity_us": 10000})
+        gap = player.snapshot()["first_clock_gap"]
+        self.assertEqual((gap["first_frame"], gap["interval_excess_ms"]), (0, 20))
+        self.assertNotIn("max_send_interval_ms", gap)
+
     def test_stereo_conversion_preserves_exact_duration(self):
         samples = np.full(1600, 123, dtype="<i2")
         stereo = np.frombuffer(stereo_pcm(samples), dtype="<i2").reshape(-1, 2)

@@ -32,7 +32,7 @@ App **0.2.76** adds **Listen during replies (experimental)** in Voice preview. R
 
 App **0.2.78** increases the playback reserve only for **Listen during replies**. Run the local **Conversation playback stability** check first. It plays two longer references while microphone cleanup runs, with no OpenAI connection. A failed voice trial now keeps **Reply level measurements** in its result, so a volume change can be investigated without retaining audio.
 
-App **0.2.81** includes the longer-reference replay fix and reads stack diagnostics from firmware **0.2.8**, which moves large packet buffers off task stacks. Update both, then run **Conversation playback stability** once. Continue to a separately consented voice trial only if acoustic alignment and continuous microphone processing pass; this check alone does not prove spoken interruption.
+With App **0.2.82** and firmware **0.2.8** installed, run **Conversation playback stability** once. If the speaker clock develops a gap, the trial's playback diagnostics include `first_clock_gap`. It compares the timing of the affected samples at the sender and the Voice PE. Continue to a separately consented voice trial once acoustic alignment and continuous microphone processing both pass.
 
 ## Recovery
 
