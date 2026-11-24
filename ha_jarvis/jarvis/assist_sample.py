@@ -50,11 +50,23 @@ class SampleLight:
         return {"outcome": "reported", "text": json.dumps(payload)}
 
 
-def said_state(text, expected):
-    words = " ".join(re.findall(r"[a-z']+", text.lower().replace("’", "'")))
-    name = SAMPLE_LIGHT_NAME.casefold()
-    return words.removesuffix(" sir") in (expected, f"it is {expected}", f"it's {expected}",
-                                          f"the {name} is {expected}", f"{name} is {expected}")
+def spoken_state(text):
+    """Recognize an affirmative answer about this fixture. Leave other wording ungraded."""
+    if not text.strip():
+        return "missing_transcript"
+    if "?" in text or len(text) >= 640:
+        return "unclear"
+    words = " ".join(re.findall(r"[a-z']+", text.casefold().replace("’", "'")))
+    states = set(re.findall(r"\b(?:on|off)\b", words))
+    if len(states) != 1:
+        return "both_states" if states else "no_state_words"
+    state = states.pop()
+    target = rf"(?:(?:the |your )?{re.escape(SAMPLE_LIGHT_NAME.casefold())}|the lamp|it)"
+    subject = rf"(?:{target}(?: is|'s) )?"
+    predicate = rf"(?:now |currently )?(?:(?:switched|turned) )?{state}"
+    action = rf"(?:i've |i have |i )(?:switched|turned) (?:{target} {state}|{state} {target})"
+    phrase = rf"(?:(?:done|confirmed|certainly|yes|sir) )?(?:{subject}{predicate}|{action})(?: sir)?"
+    return state if re.fullmatch(phrase, words) else "unclear"
 
 
 async def check_assist_sample(settings, model, voice, phase):
@@ -80,6 +92,7 @@ async def check_assist_sample(settings, model, voice, phase):
             before = lamp.reads
             # An external change between requests makes a cached or guessed read detectable.
             lamp.state = "off"
+            lamp.last_lookup_at = None
             end_of_input = (owner.next_input_at or time.monotonic()) + voiced_end / RATE
             await owner.send(pcm)
             report["recognized_fixture_target"].append(
@@ -91,10 +104,10 @@ async def check_assist_sample(settings, model, voice, phase):
             else:
                 checks["fresh_read"] = lamp.state == "off" and lamp.writes == 1 and lamp.reads > before
             voice_after_lookup = first is not None and lamp.last_lookup_at is not None and first >= lamp.last_lookup_at
-            state_words_match = said_state(owner.output_text, expected)
-            checks["spoken_" + expected] = voice_after_lookup and state_words_match
-            if not all(checks.values()):
-                report["last_reply"] = {"state_words_match": state_words_match, "voice_after_lookup": voice_after_lookup}
+            heard = spoken_state(owner.output_text)
+            checks["spoken_" + expected] = voice_after_lookup and heard == expected
+            report.setdefault("reply_evidence", []).append({"reported_state": heard, "voice_after_lookup": voice_after_lookup})
+            if expected == "on" and not checks["verified_change"]:
                 break
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         report["failure"] = owner.session.metrics.error or type(exc).__name__

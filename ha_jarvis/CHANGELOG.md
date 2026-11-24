@@ -1,3 +1,7 @@
+# 0.2.89
+
+- After a verified sample-light change, the follow-up now runs even if the first spoken answer was unclear. Each reply needs its own fresh lookup and an affirmative state for the requested light. Missing transcripts and uncertain wording remain visible in the result.
+
 # 0.2.88
 
 - The Assist backend now receives an explicit instruction to clarify a missing or ambiguous device name before trying another name.

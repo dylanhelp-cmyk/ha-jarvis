@@ -5,11 +5,18 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.session_bench import SESSION_PROMPTS, check_sessions
-from jarvis.assist_sample import SampleLight, check_assist_sample
+from jarvis.assist_sample import SampleLight, check_assist_sample, spoken_state
 from jarvis.live_bench import SAMPLE_LIGHT_NAME
 
 
 class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
+    def test_grade_only_affirmative_spoken_sample_state(self):
+        for reply in ("It's now on, sir.", "The reading lamp is switched on.", "I've turned the reading lamp on."):
+            self.assertEqual(spoken_state(reply), "on")
+        for reply in ("Is it on?", "I cannot turn it on.", "If it's on", "Turn on the reading lamp.",
+                      "The desk lamp is on.", "It was on.", "It was off, now it's on.", "Maybe on."):
+            self.assertNotIn(spoken_state(reply), ("on", "off"))
+        self.assertEqual(spoken_state(""), "missing_transcript")
     async def test_unknown_spoken_target_does_not_change_sample(self):
         lamp = SampleLight()
         result = await lamp.call_tool("1", "HassTurnOn", {"name": "Different Lamp"})
@@ -43,7 +50,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 if marker == 1 or fresh:
                     name = "HassTurnOn" if marker == 1 else "GetLiveContext"
                     await bridge.execute(str(marker), name, json.dumps({"name": SAMPLE_LIGHT_NAME}))
-                self.callbacks["on_transcript"]("On." if marker == 1 else "Off.")
+                self.callbacks["on_transcript"](first_reply if marker == 1 else "Off.")
                 await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
 
         async def fixture(prompt):
@@ -57,10 +64,11 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.assist_sample.synthesize_fixture", side_effect=fixture),
               patch("jarvis.assist_sample.time", clock), patch("jarvis.session_bench.time", clock),
               patch("jarvis.session_bench.asyncio.sleep", side_effect=sleep)):
-            for fresh in (True, False):
+            for fresh, first_reply in ((True, "On."), (False, "On."), (True, "Checking.")):
                 report = await check_assist_sample(SimpleNamespace(spent_usd=0), "gpt-6-luna", "marin", lambda _: None)
                 self.assertTrue(report["checks"]["verified_change"])
-                self.assertEqual(all(report["checks"].values()), fresh)
+                self.assertEqual(all(report["checks"].values()), fresh and first_reply == "On.")
+                self.assertEqual(report["checks"]["spoken_off"], fresh)
                 self.assertEqual(report["tool_calls"]["reads"], int(fresh))
                 self.assertEqual(report["recognized_fixture_target"], [True, True])
                 self.assertNotIn(SAMPLE_LIGHT_NAME, repr(report))
