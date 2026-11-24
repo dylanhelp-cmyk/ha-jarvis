@@ -139,6 +139,7 @@ class Bench:
         self.test = {"running": False, "phase": "idle"}
         self.results = []
         self.task = None
+        self.voice_session = None
         self.firmware_observations = deque(maxlen=20)
 
     def observe_firmware(self):
@@ -267,15 +268,33 @@ class Bench:
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
                           "reason": "The voice preview requires separate per-run room microphone consent"}}
 
+    def set_voice_session(self, session):
+        self.voice_session = session
+
+    def request_cancel(self, reason="user_stop", details=None):
+        task = self.task
+        if task is None or task.done():
+            return None
+        run = self.test
+        if not run.get("cancelling"):
+            run["interruption"] = {"reason": reason, "phase": run.get("phase"), **(details or {})}
+            run["cancelling"] = True
+            if not run.get("finishing"):
+                run["phase"] = "stopping playback and microphone capture"
+                if self.voice_session is not None:
+                    self.voice_session.stop_interaction()
+                # Give a just-created task a chance to enter its cleanup block.
+                def cancel_run():
+                    if not run.get("finishing"):
+                        task.cancel()
+                task.get_loop().call_soon(cancel_run)
+        return task
+
     async def cancel(self, reason="user_stop", details=None):
-        if self.task and not self.task.done():
-            if not self.test.get("cancelling") and not self.test.get("finishing"):
-                self.test["interruption"] = {"reason": reason, "phase": self.test.get("phase"), **(details or {})}
-                self.test["cancelling"] = True
-                self.test["phase"] = "stopping playback and microphone capture"
-                self.task.cancel()
+        task = self.request_cancel(reason, details)
+        if task is not None:
             with suppress(asyncio.CancelledError):
-                await self.task
+                await task
 
     async def prepare_acknowledgment(self):
         try:
@@ -513,7 +532,8 @@ class Bench:
                                        wait_for_preconnected_wake=ready_wake if preconnect else None, standby=standby,
                                        assist_delegation=assist_delegation, after_greeting=after_greeting,
                                        idle_seconds=idle_seconds, standby_context=standby_context, duplex=duplex,
-                                       personality=self.config["personality"], **self.wake_render_options())
+                                       personality=self.config["personality"], on_session=self.set_voice_session,
+                                       **self.wake_render_options())
         if not replies:
             return
         await asyncio.sleep(.25)
@@ -1156,9 +1176,12 @@ class Bench:
         uncertain_actions = set() if assist_token is not None else None
         try:
             while True:
+                run = self.test
                 await self.run("voice_turn", 1, gain_db=gain_db, follow_up=True, standby=True,
                                after_greeting=after_greeting, standby_context=context,
                                assist_standby_token=assist_token, uncertain_actions=uncertain_actions, duplex=duplex)
+                if run.get("cancelling"):
+                    return
                 result = self.results[0]
                 if result.get("reason") == "arm_timeout" and result["status"] == "unavailable":
                     self.results.pop(0)
@@ -1204,8 +1227,8 @@ class Bench:
                     outcome = await check_interruption(self.cloud_settings, self.config["voice"],
                                                        self.config["personality"], stage)
                     result["interruption_checks"] = outcome
-                    required = ("first_speech_started", "interruption_completed",
-                                "no_speech_without_new_input", "next_answer")
+                    required = ("interrupted_during_count", "replacement_question_heard",
+                                "replacement_answer_once", "count_stayed_stopped")
                     confirmed = (len(outcome["sessions"]) == 1 and all(
                         item["finalization_confirmed"] and not item["error"] for item in outcome["sessions"]))
                     result["status"] = "passed" if (confirmed and not outcome.get("failure") and
@@ -1781,7 +1804,7 @@ def create_ui(bench):
         return web.json_response({"test_id": ident}, status=202)
 
     async def cancel(request):
-        asyncio.create_task(bench.cancel())
+        bench.request_cancel()
         return web.json_response({"stop_requested": True}, status=202)
     async def results(request): return web.json_response({"results": bench.results})
     async def diagnostics(request):
@@ -1882,10 +1905,10 @@ def create_audio(bench):
                         bench.maybe_preload_wake_cache()
                     bench.observe_firmware()
                     if bench.device.info.get("muted") and bench.test.get("id") and bench.test["running"]:
-                        asyncio.create_task(bench.cancel("device_muted"))
+                        bench.request_cancel("device_muted")
                     elif (bench.test.get("output_route") is not None
                           and bench.test["output_route"] != output_route(bench.device.info)):
-                        asyncio.create_task(bench.cancel("output_route_changed"))
+                        bench.request_cancel("output_route_changed")
         except (ValueError, asyncio.TimeoutError, KeyError, TypeError) as exc:
             disconnect_details = {"protocol_error": str(exc), "exception_type": type(exc).__name__, "server_close_code": 1008}
             await ws.close(code=1008, message=b"Invalid device protocol")

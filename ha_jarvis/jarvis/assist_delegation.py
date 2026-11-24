@@ -75,6 +75,7 @@ class AssistDelegation:
             raise ValueError("Unsupported Assist reasoning model")
         self.client, self.model = client, model
         self.uncertain_actions = uncertain_actions
+        self.action_unconfirmed = False
         self.tools = {
             tool["name"]: {"type": "function", "name": tool["name"],
                            "description": str(tool.get("description") or "")[:1024],
@@ -223,6 +224,8 @@ class AssistDelegation:
             if identity in self.uncertain_actions:
                 return {"outcome": "unknown", "reason": "An earlier attempt is unconfirmed. Check the device state."}
             self.uncertain_actions.add(identity)
+        # If teardown interrupts dispatch or verification, its outcome stays unknown.
+        self.action_unconfirmed = name != self.state_tool
         result = await self.client.call_tool(call_id, name, arguments)
         outcome = result["outcome"]
         if outcome != "reported":
@@ -232,6 +235,7 @@ class AssistDelegation:
                 "outcome": "unverified", "reason": "Assist did not return matching, unambiguous state data"}
         else:
             verified = await self._verify_change(call_id, name, arguments, result)
+        self.action_unconfirmed = False
         if identity is not None and verified["outcome"] != "unknown":
             self.uncertain_actions.discard(identity)
         return verified

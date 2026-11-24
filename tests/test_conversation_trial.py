@@ -29,6 +29,9 @@ class LocalEcho:
 
 
 class SimulatedSession:
+    def media_deadline(self):
+        return time.monotonic() + 50
+
     def __init__(self, settings, *, on_audio, **kwargs):
         self.on_audio = on_audio
         self.metrics = LiveMetrics("websocket", ready_ms=5, finalization_confirmed=True, close_reason="close_requested")
@@ -46,12 +49,12 @@ class SimulatedSession:
         self.sent.append("closed")
         return self.metrics
 
-    def suppress_output(self):
+    def stop_interaction(self):
         pass
 
 
 class SimulatedReply:
-    def __init__(self, device, identity, *, output_gain_db=0):
+    def __init__(self, device, identity, *, output_gain_db=0, max_duration_seconds=8):
         self.first_voice_at = self.last_voice_at = None
         self.player = self
         self.frames_sent = self.frames_rendered = 480
@@ -187,7 +190,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0,
             begin_reply_render=Mock(), finish_reply_render=Mock(), max_unconfirmed_samples=512)
         device = SimpleNamespace(errors=[], info={"jack_plugged": True})
-        session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio)
+        session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio,
+                                  media_deadline=lambda: time.monotonic() + 50)
         result = {"id": "duplex"}
         with patch("jarvis.conversation_trial.BenchReply", Reply):
             await stream_reply(device, session, result, stream, set_output, lambda _: None, "listening",
@@ -249,7 +253,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
 
                 device = SimpleNamespace(errors=[], info={"jack_plugged": True})
                 session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio,
-                                          assist_work_pending=pending)
+                                          assist_work_pending=pending, stop_interaction=lambda: None,
+                                          media_deadline=lambda: 150.)
                 stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0)
                 detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))
                 result = {"id": "warm"}

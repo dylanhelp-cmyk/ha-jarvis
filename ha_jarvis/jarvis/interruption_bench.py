@@ -1,43 +1,54 @@
-"""One generated-speech check of cloud interruption and recovery, without devices."""
+"""Check whether GPT-Live yields to a spoken question on its ordinary audio input."""
+import re
 import time
 
-from .conversation_trial import PERSONALITIES
+from .conversation_trial import DUPLEX_INSTRUCTIONS, INSTRUCTIONS, PERSONALITIES
 from .live_bench import synthesize_fixture
-from .session_bench import DigitalConversation, INTERRUPTION_PROMPT, SESSION_PROMPTS
+from .session_bench import DigitalConversation, INTERRUPTION_PROMPT
+
+
+INTERRUPTING_QUESTION = "Stop. What is the capital of France?"
+COUNT = re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+                   r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\b", re.I)
 
 
 async def check_interruption(settings, voice, personality, stage):
-    fixtures = [(await synthesize_fixture(prompt))[0]
-                for prompt in (INTERRUPTION_PROMPT, SESSION_PROMPTS[0])]
-    report = {"scope": "generated input and provider audio only; no microphone or speaker playback",
-              "checks": {}, "sessions": []}
+    first, _ = await synthesize_fixture(INTERRUPTION_PROMPT)
+    question, voiced_end = await synthesize_fixture(INTERRUPTING_QUESTION)
+    checks = {}
+    report = {"scope": "Generated caller speech and provider output on one connection. No room audio or speakers.",
+              "checks": checks, "sessions": []}
     owner = DigitalConversation(settings, voice,
-        "Listen for spoken requests. When asked to count, count slowly up to the requested number. "
-        "Otherwise answer in one short sentence. Do not greet or delegate work. " + PERSONALITIES[personality])
+        " ".join((INSTRUCTIONS, DUPLEX_INSTRUCTIONS, PERSONALITIES[personality])), allow_signoff=False)
     try:
-        stage("starting generated speech before the interruption")
+        stage("waiting for GPT-Live to begin counting")
         await owner.session.start()
-        await owner.send(fixtures[0], until_first_voice=True)
-        report["checks"]["first_speech_started"] = owner.last_voice_at is not None
-
-        stage("interrupting the cloud mixer while local output stays muted")
-        control = await owner.session.interrupt_speech()
-        report["control"] = control
-        report["checks"]["interruption_completed"] = control["quiet_observed_ms"] >= 250
-        # The command acknowledgment alone never releases model audio.
-        owner.next_turn()
-        owner.session.resume_after_interrupt(control["generation"])
-        owner.next_input_at = time.monotonic()
-        await owner.send(b"", observe_seconds=.4)
-        report["checks"]["no_speech_without_new_input"] = owner.last_voice_at is None
-        if owner.last_voice_at is not None:
+        await owner.send(first, until_first_voice=True)
+        deadline = time.monotonic() + 2
+        while not COUNT.search(owner.output_text) and time.monotonic() < deadline:
+            await owner.send(b"", observe_seconds=.02)
+        checks["interrupted_during_count"] = bool(
+            COUNT.search(owner.output_text) and not re.search(r"\b(?:twenty|20)\b", owner.output_text, re.I)
+            and owner.last_voice_at is not None and time.monotonic() - owner.last_voice_at <= .2)
+        if not checks["interrupted_during_count"]:
             return report
 
-        stage("checking the next generated question on the same connection")
+        stage("speaking a new question over the count")
         owner.next_turn()
-        await owner.send(fixtures[1])
-        report["checks"]["next_answer"] = "paris" in owner.output_text.casefold()
-        report["discarded_cloud_output_ms"] = round(owner.session.metrics.discarded_output_samples / 16, 1)
+        await owner.send(question[:voiced_end * 2], observe_seconds=0)
+        question_end = time.monotonic()
+        count_at_end = len(COUNT.findall(owner.output_text))
+        await owner.send(b"", observe_seconds=5)
+        heard = set(re.findall(r"[a-z]+", owner.signoff.text.casefold()))
+        checks["replacement_question_heard"] = {"capital", "france"} <= heard
+        answers = list(re.finditer(r"\bparis\b", owner.output_text, re.I))
+        checks["replacement_answer_once"] = (len(answers) == 1
+            and owner.last_voice_at is not None and owner.last_voice_at >= question_end)
+        checks["count_stayed_stopped"] = (checks["replacement_answer_once"]
+            and len(COUNT.findall(owner.output_text)) == count_at_end
+            and not COUNT.search(owner.output_text, answers[0].end())
+            and not re.search(r"\b(?:twenty|20)\b", owner.output_text, re.I)
+            and time.monotonic() - owner.last_voice_at >= 1.2)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         report["failure"] = type(exc).__name__
     finally:

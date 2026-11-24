@@ -157,9 +157,9 @@ function showResults(results) {
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
     if (result.interruption_checks) {
       const checks = result.interruption_checks;
-      for (const [name, label] of Object.entries({first_speech_started: 'Opening speech',
-        interruption_completed: 'Mixer interruption and quiet interval',
-        no_speech_without_new_input: 'No resumed speech before a new question', next_answer: 'Next answer'})) {
+      for (const [name, label] of Object.entries({interrupted_during_count: 'Spoke over an active count',
+        replacement_question_heard: 'New question recognized', replacement_answer_once: 'New question answered once',
+        count_stayed_stopped: 'Count stayed stopped through the observation'})) {
         add(card, 'p', label + ' — ' + (checks.checks[name] === true ? 'passed' :
           checks.checks[name] === false ? 'failed' : 'unavailable'));
       }

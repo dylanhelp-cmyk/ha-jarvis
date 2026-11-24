@@ -1,3 +1,9 @@
+# 0.2.85
+
+- Let a live answer use the time left in its budgeted session. The previous eight-second limit could cut off longer answers.
+- Ask GPT-Live to yield to a spoken interruption and answer the new request at its usual volume. The generated interruption check now speaks a new question during a count and checks whether the count resumes.
+- Stop pending Assist work as soon as the conversation is stopped. Flag an interrupted device command whose outcome is unknown. Stopping wake standby during cleanup prevents another wake from arming.
+
 # 0.2.84
 
 - Verify named light brightness and thermostat setpoints against a fresh Assist state lookup. A timeout during verification also protects against repeating the command.

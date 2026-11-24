@@ -177,6 +177,7 @@ class LiveSession:
         if self.metrics.error is None:
             self.metrics.error = message
         self._failed.set()
+        self.stop_interaction()
         if self._attempt and self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
 
@@ -201,7 +202,7 @@ class LiveSession:
         return config
 
     async def start(self):
-        if self._attempt or self._disposed:
+        if self._attempt or self._closing:
             raise LiveSessionError("A LiveSession can start only once")
         backend_model = self.assist_delegation.model if self.assist_delegation is not None else None
         self._attempt = self.settings.reserve_attempt(transport=self.metrics.transport, backend_model=backend_model,
@@ -333,6 +334,15 @@ class LiveSession:
         self._output_bytes = 0
         return self._output_generation
 
+    def stop_interaction(self):
+        """Stop media and revoke pending Assist work before yielding to cleanup."""
+        if self._closing:
+            return
+        self._closing = True
+        self.suppress_output()
+        if self._delegation_task is not None and not self._delegation_task.done():
+            self._delegation_task.cancel()
+
     async def interrupt_speech(self):
         """Probe a silent mixer interruption while caller-owned capture keeps queuing.
 
@@ -455,6 +465,7 @@ class LiveSession:
                 self.metrics.close_reason = reason if reason in (
                     "close_requested", "expired", "content", "remote_hangup", "connection_lost") else "unknown"
                 self._final.set()
+                self.stop_interaction()
                 if not self._ready.is_set():
                     self._fail("Cloud session closed before startup completed")
                 if self._close_task is None:
@@ -639,6 +650,7 @@ class LiveSession:
             await self.close()
 
     async def close(self):
+        self.stop_interaction()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         return await asyncio.shield(self._close_task)
@@ -646,12 +658,7 @@ class LiveSession:
     async def _close(self):
         if self._disposed:
             return self.metrics
-        self._closing = True
-        self.suppress_output()
         try:
-            if self._delegation_task is not None and not self._delegation_task.done():
-                self._delegation_task.cancel()
-                await asyncio.gather(self._delegation_task, return_exceptions=True)
             if self._attempt and not self._final.is_set():
                 remaining = max(0, self.max_seconds - (time.monotonic() - self._started_at))
                 try:

@@ -25,6 +25,10 @@ VOICE_STYLE = (
     "Do not greet or claim to have controlled any devices. "
 )
 INSTRUCTIONS = VOICE_STYLE + "Do not delegate work."
+DUPLEX_INSTRUCTIONS = (
+    "When the user speaks over an answer, yield and listen. Answer their latest question once "
+    "at the same conversational volume. Resume an interrupted answer only if asked."
+)
 PERSONALITIES = {
     "classic": "",
     "warm": "Use a warm, approachable British delivery while keeping replies brief.",
@@ -350,7 +354,7 @@ def gain_packet(pcm, gain_db):
     return output.tobytes(), int(np.max(np.abs(samples))), int(np.max(np.abs(output.astype(np.int32)))), clipped
 
 
-REPLY_DRAIN_SECONDS = 8
+STANDBY_REPLY_RESERVE_SECONDS = 8
 
 
 class FollowUpEnded(TimeoutError):
@@ -365,7 +369,9 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
                        warm_follow_up=False, source_prime_packets=12, input_deadline=None,
                        idle_seconds=DEFAULT_IDLE_SECONDS, closure_policy=None, assist=False,
                        output_gain_db=VOICE_OUTPUT_GAIN_DB, duplex=False):
-    reply = BenchReply(device, result["id"], output_gain_db=output_gain_db)
+    media_deadline = session.media_deadline()
+    reply = BenchReply(device, result["id"], output_gain_db=output_gain_db,
+                       max_duration_seconds=max(0, media_deadline - time.monotonic()))
     early_echo = isinstance(stream, OpeningEchoInput) and not stream.confirmed
     sender = None
     endpoint = SpeechEndpoint()
@@ -462,7 +468,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
         sent_before_reply = sent
         result["digital_first_voice_ms"] = round((reply.first_voice_at - (first_sent_at or origin)) * 1000, 1)
         phase("playing the GPT-Live reply")
-        async with asyncio.timeout(REPLY_DRAIN_SECONDS):
+        async with asyncio.timeout(max(0, media_deadline - time.monotonic())):
             while not reply.ready_to_drain(time.monotonic()) or (assist and session.assist_work_pending):
                 if sender.done():
                     sender.result()
@@ -491,6 +497,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
     finally:
         set_output(None)
         if not completed:
+            session.stop_interaction()
             reply.discard()
         terminal_at = getattr(device, "wake_render_terminal_at", None)
         if early_echo and first_sent_at is not None and terminal_at is not None:
@@ -522,7 +529,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                          follow_up=False, wait_for_preconnected_wake=None, standby=False,
                          assist_delegation=None, after_greeting=False, idle_seconds=DEFAULT_IDLE_SECONDS,
                          standby_context=None, voice=VOICE, personality="classic",
-                         output_gain_db=VOICE_OUTPUT_GAIN_DB, duplex=False):
+                         output_gain_db=VOICE_OUTPUT_GAIN_DB, duplex=False, on_session=None):
     """Reuse one connection for the opening and any enabled warm turns."""
     ws = device.ws
     preconnect = wait_for_preconnected_wake is not None
@@ -581,6 +588,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
             instructions = ("You are Jarvis, a concise British-style voice assistant. Do not greet. "
                             "For an explicit request to turn a named light or switch on or off, Generate <|SpawnThinking|>. "
                             "Wait for the tool result before saying the device changed. Report only verified outcomes.")
+    if duplex:
+        instructions += " " + DUPLEX_INSTRUCTIONS
     if style := PERSONALITIES[personality]:
         instructions += " " + style
     if standby_context is not None:
@@ -595,6 +604,8 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                           on_timed_transcript=collect_transcript if transcript is not None else None,
                           prior_exchanges=prior_exchanges, allow_assist_action=allow_assist_action if standby and assist else None,
                           voice=voice)
+    if on_session is not None:
+        on_session(session)
     try:
         phase("preconnecting to GPT-Live" if preconnect else
               "connecting to GPT-Live while the cached acknowledgment plays")
@@ -633,7 +644,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         offset = device.clock_offset_ms
         for frame in buffered:
             stream.offer(frame, offset)
-        input_deadline = session.media_deadline() - REPLY_DRAIN_SECONDS if standby else None
+        input_deadline = session.media_deadline() - STANDBY_REPLY_RESERVE_SECONDS if standby else None
         if assist:
             session.begin_turn()
         replies = [await stream_reply(device, session, result, stream, set_output, phase,
@@ -694,7 +705,9 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         return replies
     finally:
         device.pcm_consumer = None
-        session.suppress_output()
+        session.stop_interaction()
+        if on_session is not None:
+            on_session(None)
         if startup is not None and not startup.done():
             startup.cancel()
             await asyncio.gather(startup, return_exceptions=True)
@@ -705,6 +718,9 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
                 await asyncio.wait_for(ws.send_json({"type": "play_stop",
                     "playback_id": wake["ack_playback_id"], "generation": wake["ack_generation"]}), 1)
         metrics = await session.close()
+        if assist and assist_delegation.action_unconfirmed:
+            result.setdefault("warnings", []).append(
+                "The conversation stopped with a device command unconfirmed. Check its state in Home Assistant before retrying.")
         if (standby_context is not None and result.get("conversation_end") in ("inactivity", "session_limit")
                 and not closure_policy.ending_requested and metrics.finalization_confirmed
                 and metrics.close_reason == "close_requested" and not metrics.error):

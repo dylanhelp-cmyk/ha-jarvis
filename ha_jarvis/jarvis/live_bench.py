@@ -149,7 +149,7 @@ SYNTHETIC_PROMPTS = (
 INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows through it is called the Seine."
 INTERRUPTION_INPUTS = ("Wait, please switch to a different topic.", "Hold on, can you tell me the time?")
 SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Goodbye.",
-                        "Please count slowly from one to twenty.")
+                        "Please count slowly from one to twenty.", "Stop. What is the capital of France?")
 
 
 async def synthesize_fixture(prompt):
@@ -193,10 +193,11 @@ def fixture_wav(pcm):
 
 
 class BenchReply:
-    def __init__(self, device, identity, *, output_gain_db=0, output_buffer_seconds=1):
+    def __init__(self, device, identity, *, output_gain_db=0, output_buffer_seconds=1, max_duration_seconds=8):
         self.player = JackPlayback(device, identity)
         self.queue = asyncio.Queue(maxsize=65 * output_buffer_seconds)
         self.queue_limit_bytes = output_buffer_seconds * RENDER_RATE * 4
+        self.reference_limit_bytes = max_duration_seconds * RENDER_RATE * 4
         self.pending_bytes = 0
         self.pcm = bytearray()
         self.transcript = ""
@@ -216,8 +217,10 @@ class BenchReply:
             if self.output_scale != 1:
                 mono = np.rint(mono * self.output_scale)
             stereo = np.repeat(mono, 2).astype("<i2").tobytes()
-            if self.pending_bytes + len(stereo) > self.queue_limit_bytes or len(self.pcm) + len(stereo) > 8 * RENDER_RATE * 4:
-                raise RuntimeError("Synthetic reply exceeded its playback queue or duration bound")
+            if self.pending_bytes + len(stereo) > self.queue_limit_bytes:
+                raise RuntimeError("Reply exceeded its playback queue limit")
+            if len(self.pcm) + len(stereo) > self.reference_limit_bytes:
+                raise RuntimeError("Reply exceeded its allowed audio duration")
             self.queue.put_nowait(stereo)
             self.pending_bytes += len(stereo)
             self.pcm.extend(stereo)

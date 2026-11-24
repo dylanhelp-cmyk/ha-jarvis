@@ -12,7 +12,7 @@ App **0.2.75** lowers the wake greeting by another 6 dB without changing live re
 
 **Conversation checks** runs two GPT-Live sessions using generated questions, thanks and goodbye. It checks context across sessions and the closure policy, using up to US$0.10 of the existing cap. The test needs no Voice PE or room microphone audio.
 
-**Generated interruption control** checks the provider mixer command and the next answer on the same connection, using up to US$0.05. It captures no microphone audio and plays no speakers. This is separate from the spoken-interruption trial and does not establish physical stop time.
+On App **0.2.85**, **Generated interruption control** speaks a new question while GPT-Live counts. A pass requires one answer to the new question and no resumed count during the observation. It uses one connection and up to US$0.05, with no room microphone or speakers. For the hardware check, interrupt a longer Voice preview reply with a different question at your usual volume and listen for the old reply returning. Firmware 0.2.8 is compatible.
 
 To check interruption detection with real sound, run **Echo reference alignment**, then open **Acoustic interruption check** on a browser device playing through a separate speaker near the Voice PE. Confirm both speakers are at a comfortable level, select a test phrase and let both voices finish. Jarvis measures the time from the phrase reaching its microphone and checks whether the opening survives echo cancellation.
 

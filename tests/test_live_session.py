@@ -340,6 +340,60 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await session.close()).finalization_confirmed)
         self.assertIsNone(self.settings.pending)
 
+    async def test_stop_during_preflight_or_verification_revokes_the_whole_batch(self):
+        schema = {"type": "object", "properties": {"name": {}, "domain": {}}}
+        catalog = [{"name": name, "inputSchema": schema} for name in ("HassTurnOn", "GetLiveContext")]
+        arguments = '{"name":"Desk Lamp"}'
+        for preflight in (True, False):
+            with self.subTest(preflight=preflight):
+                waiting, release = asyncio.Event(), asyncio.Event()
+
+                async def call_tool(_call_id, name, _arguments):
+                    if name == "HassTurnOn":
+                        return {"outcome": "reported", "text": json.dumps({"response_type": "action_done",
+                            "data": {"success": [{"type": "entity", "id": "light.desk", "name": "Desk Lamp"}],
+                                     "failed": []}})}
+                    waiting.set()
+                    await release.wait()
+                    state = "off" if preflight else "on"
+                    return {"outcome": "reported", "text": json.dumps({
+                        "result": f"Live Context: example\n- names: Desk Lamp\n  domain: light\n  state: '{state}'"})}
+
+                client = SimpleNamespace(call_tool=AsyncMock(side_effect=call_tool))
+                uncertain = set()
+                bridge = AssistDelegation(client, catalog, uncertain_actions=uncertain,
+                                          preview_target=("light", "Desk Lamp") if preflight else None)
+                ws = FakeWS()
+                session = self.session(transport="websocket", assist_delegation=bridge)
+                with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+                    await session.start()
+
+                def emit(kind, **data):
+                    session._event({"type": "response.event", "delegation_id": "work",
+                                    "event": {"type": kind, **data}})
+
+                response = {"id": "work", "status": "completed", "usage": {"input_tokens": 100, "output_tokens": 8}}
+                emit("response.created", response={"id": "work"})
+                for call_id in ("first", "second"):
+                    emit("response.output_item.done", item={"type": "function_call",
+                         "call_id": call_id, "name": "HassTurnOn", "arguments": arguments})
+                emit("response.completed", response=response)
+                await asyncio.wait_for(waiting.wait(), 1)
+                release.set()  # HA and the Stop signal are ready in the same event loop turn.
+                if preflight:
+                    session.stop_interaction()
+                else:
+                    session._event({"type": "error"})
+                with self.assertRaises(asyncio.CancelledError):
+                    await session._delegation_task
+                self.assertEqual([call.args[1] for call in client.call_tool.await_args_list],
+                                 ["GetLiveContext"] if preflight else ["HassTurnOn", "GetLiveContext"])
+                self.assertEqual(bridge.action_unconfirmed, not preflight)
+                self.assertEqual(bool(uncertain), not preflight)
+                self.assertTrue((await session.close()).finalization_confirmed)
+                self.assertIsNone(self.settings.pending)
+                self.assertEqual([m["type"] for m in ws.sent], ["session.start", "session.close"])
+
     async def test_delegation_closes_at_the_reserved_response_limit(self):
         ws = FakeWS()
         catalog = [{"name": "HassTurnOn", "inputSchema": {"type": "object"}}]
@@ -589,11 +643,15 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         frame.pts = 0
         frame.time_base = Fraction(1, 48000)
         track = SimpleNamespace(recv=AsyncMock(side_effect=[frame, RuntimeError("end")]))
-        await session._receive_track(track)
+        with patch.object(session, "_queue_audio", wraps=session._queue_audio) as queued:
+            await session._receive_track(track)
         self.assertGreater(session.metrics.output_samples, 0)
         self.assertLess(session.metrics.output_samples, 960)
-        pcm = session._output.get_nowait()
+        pcm = queued.call_args.args[0]
         self.assertEqual(len(pcm) % 2, 0)
+        self.assertEqual(len(pcm) // 2, session.metrics.output_samples)
+        self.assertTrue(session._output.empty())
+        self.assertEqual(session.metrics.discarded_output_samples, session.metrics.output_samples)
         source = _PCMTrack()
         source.append(bytes(32000))
         with self.assertRaises(LiveSessionError):

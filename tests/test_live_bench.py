@@ -10,6 +10,23 @@ from jarvis.playback import stereo_pcm
 
 
 class ReplyOnsetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_drained_nine_second_reply_fits_a_live_session_but_queue_stays_bounded(self):
+        packet = np.full(1600, 1500, dtype="<i2").tobytes()
+        reply = BenchReply(SimpleNamespace(ws=None), "long", max_duration_seconds=10)
+        chunks = reply.chunks()
+        for _ in range(90):
+            await reply.receive(packet, RATE)
+            await anext(chunks)
+        await reply.finish()
+        async for _ in chunks:
+            pass
+        self.assertEqual(len(reply.pcm), 9 * 48000 * 4)
+        self.assertEqual(reply.pending_bytes, 0)
+        backed_up = BenchReply(SimpleNamespace(ws=None), "backlog", max_duration_seconds=10)
+        with self.assertRaisesRegex(RuntimeError, "queue limit"):
+            for _ in range(12):
+                await backed_up.receive(packet, RATE)
+
     def test_level_report_excludes_received_audio_the_device_did_not_render(self):
         reply = BenchReply(SimpleNamespace(ws=None), "partial", output_gain_db=-6)
         mono = np.repeat(np.array([1000, 4000, 30000], dtype="<i2"), 48000)

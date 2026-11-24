@@ -43,6 +43,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_stop_during_standby_cleanup_finishes_once_without_rearming(self):
+        finishing, drain = asyncio.Event(), asyncio.Event()
+        async def end_turn(*args, **kwargs):
+            self.bench.test["finishing"] = True
+            finishing.set()
+            await drain.wait()
+            self.bench.test = {"running": False, "phase": "idle"}
+
+        self.bench.test = {"id": "local", "running": True, "standby": True, "phase": "finishing playback"}
+        with patch.object(self.bench, "run", side_effect=end_turn) as turn:
+            self.bench.task = asyncio.create_task(self.bench.run_standby(0, after_greeting=False))
+            await asyncio.wait_for(finishing.wait(), 1)
+            try:
+                response = await self.ui.delete("/api/tests/current", json={})
+                self.assertEqual(response.status, 202)
+                self.assertTrue(self.bench.test["cancelling"])
+            finally:
+                drain.set()
+            await asyncio.wait_for(self.bench.task, 1)
+        turn.assert_awaited_once()
+        self.assertFalse(self.bench.test["running"])
+
     async def test_wake_match_reports_greeting_end_only_with_timed_render(self):
         device = self.bench.device
         device.clock_offset_ms = 0
@@ -116,8 +138,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
 
         self.bench.cloud_settings.set_key("sk-generated-interruption-test-key")
-        sample = {"checks": {name: True for name in ("first_speech_started", "interruption_completed",
-            "no_speech_without_new_input", "next_answer")},
+        sample = {"checks": {name: True for name in ("interrupted_during_count", "replacement_question_heard",
+            "replacement_answer_once", "count_stayed_stopped")},
             "sessions": [{"finalization_confirmed": True, "error": None}]}
         with (patch.object(self.bench.device, "begin") as capture,
               patch("jarvis.interruption_bench.check_interruption", new_callable=AsyncMock, return_value=sample) as check):
