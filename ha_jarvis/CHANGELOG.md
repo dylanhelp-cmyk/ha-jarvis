@@ -1,3 +1,7 @@
+# 0.2.83
+
+- Keep processing microphone audio after the host adjusts its send schedule when the Voice PE confirms continuous playback within the existing tolerance. Require fresh device timing evidence for each advance.
+
 # 0.2.82
 
 - Report the first gap in the speaker output clock alongside sender waits and speaker-buffer acceptance times for the corresponding packets.

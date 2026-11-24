@@ -39,7 +39,7 @@ class StreamingEchoTests(unittest.TestCase):
         self.assertLess(residual_echo_similarity((echo + independent).tobytes(), reference), .3)
         self.assertIsNone(residual_echo_similarity(echo.tobytes(), reference[:800]))
 
-    def test_live_dma_prefix_holds_capture_and_stops_on_a_discontinuity(self):
+    def test_live_dma_prefix_holds_capture_across_wire_rebase_and_stops_on_real_gap(self):
         player = SimpleNamespace(first_rendered_ms=None, last_rendered_ms=None, frames_rendered=None,
                                  render_clock_invalid=False, schedule_rebases=0,
                                  max_render_discontinuity_us=0, terminal_confirmed=False)
@@ -51,8 +51,10 @@ class StreamingEchoTests(unittest.TestCase):
             stream = ConfirmedRenderInput(player, pcm, 35)
         pre_roll = stream.prime_capture(frames[:3], 0)
         self.assertEqual(len(pre_roll), 640 * 2)
+        player.schedule_rebases = 1
         self.assertTrue(all(not stream.offer(frame, 0) for frame in frames[3:6]))
         player.first_rendered_ms, player.last_rendered_ms, player.frames_rendered = 1040, 1140, 4800
+        self.assertIsNone(stream.error)
         clean = stream.release_confirmed(0)
         self.assertEqual(pre_roll + clean, samples[:1440].tobytes())
         clean += b"".join(stream.offer(frame, 0) for frame in frames[6:10])
@@ -67,7 +69,7 @@ class StreamingEchoTests(unittest.TestCase):
 
     def test_live_dma_terminal_releases_the_remaining_capture(self):
         player = SimpleNamespace(first_rendered_ms=1000, last_rendered_ms=1100, frames_rendered=4800,
-                                 render_clock_invalid=False, schedule_rebases=0,
+                                 render_clock_invalid=False, schedule_rebases=1,
                                  max_render_discontinuity_us=0, terminal_confirmed=False,
                                  frames_sent=4800, reason=None)
         pcm = np.full(4800 * 2, 500, dtype="<i2").tobytes()

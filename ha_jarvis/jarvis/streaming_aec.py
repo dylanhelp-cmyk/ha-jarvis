@@ -223,13 +223,16 @@ class ConfirmedRenderInput:
         player = self.player
         first, last = player.first_rendered_ms, player.last_rendered_ms
         count = player.frames_rendered or 0
-        if (player.render_clock_invalid or player.schedule_rebases
-                or (player.max_render_discontinuity_us or 0) > 15_000):
+        # A sender rebase moves future wire deadlines. It says nothing about
+        # samples already rendered. Release only up to the verified DMA horizon.
+        if player.render_clock_invalid or (player.max_render_discontinuity_us or 0) > 15_000:
             raise RuntimeError("Discontinuous speaker output invalidated the live echo reference")
         if first is None or offset_ms is None:
             if player.terminal_confirmed:
                 raise RuntimeError("Playback ended without a timed DMA reference")
             return b""
+        if player.max_render_discontinuity_us is None:
+            raise RuntimeError("The speaker did not confirm DMA continuity")
         if count * 4 > len(self.pcm):
             raise RuntimeError("DMA count exceeds the available reference samples")
         if abs(last - first - count / 48) > 15:

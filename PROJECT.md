@@ -23,6 +23,8 @@ App 0.2.81 and firmware 0.2.8 are installed. The Voice PE reconnected and reload
 
 Next establish where the speaker output clock diverges from the PCM timeline, then verify continuous cleaned input through the same local load before another spoken trial. Keep the strict render checks and existing preview. Verify that a new spoken request displaces the old reply, that the user's words survive simultaneous playback, and that superseded delegated work cannot announce stale results. Real Assist device actions and physical session-ending edge cases still need acceptance trials. Response timing is accepted. WiiM playback and music interruption/restoration are out of scope.
 
+The App 0.2.82 local check isolated a second failure. Both six-second clips rendered in full with 32.5 ms estimated acoustic alignment. The first had a 21.2 ms host schedule shift but only 10 ms excess speaker duration and 10 ms maximum DMA discontinuity. The second had zero excess. The input bridge rejected the host shift alone, even though both device measurements were within its existing 15 ms tolerance. App 0.2.83 bases input release on the confirmed DMA prefix after a host shift and rejects missing continuity evidence. Recheck the same local load. Larger device gaps seen on earlier runs remain a separate failure.
+
 ## First wired deployment
 
 App and firmware 0.2.0 paired on the actual Voice PE, with the 3.5 mm jack detected. The first local playback stopped at 101.9 ms sender lag after submitting 12,000 frames and receiving acceptance for 10,080 frames. Audible timing is unavailable. Verify the firmware packet-drain fix on hardware before tuning buffers or restoring cloud playback.

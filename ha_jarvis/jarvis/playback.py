@@ -164,7 +164,8 @@ class JackPlayback:
                 if rendered:
                     if self.first_render_report is None:
                         self.first_render_report = rendered, stamp
-                    if "first_rendered_ms" in message or "max_render_discontinuity_us" in message:
+                    if (self.first_rendered_ms is not None or "first_rendered_ms" in message
+                            or "max_render_discontinuity_us" in message):
                         first = message.get("first_rendered_ms")
                         gap = message.get("max_render_discontinuity_us")
                         if (type(first) is not int or not 0 <= first <= stamp

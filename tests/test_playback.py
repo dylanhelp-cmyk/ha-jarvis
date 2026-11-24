@@ -232,6 +232,15 @@ class JackPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(player.confirmed_span())
         self.assertFalse(player.snapshot()["render_clock_valid"])
 
+    def test_clock_cannot_reuse_continuity_from_a_previous_prefix(self):
+        player = JackPlayback(SimpleNamespace(ws=FakeSocket()), "missing")
+        player.frames_sent = 960
+        base = {"playback_id": player.id, "generation": player.generation, "type": "play_clock"}
+        player.receive({**base, "rendered_samples": 480, "first_rendered_ms": 1000,
+                        "last_rendered_ms": 1010, "max_render_discontinuity_us": 0})
+        player.receive({**base, "rendered_samples": 960, "last_rendered_ms": 1020})
+        self.assertTrue(player.render_clock_invalid)
+
     async def test_stop_does_not_address_a_replacement_socket(self):
         old, new = FakeSocket(), FakeSocket()
         device = SimpleNamespace(ws=old)
