@@ -31,6 +31,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
         class Provider:
             assist_work_pending = False
             assist_result_at = None
+            _assist_result_words = False
             assist_reply_pending = LiveSession.assist_reply_pending
             def __init__(self, _settings, **callbacks):
                 self.callbacks = callbacks
@@ -50,6 +51,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 if not marker:
                     if self.delayed_reply is not None and now >= self.assist_result_at + 1.6:
                         self.callbacks["on_transcript"](self.delayed_reply)
+                        self._assist_result_words = True
                         self.delayed_reply = None
                         await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
                     return
@@ -61,6 +63,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                     await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
                     await bridge.execute(str(marker), name, json.dumps({"name": SAMPLE_LIGHT_NAME}))
                     self.assist_result_at = now + .001
+                    self._assist_result_words = False
                     self.delayed_reply = first_reply if marker == 1 else "Off."
                     return
                 self.callbacks["on_transcript"]("Off.")

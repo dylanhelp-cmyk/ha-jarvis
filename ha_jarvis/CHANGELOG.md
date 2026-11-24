@@ -1,3 +1,7 @@
+# 0.2.91
+
+- When an acknowledgment overlaps a device lookup, keep listening for words and voice after the result. A sign-off can close after its existing farewell. The sample-light check waits for the final transcript on each turn to grade the spoken state.
+
 # 0.2.90
 
 - A device-control turn waits for voice after the App sends its function result. A progress acknowledgment alone could previously end the turn while the final spoken state was still on its way.

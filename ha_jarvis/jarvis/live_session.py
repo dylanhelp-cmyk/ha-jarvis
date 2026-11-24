@@ -135,6 +135,8 @@ class LiveSession:
         self._assist_unknown_this_turn = False
         self._delegation_task = None
         self.assist_result_at = None
+        self._assist_result_submitted = False
+        self._assist_result_words = False
         self.settings, self.on_audio, self.transport, self.voice = settings, on_audio, transport, voice
         self.greeting, self.on_transcript = greeting, on_transcript
         self.on_input_transcript, self.on_signoff_request = on_input_transcript, on_signoff_request
@@ -317,16 +319,23 @@ class LiveSession:
 
     def begin_turn(self):
         self.assist_result_at = None
+        self._assist_result_submitted = False
+        self._assist_result_words = False
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
 
-    def assist_reply_pending(self, last_voice_at):
-        # Speech before a function result can be a progress acknowledgment.
-        return (self.assist_work_pending or self.assist_result_at is not None
-                and (last_voice_at is None or last_voice_at < self.assist_result_at))
+    def assist_reply_pending(self, first_voice_at, last_voice_at, *, require_words=False):
+        if self.assist_work_pending:
+            return True
+        if self.assist_result_at is None:
+            return False
+        # The last PCM of a progress acknowledgment can arrive after the lookup.
+        earlier_voice = first_voice_at is not None and first_voice_at < self.assist_result_at
+        return (last_voice_at is None or last_voice_at < self.assist_result_at
+                or (earlier_voice or require_words) and not self._assist_result_words)
 
     def _hold_assist_audio(self):
-        return (self.assist_delegation is not None and self.assist_result_at is None
+        return (self.assist_delegation is not None and not self._assist_result_submitted
                 and (self.assist_delegation.preview_target is not None or self.assist_work_pending))
 
     def suppress_output(self):
@@ -540,7 +549,7 @@ class LiveSession:
                     if count >= self._assist_response_limit:
                         self._fail("Delegated response budget cannot cover the continuation")
                         return
-                    self.assist_result_at = None
+                    self._assist_result_submitted = False
                     self._delegation_task = self._spawn(self._return_assist_results(batch))
             except (CloudBudgetError, TypeError, AttributeError):
                 self.settings.mark_backend_unconfirmed(self._attempt)
@@ -570,7 +579,10 @@ class LiveSession:
                              "output": json.dumps(result, allow_nan=False)}})
             if not self._closing and not self._final.is_set():
                 self._assist_continuing = True
-                self.assist_result_at = time.monotonic()
+                self._assist_result_submitted = True
+                if any(name != END_CONVERSATION for name, _ in batch.calls.values()):
+                    self.assist_result_at = time.monotonic()
+                    self._assist_result_words = False
                 await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
         except Exception:
             self._fail("Could not return Assist delegation results")
@@ -604,6 +616,8 @@ class LiveSession:
         if type(start) is int and start == end:
             # A zero-length transcript interval can describe seeded text, not speech.
             return
+        if not is_input and self.assist_result_at is not None and any(ch.isalpha() for ch in delta):
+            self._assist_result_words = True
         callback = self.on_input_transcript if is_input else self.on_transcript
         if callback is not None and (not is_input or not self._closing):
             callback(delta)

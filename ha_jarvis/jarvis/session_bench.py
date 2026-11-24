@@ -81,7 +81,8 @@ class DigitalConversation:
                 if now - started >= len(pcm) / (2 * RATE) + observe_seconds:
                     return
             elif input_done and self.last_voice_at is not None and not (
-                    self.assist and self.session.assist_reply_pending(self.last_voice_at)) and (
+                    self.assist and self.session.assist_reply_pending(self.first_voice_at, self.last_voice_at,
+                                                                      require_words=True)) and (
                     now - self.last_audio_at >= .8 or now - self.last_voice_at >= 1.2):
                 return
         raise TimeoutError("Generated conversation did not complete within its observation limit")
