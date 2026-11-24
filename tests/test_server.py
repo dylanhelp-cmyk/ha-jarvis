@@ -11,6 +11,8 @@ import wave
 import zipfile
 
 from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import web
+from jarvis.assist import PROTOCOL
 from jarvis.server import Bench, bench_signal, create_ui, create_audio, validate_config
 from jarvis.device import Device
 from jarvis.audio import FRAME, RATE, make_probe
@@ -493,6 +495,46 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(token, await diagnostics.text())
         for path in Path(self.folder.name).glob('*.json'):
             self.assertNotIn(token, path.read_text())
+
+    async def test_local_named_lookup_calls_only_the_discovered_read_tool(self):
+        calls = []
+        token = "test.local-read.token"
+        async def assist(request):
+            self.assertEqual(request.headers["Authorization"], "Bearer " + token)
+            message = await request.json()
+            method = message["method"]
+            if method == "initialize":
+                result = {"protocolVersion": PROTOCOL, "capabilities": {"tools": {}}}
+            elif method == "notifications/initialized":
+                return web.Response(status=202)
+            elif method == "tools/list":
+                schema = {"type": "object", "properties": {"name": {}, "domain": {}}}
+                result = {"tools": [{"name": tool, "inputSchema": schema}
+                                    for tool in ("homeassistant__GetLiveContext", "intent__HassTurnOn")]}
+            else:
+                self.assertEqual(method, "tools/call")
+                calls.append(message["params"])
+                text = json.dumps({"result": "Live Context: fixture\n- names: Test Lamp\n  domain: light\n"
+                                             "  state: 'on'\n  attributes: {brightness: '128'}\n"})
+                result = {"content": [{"type": "text", "text": text}]}
+            return web.json_response({"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+        fake = web.Application()
+        fake.router.add_post("/api/mcp/assist", assist)
+        async with TestServer(fake) as server:
+            with patch.dict("os.environ", {"JARVIS_ASSIST_ORIGIN": str(server.make_url("/"))}):
+                for invalid in ({"name": ""}, {"name": None}, {"name": "Test Lamp", "tool": "HassTurnOn"}):
+                    response = await self.ui.post("/api/assist/check", json={"token": token, **invalid})
+                    self.assertEqual(response.status, 400)
+                response = await self.ui.post("/api/assist/check", json={"token": token, "name": "Test Lamp"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(await response.json(), {"tool_count": 2, "lookup": {"outcome": "verified",
+                         "state": "on", "attributes": {"brightness": 128, "brightness_pct": 50}}})
+        self.assertEqual(calls, [{"name": "homeassistant__GetLiveContext", "arguments": {"name": "Test Lamp"}}])
+        diagnostics = await (await self.ui.get("/api/diagnostics")).text()
+        self.assertNotIn("Test Lamp", diagnostics)
+        self.assertNotIn(token, diagnostics)
 
     async def test_synthetic_fixture_is_memory_only_and_paid_start_is_gated(self):
         import base64

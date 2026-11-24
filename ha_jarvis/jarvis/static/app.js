@@ -491,12 +491,25 @@ $('assist-form').addEventListener('submit', async (event) => {
   const result = $('assist-result');
   const button = $('assist-check');
   const token = input.value.trim();
+  const name = $('assist-lookup-name').value.trim();
   input.value = '';
   button.disabled = true;
   result.textContent = 'Checking Assist connection…';
   try {
-    const {tool_count} = await api('api/assist/check', 'POST', {token});
-    result.textContent = `Connected to Assist. ${tool_count} tool${tool_count === 1 ? '' : 's'} available.`;
+    const {tool_count, lookup} = await api('api/assist/check', 'POST', name ? {token, name} : {token});
+    if (!lookup) {
+      result.textContent = `Connected to Assist. ${tool_count} tool${tool_count === 1 ? '' : 's'} available.`;
+    } else if (lookup.outcome === 'verified') {
+      const attrs = lookup.attributes || {};
+      const values = [lookup.state + (attrs.unit_of_measurement ? ' ' + attrs.unit_of_measurement : '')];
+      if (attrs.brightness_pct != null) values.push(`brightness ${attrs.brightness_pct}%`);
+      if (attrs.temperature != null) values.push(`setpoint ${attrs.temperature}${attrs.temperature_unit || ''}`);
+      if (attrs.current_temperature != null) values.push(`current temperature ${attrs.current_temperature}${attrs.temperature_unit || ''}`);
+      result.textContent = `${name} — ${values.join(', ')}.`;
+    } else {
+      result.textContent = lookup.outcome === 'unknown' ? 'Assist could not complete the lookup.'
+        : 'No unique device state confirmed. Check the name and its Assist exposure.';
+    }
   } catch (error) {
     result.textContent = error.message;
   } finally {

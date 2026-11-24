@@ -27,6 +27,8 @@ The App 0.2.82 local check isolated a second failure. Both six-second clips rend
 
 The first 0.2.83 local check disconnected after a microphone send returned zero bytes in 102 ms. The Voice PE reconnected on the same boot. The repeat passed live input continuity and acoustic alignment on its internal speaker. Both six-second clips rendered in full with 0 and 10 ms excess. All 223,488 microphone samples were accounted for, including 128 samples awaiting a full processing block. Acoustic alignment was 30.9 ms. Neither clip triggered a host schedule shift, so hardware confirmation of that specific recovery and repeatable reliability are still open. No room audio was uploaded. The ledger remained US$0.815807 of US$10.
 
+The 0.2.84 Assist change reads filtered states through the discovered GetLiveContext tool and checks light brightness and climate setpoints after a single successful entity action. The scoped lookup checks the requested name, area and domain against the returned device. The one-use local ingress check can read an exposed device without starting a voice session. Real household exposure and spoken action acceptance still require a local non-admin token. [Home Assistant live context](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/homeassistant/llm.py)
+
 ## First wired deployment
 
 App and firmware 0.2.0 paired on the actual Voice PE, with the 3.5 mm jack detected. The first local playback stopped at 101.9 ms sender lag after submitting 12,000 frames and receiving acceptance for 10,080 frames. Audible timing is unavailable. Verify the firmware packet-drain fix on hardware before tuning buffers or restoring cloud playback.

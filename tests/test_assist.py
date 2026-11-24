@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
@@ -176,3 +177,96 @@ class AssistDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(AssistDiscoveryError, "unexpected HTTP response"):
                 await discover_tools(str(server.make_url("/")), "local-test-token")
         self.assertFalse(followed)
+
+
+class AssistStateTests(unittest.IsolatedAsyncioTestCase):
+    read = "homeassistant__GetLiveContext"
+    light = "light__HassLightSet"
+    climate = "climate__HassClimateSetTemperature"
+    lamp = {"names": "Desk Lamp, Reading Light", "domain": "light", "areas": "Study, Office",
+            "state": "on", "attributes": {"brightness": "128", "brightness_pct": "50"}}
+    heater = {"names": "Heater", "domain": "climate", "state": "heat",
+              "attributes": {"current_temperature": 18, "temperature": 21.5, "temperature_unit": "°C"}}
+
+    @staticmethod
+    def context(*rows):
+        return {"outcome": "reported", "text": json.dumps({"result": "Live Context: example\n" + yaml.safe_dump(list(rows))})}
+
+    @staticmethod
+    def receipt(domain, name):
+        return {"outcome": "reported", "text": json.dumps({"response_type": "action_done", "data": {
+            "success": [{"type": "entity", "id": domain + ".fixture", "name": name}], "failed": []}})}
+
+    def bridge(self, *responses, uncertain_actions=None):
+        schema = {"type": "object", "properties": {"name": {}, "area": {}, "domain": {}}}
+        catalog = [{"name": name, "inputSchema": schema} for name in (self.read, self.light, self.climate)]
+        client = SimpleNamespace(call_tool=AsyncMock(side_effect=responses))
+        return AssistDelegation(client, catalog, uncertain_actions=uncertain_actions)
+
+    async def test_light_brightness_accepts_only_the_requested_value_and_target(self):
+        request = {"name": "Reading Light", "area": "Office", "brightness": 50}
+        for row, expected in [
+            (self.lamp, "verified"),
+            ({**self.lamp, "areas": "Kitchen"}, "unverified"),
+            ({**self.lamp, "names": "Desk Lamp"}, "unverified"),
+            ({**self.lamp, "names": "Reading Light"}, "unverified"),
+            ({**self.lamp, "attributes": {"brightness": "127", "brightness_pct": "51"}}, "unverified"),
+            ({**self.lamp, "attributes": {"brightness": "102"}}, "unverified"),
+            ({**self.lamp, "state": "off"}, "unverified")]:
+            with self.subTest(row=row):
+                bridge = self.bridge(self.receipt("light", "Desk Lamp"), self.context(row))
+                result = await bridge.execute("a", self.light, json.dumps(request))
+                self.assertEqual(result["outcome"], expected)
+                if expected == "verified":
+                    self.assertEqual(result["attributes"], {"brightness_pct": 50})
+                self.assertEqual(bridge.client.call_tool.await_args.args[1:], (
+                    self.read, {"domain": "light", "name": "Reading Light", "area": "Office"}))
+        bridge = self.bridge(self.receipt("light", "Desk Lamp"), self.context({**self.lamp, "state": "off", "attributes": {}}))
+        self.assertEqual(await bridge.execute("zero", self.light, '{"name":"Desk Lamp","brightness":0}'),
+                         {"outcome": "verified", "state": "off"})
+        bridge = self.bridge(self.receipt("light", "Desk Lamp"))
+        combined = await bridge.execute("both", self.light, json.dumps({**request, "color": "blue"}))
+        self.assertEqual(combined["outcome"], "unverified")
+        self.assertEqual(bridge.client.call_tool.await_count, 1)
+
+    async def test_climate_checks_setpoint_independently_of_room_temperature(self):
+        for row, expected in [(self.heater, "verified"), ({**self.heater, "state": "unavailable"}, "unverified"),
+                              ({**self.heater, "attributes": {"current_temperature": 21.5}}, "unverified"),
+                              ({**self.heater, "attributes": {"temperature": 21.51}}, "unverified")]:
+            with self.subTest(row=row):
+                bridge = self.bridge(self.receipt("climate", "Heater"), self.context(row))
+                result = await bridge.execute("temp", self.climate, '{"name":"Heater","temperature":21.5}')
+                self.assertEqual(result["outcome"], expected)
+                if expected == "verified":
+                    self.assertEqual(result["attributes"], {"temperature": 21.5, "temperature_unit": "°C"})
+
+    async def test_context_queries_return_only_matching_projected_data(self):
+        fixture = {**self.lamp, "attributes": {"brightness": "128", "unrelated": "omit this"}}
+        bridge = self.bridge(self.context(fixture), self.context(self.lamp, self.lamp),
+                             self.context(self.lamp, self.heater), self.context(self.heater))
+        named = '{"name":"Reading Light","domain":["light"],"area":"Office"}'
+        result = await bridge.execute("one", self.read, named)
+        self.assertEqual(result, {"outcome": "verified", "state": "on",
+                                  "attributes": {"brightness": 128, "brightness_pct": 50}})
+        self.assertEqual((await bridge.execute("duplicate", self.read, named))["outcome"], "unverified")
+        combined = await bridge.execute("many", self.read, '{"domain":["light","climate"]}')
+        self.assertEqual(combined["state_counts"], {"on": 1, "heat": 1})
+        self.assertEqual([row["name"] for row in combined["entities"]], ["Desk Lamp", "Heater"])
+        self.assertEqual((await bridge.execute("wrong", self.read, '{"domain":"light"}'))["outcome"], "unverified")
+        rows = [{**self.lamp, "names": f"Lamp {n}"} for n in range(26)]
+        result = await self.bridge(self.context(*rows)).execute("list", self.read, '{"domain":"light"}')
+        self.assertEqual((result["truncated"], len(result["entities"]), result["matched_entities"]), (True, 24, 26))
+        self.assertEqual(result["state_counts"], {"on": 26})
+        offline = self.bridge(self.context({**self.heater, "state": "unavailable"}))
+        self.assertEqual(await offline.execute("offline", self.read, '{"name":"Heater"}'),
+                         {"outcome": "verified", "state": "unavailable"})
+
+    async def test_readback_timeout_blocks_reissued_mutation_but_allows_read(self):
+        bridge = self.bridge(self.receipt("light", "Desk Lamp"), {"outcome": "unknown"},
+                             self.context(self.lamp), uncertain_actions=set())
+        args = '{"name":"Desk Lamp","brightness":50}'
+        self.assertEqual((await bridge.execute("command", self.light, args))["outcome"], "unknown")
+        self.assertEqual((await bridge.execute("retry", self.light, args))["outcome"], "unknown")
+        self.assertEqual((await bridge.execute("check", self.read, '{"name":"Desk Lamp"}'))["outcome"], "verified")
+        self.assertEqual([call.args[1] for call in bridge.client.call_tool.await_args_list],
+                         [self.light, self.read, self.read])

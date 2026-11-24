@@ -1,3 +1,8 @@
+# 0.2.84
+
+- Verify named light brightness and thermostat setpoints against a fresh Assist state lookup. A timeout during verification also protects against repeating the command.
+- Return filtered device states for names, areas and domains. The existing Assist connection check can now read one named device locally.
+
 # 0.2.83
 
 - Keep processing microphone audio after the host adjusts its send schedule when the Voice PE confirms continuous playback within the existing tolerance. Require fresh device timing evidence for each advance.

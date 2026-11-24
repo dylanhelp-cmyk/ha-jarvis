@@ -1477,15 +1477,28 @@ def create_ui(bench):
 
     async def check_assist(request):
         data = await request.json()
-        if not isinstance(data, dict) or set(data) != {"token"}:
+        if not isinstance(data, dict) or set(data) not in ({"token"}, {"token", "name"}):
             raise ValueError("Enter a Home Assistant access token")
         token = data["token"]
         if not isinstance(token, str) or not ASSIST_TOKEN.fullmatch(token):
             raise ValueError("Enter a valid Home Assistant access token")
+        name = data.get("name")
+        if "name" in data and (not isinstance(name, str) or not name.strip()
+                               or len(name) > 128 or not name.isprintable()):
+            raise ValueError("Enter a device name or alias, up to 128 characters")
         # This App uses host networking. Keep the destination out of the
         # request so the ingress route cannot send credentials to other hosts.
         origin = os.environ.get("JARVIS_ASSIST_ORIGIN", "http://127.0.0.1:8123")
         try:
+            if name is not None:
+                async with AssistClient(origin, token) as client:
+                    catalog = await client.list_tools()
+                    bridge = AssistDelegation(client, catalog)
+                    if bridge.state_tool is None:
+                        raise ValueError("Assist has no named state lookup")
+                    result = await bridge.execute("local-check", bridge.state_tool, json.dumps({"name": name.strip()}))
+                    return web.json_response({"tool_count": len(catalog), "lookup": result},
+                                             headers={"Cache-Control": "no-store"})
             tools = await discover_tools(origin, token)
         except AssistDiscoveryError as exc:
             return web.json_response({"error": str(exc)}, status=502)
