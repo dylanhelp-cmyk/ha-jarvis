@@ -1,6 +1,26 @@
 # HA Jarvis wired restart
 
-Jarvis uses the Voice PE 3.5 mm output when connected and the Voice PE internal speaker when the jack is unplugged. Previous wireless measurements are preserved in Git history. The prior rollback pair is App 0.1.36 / firmware 0.1.6 at ae6d932. The earlier 200 ms wireless lead-in failed both acknowledgment trials. One of two 300 ms controls verified both words at 1536 ms after wake receipt.
+Build an everyday Home Assistant voice assistant. From the user's usual position, “Hey Jarvis” should start a natural GPT-Live conversation in a concise British style. The user should be able to ask a follow-up, talk over a reply, and control an Assist-exposed device with an accurate spoken result. Use the Voice PE's 3.5 mm speakers when connected and its internal speaker when unplugged.
+
+## Original plan and agreed changes
+
+| Original requirement | Current agreement and evidence |
+| --- | --- |
+| Wake locally, play “Yes sir” once and connect to live voice in parallel | The user chose the longer, deliberately paced “Yes sir. How can I help?” and approved the clip. Wake, spoken replies and warm follow-ups have worked on hardware. Greeting loudness relative to live speech still needs a listening check. |
+| WiiM-first wireless output and music interruption/restoration | The user moved playback to the Voice PE and removed music handling. The jack is primary, the internal speaker is the fallback. The old wireless work is available in Git history. |
+| Aim for 1.0 s median and 1.5 s estimated p95 on warm replies | The user accepted perceived timing on 0.2.61 and closed this milestone. Measure a reported regression if one occurs. The available samples do not establish the original statistical thresholds. |
+| Spoken interruption and full-duplex conversation during delegated work | Open. When the user spoke over Jarvis, the old reply paused and resumed louder. Physical Stop, continuous capture and a successful local echo test are supporting evidence only. |
+| Control Assist-exposed devices and verify before speaking success | Scoped MCP discovery, state reads and selected action readbacks are implemented. Confirm an exposed device, exclusion of an unexposed device, a reversible spoken command and accurate handling of an unconfirmed outcome through the installed App. |
+| Install and update a Home Assistant OS App and ESPHome Builder firmware, with ordinary and advanced settings | Both are installed. The ingress UI includes voice, personality, volume, timeout, test controls and diagnostic export. GPT-Live remains the voice engine. GPT-6 Luna with low reasoning handles delegated work. Selecting and evaluating the home-control backend in the UI remains open. |
+| Graceful conversation endings, short-lived context, privacy, usable controls | Generated speech has exercised context, ambiguous thanks and sign-off. Exercise real pauses, noise, new speech during the two-second grace and pending work through ordinary wake standby. Keep the ten-second default, local credentials, opt-in room-audio tests and the revised US$10 test cap. Validate the ordinary settings and recovery through the same installed experience. |
+
+### Next acceptance checks
+
+1. **Conversation.** At ordinary volume, ask for a longer answer and speak a distinct second question while it plays. The old answer must stop and stay stopped, the opening words of the new request must survive, and Jarvis must answer it once at its usual level. Record which speaker was used. The pending spoken test requires fresh room-audio permission.
+2. **Home control.** The local read-only Assist check can proceed independently with a non-admin token entered in Jarvis. Then exercise one reversible, named device action by voice and compare the spoken result with its actual state. Include a correction or cancellation during pending work.
+3. **Daily use.** Exercise the session-ending cases in normal wake standby, a second wake with recent context, mute, reconnect and speaker fallback. Verify the experience on the primary jack before closing a milestone tested on the internal speaker.
+
+Each new diagnostic or transport comparison should resolve a specific failure in one of these checks. Keep WebSocket as the working GPT-Live path. The planned like-for-like interruption comparison with WebRTC is still open. Follow the agreed tuning limit of two credible changes with less than 100 ms repeatable gain, or stop sooner if reliability worsens. Keep proactive monitoring deferred.
 
 ## Milestones
 
