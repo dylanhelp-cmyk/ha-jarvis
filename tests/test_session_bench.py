@@ -5,9 +5,58 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.session_bench import SESSION_PROMPTS, check_sessions
+from jarvis.assist_sample import check_assist_sample
 
 
 class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_model_must_read_changed_state_before_speaking(self):
+        import json
+        from jarvis.live_bench import ASSIST_SAMPLE_PROMPTS
+
+        class Provider:
+            assist_work_pending = False
+            def __init__(self, _settings, **callbacks):
+                self.callbacks = callbacks
+                self.metrics = SimpleNamespace(error=None, finalization_confirmed=True, usage_seconds=10,
+                                               close_reason="close_requested")
+            async def start(self):
+                pass
+            async def close(self):
+                return self.metrics
+            def begin_turn(self):
+                pass
+            def media_deadline(self):
+                return now + 50
+            async def send_audio(self, packet):
+                marker = int.from_bytes(packet[:2], "little")
+                if not marker:
+                    return
+                self.callbacks["on_input_transcript"](ASSIST_SAMPLE_PROMPTS[marker - 1])
+                bridge = self.callbacks["assist_delegation"]
+                if marker == 1 or fresh:
+                    name = "HassTurnOn" if marker == 1 else "GetLiveContext"
+                    await bridge.execute(str(marker), name, json.dumps({"name": "Test Lamp"}))
+                self.callbacks["on_transcript"]("On." if marker == 1 else "Off.")
+                await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
+
+        async def fixture(prompt):
+            return np.full(320, ASSIST_SAMPLE_PROMPTS.index(prompt) + 1, dtype="<i2").tobytes(), 320
+        async def sleep(seconds):
+            nonlocal now
+            now += seconds
+        now = 100.
+        clock = SimpleNamespace(monotonic=lambda: now)
+        with (patch("jarvis.session_bench.LiveSession", Provider),
+              patch("jarvis.assist_sample.synthesize_fixture", side_effect=fixture),
+              patch("jarvis.assist_sample.time", clock), patch("jarvis.session_bench.time", clock),
+              patch("jarvis.session_bench.asyncio.sleep", side_effect=sleep)):
+            for fresh in (True, False):
+                report = await check_assist_sample(SimpleNamespace(spent_usd=0), "gpt-6-luna", "marin", lambda _: None)
+                self.assertTrue(report["checks"]["verified_change"])
+                self.assertEqual(all(report["checks"].values()), fresh)
+                self.assertEqual(report["tool_calls"]["reads"], int(fresh))
+                self.assertNotIn("Test Lamp", repr(report))
+
     async def test_real_time_generated_input_resumes_context_and_settles_both_sessions(self):
         clock = 100.
         owners = []
@@ -23,6 +72,8 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
             return np.full(320, marker, dtype="<i2").tobytes(), 320
 
         class Provider:
+            assist_work_pending = False
+
             def __init__(self, _settings, **callbacks):
                 owners.append(callbacks)
                 self.callbacks = callbacks

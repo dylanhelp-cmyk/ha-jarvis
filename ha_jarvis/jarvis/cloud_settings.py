@@ -12,7 +12,9 @@ BACKEND_OUTPUT_TOKENS = 512
 BACKEND_RESPONSE_LIMIT = 2
 STANDBY_BACKEND_RESPONSE_LIMIT = 6
 BACKEND_CONTEXT_TOKENS = 1_050_000
-BACKEND_RATES = {"gpt-6-luna": (.10, .01, .50), "gpt-6-sol": (2, .20, 10)}
+DEFAULT_ASSIST_MODEL = "gpt-6-luna"
+BACKEND_RATES = {DEFAULT_ASSIST_MODEL: (.10, .01, .50), "gpt-5.6-luna": (.20, .02, 1.20),
+                 "gpt-6-sol": (2, .20, 10)}
 
 
 def _backend_cost(model, input_tokens, cached_tokens, output_tokens):
@@ -34,6 +36,11 @@ def _backend_allowance(model):
 def _backend_reservation(backend):
     # Live can start one additional response before shutdown reaches it.
     return (backend.get("response_limit", BACKEND_RESPONSE_LIMIT) + 1) * _backend_allowance(backend["model"])
+
+
+def session_reservation(model=None, response_limit=BACKEND_RESPONSE_LIMIT):
+    voice = 60 * VOICE_USD_PER_SECOND
+    return voice if model is None else voice + _backend_reservation({"model": model, "response_limit": response_limit})
 
 
 class CloudBudgetError(ValueError):
@@ -129,11 +136,10 @@ class CloudSettings:
             raise CloudBudgetError("Enter the API key locally before starting a cloud test")
         if self.pending is not None:
             raise CloudBudgetError("Previous cloud attempt has unconfirmed finalization; paid retries are blocked")
-        reserved = 60 * VOICE_USD_PER_SECOND
+        reserved = session_reservation(backend_model, backend_response_limit)
         backend = None
         if backend_model is not None:
             backend = {"model": backend_model, "response_limit": backend_response_limit, "responses": {}}
-            reserved += _backend_reservation(backend)
         if self.spent_usd + reserved > self.budget_usd + 1e-12:
             raise CloudBudgetError(f"Cloud test would exceed the US${self.budget_usd} budget")
         self.pending = {"id": secrets.token_hex(12), "transport": transport,

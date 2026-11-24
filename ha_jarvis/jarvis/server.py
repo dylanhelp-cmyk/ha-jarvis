@@ -35,7 +35,8 @@ from .device import Device, output_route
 from .lifecycle import DEFAULT_IDLE_SECONDS, StandbyContext
 from .live_session import LIVE_VOICES, VOICE
 from .opening_audio import OpeningAudio
-from .cloud_settings import CloudSettings, VOICE_USD_PER_SECOND
+from .cloud_settings import (BACKEND_RATES, BACKEND_RESPONSE_LIMIT, DEFAULT_ASSIST_MODEL,
+                             STANDBY_BACKEND_RESPONSE_LIMIT, CloudSettings, VOICE_USD_PER_SECOND, session_reservation)
 from .playback import RATE as PLAYBACK_RATE, VOICE_OUTPUT_GAIN_DB, JackPlayback, WakeCacheUpload, stereo_pcm
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,7 +44,8 @@ CONNECTION_TEST_SECONDS = 60
 STANDBY_ARM_MS = 120_000
 ASSIST_TOKEN = re.compile(r"[A-Za-z0-9._~-]{1,2048}")
 DEFAULTS = {"ha_lan_url": "", "repetitions": 3, "standby_idle_seconds": DEFAULT_IDLE_SECONDS,
-            "voice": VOICE, "personality": "classic", "voice_output_gain_db": VOICE_OUTPUT_GAIN_DB}
+            "voice": VOICE, "personality": "classic", "voice_output_gain_db": VOICE_OUTPUT_GAIN_DB,
+            "assist_model": DEFAULT_ASSIST_MODEL}
 LEGACY_FIELDS = {"wiim_host", "stream_base_url", "route", "codec", "verify_tls",
                  "slimproto_player_id", "slimproto_port", "airplay_latency_ms"}
 
@@ -67,6 +69,8 @@ def validate_config(value):
         raise ValueError("Choose a wake standby timeout from 3 to 30 seconds")
     if config["voice"] not in LIVE_VOICES:
         raise ValueError("Choose a built-in GPT-Live voice")
+    if not isinstance(config["assist_model"], str) or config["assist_model"] not in BACKEND_RATES:
+        raise ValueError("Choose a supported home-control model")
     if not isinstance(config["personality"], str) or config["personality"] not in PERSONALITIES:
         raise ValueError("Choose a supported Jarvis personality")
     gain = config["voice_output_gain_db"]
@@ -264,12 +268,21 @@ class Bench:
                 "interruption_profile_ready": self.echo_band_profile is not None and self.alignment_delay() is not None,
                 "continuous_input_ready": self.continuous_input_ready and self.alignment_delay() is not None,
                 "acknowledgment": self.acknowledgment_status(), "voice_options": LIVE_VOICES,
+                "assist_model_options": {model: {"preview": session_reservation(model),
+                    "standby": session_reservation(model, STANDBY_BACKEND_RESPONSE_LIMIT)} for model in BACKEND_RATES},
                 "config": {k: v for k, v in self.config.items() if k != "device_token"},
                 "cloud": {**self.cloud_settings.public(), "fixture_loaded": bool(self.cloud_fixture),
                           "reason": "The voice preview requires separate per-run room microphone consent"}}
 
     def set_voice_session(self, session):
         self.voice_session = session
+
+    def check_assist_budget(self, model, standby):
+        required = session_reservation(model, STANDBY_BACKEND_RESPONSE_LIMIT if standby else BACKEND_RESPONSE_LIMIT)
+        remaining = self.cloud_settings.budget_usd - self.cloud_settings.spent_usd
+        if required > remaining + 1e-12:
+            raise ValueError(f"{model} needs a US${required:.2f} reservation for this mode. "
+                             f"US${remaining:.2f} remains in the test budget.")
 
     def request_cancel(self, reason="user_stop", details=None):
         task = self.task
@@ -1200,7 +1213,8 @@ class Bench:
 
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False,
-                  standby_context=None, assist_standby_token=None, uncertain_actions=None, source_variant=None, duplex=False):
+                  standby_context=None, assist_standby_token=None, uncertain_actions=None, source_variant=None, duplex=False,
+                  sample_model=None):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -1211,14 +1225,26 @@ class Bench:
         del self.results[30:]
         player = sender = assist_delegation = None
         resources = AsyncExitStack()
-        digital_only = kind in ("synthetic_sessions", "synthetic_interrupt") or (kind == "synthetic_replies" and startup_transport == "realtime")
+        digital_only = kind in ("synthetic_sessions", "synthetic_interrupt", "assist_sample") or (kind == "synthetic_replies" and startup_transport == "realtime")
         if standby:
             result["standby"] = True
         try:
             if digital_only:
                 result["route"] = "digital"
                 result["warnings"].clear()
-                if kind == "synthetic_interrupt":
+                if kind == "assist_sample":
+                    from .assist_sample import check_assist_sample
+
+                    def stage(phase):
+                        self.test["phase"] = phase
+                    result["assist_model"] = sample_model
+                    sample = await check_assist_sample(self.cloud_settings, sample_model, self.config["voice"], stage)
+                    result["assist_sample"] = sample
+                    complete = all(sample["checks"].get(key) is True for key in
+                                   ("verified_change", "spoken_on", "fresh_read", "spoken_off"))
+                    result["status"] = ("passed" if complete and not sample.get("failure") and
+                        sample["session"]["finalization_confirmed"] and not sample["session"]["error"] else "unavailable")
+                elif kind == "synthetic_interrupt":
                     from .interruption_bench import check_interruption
 
                     result["metric"] = "generated_cloud_speech_interruption"
@@ -1254,6 +1280,7 @@ class Bench:
             if kind != "connection":
                 self.test["output_route"] = route
             if assist_preview is not None or assist_standby_token is not None:
+                self.check_assist_budget(self.config["assist_model"], standby)
                 if assist_preview is not None:
                     token, domain, name = assist_preview
                     target = (domain, name)
@@ -1266,7 +1293,9 @@ class Bench:
                 origin = os.environ.get("JARVIS_ASSIST_ORIGIN", "http://127.0.0.1:8123")
                 client = await resources.enter_async_context(AssistClient(origin, token))
                 assist_delegation = AssistDelegation(client, await client.list_tools(), preview_target=target,
+                    model=self.config["assist_model"],
                     uncertain_actions=uncertain_actions)
+                result["assist_model"] = assist_delegation.model
                 if target is not None and await assist_delegation.preview_state("setup") not in ("on", "off"):
                     raise ValueError("Assist could not uniquely resolve the selected light or switch")
             self.test["phase"] = "synchronizing Voice PE and starting capture"
@@ -1642,7 +1671,9 @@ def create_ui(bench):
 
     async def session_checks(request):
         data = await request.json()
-        if not isinstance(data, dict) or set(data) != {"confirm_paid"} or data["confirm_paid"] is not True:
+        sample = request.path.endswith("/assist-sample")
+        expected = {"confirm_paid", "model"} if sample else {"confirm_paid"}
+        if not isinstance(data, dict) or set(data) != expected or data["confirm_paid"] is not True:
             raise ValueError("Confirm budgeted sessions with generated speech")
         if bench.test["running"] or (bench.task and not bench.task.done()):
             raise web.HTTPConflict(text="Wait for the current test to finish")
@@ -1650,12 +1681,16 @@ def create_ui(bench):
         if not public["api_key_configured"] or public["paid_retry_blocked"]:
             raise ValueError("A configured key and settled budget ledger are required")
         interrupt = request.path.endswith("/interrupt-check")
-        sessions = 1 if interrupt else 2
-        if public["spent_usd"] + sessions * 60 * VOICE_USD_PER_SECOND > public["budget_usd"]:
+        if sample:
+            if not isinstance(data["model"], str) or data["model"] not in BACKEND_RATES:
+                raise ValueError("Choose a supported home-control model")
+            bench.check_assist_budget(data["model"], True)
+        elif public["spent_usd"] + (1 if interrupt else 2) * 60 * VOICE_USD_PER_SECOND > public["budget_usd"]:
             raise ValueError("The test needs enough budget for its bounded generated sessions")
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing generated conversation checks"}
-        bench.task = asyncio.create_task(bench.run("synthetic_interrupt" if interrupt else "synthetic_sessions", 1))
+        kind = "assist_sample" if sample else ("synthetic_interrupt" if interrupt else "synthetic_sessions")
+        bench.task = asyncio.create_task(bench.run(kind, 1, sample_model=data.get("model")))
         return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):
@@ -1758,6 +1793,8 @@ def create_ui(bench):
             settings = bench.cloud_settings.public()
             if not settings["api_key_configured"] or settings["paid_retry_blocked"]:
                 raise ValueError("A configured key and a settled budget ledger are required")
+            if assist_preview is not None or assist_standby_token is not None:
+                bench.check_assist_budget(bench.config["assist_model"], standby)
             if device.get("wake_capture_protocol") != 1 or bench.alignment_delay() is None:
                 raise ValueError("Run Echo reference alignment successfully on the current Voice PE first")
             if duplex and not bench.continuous_input_ready:
@@ -1859,6 +1896,7 @@ def create_ui(bench):
     app.router.add_post("/api/cloud/tests", cloud_start)
     app.router.add_post("/api/cloud/session-checks", session_checks)
     app.router.add_post("/api/cloud/interrupt-check", session_checks)
+    app.router.add_post("/api/cloud/assist-sample", session_checks)
     app.router.add_get("/api/config", config)
     app.router.add_put("/api/config", config)
     app.router.add_post("/api/tests", start)

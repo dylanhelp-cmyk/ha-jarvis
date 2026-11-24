@@ -48,6 +48,16 @@ function readiness() {
   startup.disabled = running || busy;
   const assist = kind === 'voice_turn' && $('voice-assist').checked;
   const standby = kind === 'voice_turn' && $('voice-standby').checked;
+  const reservations = state?.assist_model_options?.[state.config.assist_model];
+  const remaining = state ? state.cloud.budget_usd - state.cloud.spent_usd : 0;
+  const selected = state?.assist_model_options?.[$('assist-model').value];
+  $('assist-sample').disabled = running || busy || !state?.cloud.api_key_configured || state.cloud.paid_retry_blocked ||
+    !selected || selected.standby > remaining + 1e-12;
+  if (selected) {
+    $('assist-budget').textContent = 'Jarvis reserves up to US$' + selected.preview.toFixed(2) +
+      ' for one preview or US$' + selected.standby.toFixed(2) + ' per standby wake. US$' +
+      remaining.toFixed(2) + ' remains. The ledger settles after each session.';
+  }
   $('voice-assist-fields').hidden = !assist;
   $('voice-assist-target').hidden = !assist || standby;
   $('voice-assist-mode').textContent = standby
@@ -71,6 +81,7 @@ function readiness() {
   else if (kind === 'voice_turn' && (!state.echo_alignment_ready || !state.acknowledgment.cached_on_device)) reason = 'Run a successful Echo reference alignment first.';
   else if (kind === 'voice_turn' && $('voice-duplex').checked && !state.continuous_input_ready) reason = 'Repeat Echo reference alignment until the continuous microphone check passes.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
+  else if (assist && reservations?.[standby ? 'standby' : 'preview'] > remaining + 1e-12) reason = 'The saved Assist model exceeds the available budget for this mode. Choose another model under Advanced home control.';
   else if (assist && !$('voice-assist-token').value.trim()) reason = 'Enter a local Home Assistant token.';
   else if (assist && !standby && !$('voice-assist-name').value.trim()) reason = 'Enter the selected device name.';
   else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for the selected voice mode.';
@@ -153,7 +164,21 @@ function showResults(results) {
     const card = document.createElement('article');
     card.className = 'result-card';
     list.append(card);
-    add(card, 'h3', (labels[result.kind] || result.kind) + ' / ' + result.status);
+    add(card, 'h3', (result.kind === 'assist_sample' ? 'Sample light' : labels[result.kind] || result.kind) + ' / ' + result.status);
+    if (result.assist_model) add(card, 'p', 'Assist reasoning model · ' + result.assist_model);
+    if (result.assist_sample) {
+      const sample = result.assist_sample;
+      for (const [key, label] of Object.entries({verified_change: 'Verified light change', spoken_on: 'Spoke confirmed on state',
+        fresh_read: 'Read changed state', spoken_off: 'Spoke confirmed off state'})) {
+        const value = sample.checks[key];
+        add(card, 'p', label + ' — ' + (value === undefined ? 'unavailable' : value ? 'passed' : 'failed'));
+      }
+      if (sample.failure) add(card, 'p', sample.failure);
+      if (sample.ledger_cost_usd != null) add(card, 'p', 'Session ledger cost · US$' + sample.ledger_cost_usd.toFixed(4));
+      for (const [i, ms] of sample.generated_speech_end_to_returned_voice_ms.entries()) {
+        if (ms !== null) add(card, 'p', 'Turn ' + (i + 1) + ' · generated speech end to returned voice ' + ms + ' ms');
+      }
+    }
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
     if (result.interruption_checks) {
       const checks = result.interruption_checks;
@@ -372,7 +397,8 @@ $('config-form').addEventListener('submit', (event) => {
   action(async () => {
     const config = {ha_lan_url: $('ha-lan-url').value.trim(), repetitions: Number($('repetitions').value),
       standby_idle_seconds: Number($('standby-idle-seconds').value), voice: $('jarvis-voice').value,
-      personality: $('jarvis-personality').value, voice_output_gain_db: Number($('jarvis-volume').value)};
+      personality: $('jarvis-personality').value, voice_output_gain_db: Number($('jarvis-volume').value),
+      assist_model: $('assist-model').value};
     const changedPlayback = state?.config.voice !== config.voice ||
       state?.config.voice_output_gain_db !== config.voice_output_gain_db;
     if ($('device-token').value) config.device_token = $('device-token').value;
@@ -532,6 +558,10 @@ async function initialize() {
     $('jarvis-voice').add(new Option(voice[0].toUpperCase() + voice.slice(1), voice));
   }
   $('jarvis-voice').value = config.voice;
+  for (const model of Object.keys(state.assist_model_options)) {
+    $('assist-model').add(new Option(model, model));
+  }
+  $('assist-model').value = config.assist_model;
   readiness();
 }
 
@@ -539,6 +569,14 @@ function showVoiceVolume() {
   $('jarvis-volume-db').value = $('jarvis-volume').value.replace('-', '−') + ' dB';
 }
 $('jarvis-volume').addEventListener('input', showVoiceVolume);
+$('assist-model').addEventListener('change', readiness);
+$('assist-sample').addEventListener('click', () => {
+  const model = $('assist-model').value;
+  const hold = state.assist_model_options[model].standby;
+  if (!window.confirm('Run two generated requests with ' + model + ' and an in-memory light? The ledger reserves US$' +
+      hold.toFixed(2) + '. The test uses no room audio or household devices.')) return;
+  action(() => api('api/cloud/assist-sample', 'POST', {model, confirm_paid: true}));
+});
 
 initialize().catch((error) => notice(error.message));
 setInterval(() => { if (!busy) poll().catch((error) => notice(error.message)); }, 1500);

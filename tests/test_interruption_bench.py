@@ -23,6 +23,8 @@ class InterruptionCheckTests(unittest.IsolatedAsyncioTestCase):
             return np.full(320, marker, dtype="<i2").tobytes(), 320
 
         class Provider:
+            assist_work_pending = False
+
             def __init__(self, _, **callbacks):
                 owners.append(self)
                 self.callbacks = callbacks

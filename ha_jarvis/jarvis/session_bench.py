@@ -18,16 +18,17 @@ INTERRUPTION_PROMPT = "Please count slowly from one to twenty."
 class DigitalConversation:
     """Feed generated audio at real-time speed and keep only bounded text in RAM."""
 
-    def __init__(self, settings, voice, instructions, prior_exchanges=(), *, allow_signoff=True):
+    def __init__(self, settings, voice, instructions, prior_exchanges=(), *, allow_signoff=True, assist_delegation=None):
         self.signoff = SignOffRequest()
         self.transcript = ExchangeTranscript()
         self.output_text = ""
-        self.last_audio_at = self.last_voice_at = None
+        self.last_audio_at = self.first_voice_at = self.last_voice_at = None
         self.next_input_at = None
         self.session = LiveSession(settings, transport="websocket", voice=voice, instructions=instructions,
             on_audio=self.audio, on_transcript=self.output_transcript, on_input_transcript=self.signoff.append,
             on_signoff_request=self.request_signoff if allow_signoff else None, on_timed_transcript=self.transcript.append,
-            prior_exchanges=prior_exchanges)
+            prior_exchanges=prior_exchanges, assist_delegation=assist_delegation,
+            allow_assist_action=(lambda: bool(self.signoff.text.strip())) if assist_delegation is not None else None)
 
     async def audio(self, pcm, rate):
         if rate != RATE:
@@ -35,6 +36,8 @@ class DigitalConversation:
         self.last_audio_at = time.monotonic()
         if voiced_bounds(np.frombuffer(pcm, dtype="<i2")) is not None:
             self.last_voice_at = self.last_audio_at
+            if self.first_voice_at is None:
+                self.first_voice_at = self.last_audio_at
 
     def output_transcript(self, delta):
         self.output_text = (self.output_text + delta)[:640]
@@ -65,7 +68,7 @@ class DigitalConversation:
             elif observe_seconds is not None:
                 if now - started >= len(pcm) / (2 * RATE) + observe_seconds:
                     return
-            elif input_done and self.last_voice_at is not None and (
+            elif input_done and self.last_voice_at is not None and not self.session.assist_work_pending and (
                     now - self.last_audio_at >= .8 or now - self.last_voice_at >= 1.2):
                 return
         raise TimeoutError("Generated conversation did not complete within its observation limit")
@@ -81,7 +84,7 @@ class DigitalConversation:
         self.signoff.finish()
         self.transcript.finish()
         self.output_text = ""
-        self.last_audio_at = self.last_voice_at = None
+        self.last_audio_at = self.first_voice_at = self.last_voice_at = None
 
     async def close(self):
         try:

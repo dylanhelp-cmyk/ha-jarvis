@@ -6,7 +6,7 @@ import re
 
 from .assist import MAX_ARGUMENT_BYTES, MAX_CALLS
 from .assist_context import matches_name, number, state_result, unique_context
-from .cloud_settings import BACKEND_OUTPUT_TOKENS, BACKEND_RATES
+from .cloud_settings import BACKEND_OUTPUT_TOKENS, BACKEND_RATES, DEFAULT_ASSIST_MODEL
 
 
 POWER_STATE = {"HassTurnOn": "on", "HassTurnOff": "off"}
@@ -70,7 +70,7 @@ class ResponseBatch:
 
 
 class AssistDelegation:
-    def __init__(self, client, catalog, *, model="gpt-6-luna", preview_target=None, uncertain_actions=None):
+    def __init__(self, client, catalog, *, model=DEFAULT_ASSIST_MODEL, preview_target=None, uncertain_actions=None):
         if model not in BACKEND_RATES:
             raise ValueError("Unsupported Assist reasoning model")
         self.client, self.model = client, model

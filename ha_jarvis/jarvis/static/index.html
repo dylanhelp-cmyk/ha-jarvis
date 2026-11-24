@@ -48,6 +48,12 @@
             <label for="standby-idle-seconds">Wake standby inactivity timeout (seconds)</label>
             <input id="standby-idle-seconds" name="standby_idle_seconds" type="number" min="3" max="30" value="10" required>
             <p class="field-help">How long Jarvis listens for a follow-up after a reply in wake standby.</p>
+            <details class="device-setup"><summary>Advanced home control</summary><div class="details-content">
+              <label for="assist-model">Assist reasoning model</label>
+              <select id="assist-model" name="assist_model" aria-describedby="assist-budget" required></select>
+              <p id="assist-budget" class="field-help"></p>
+              <button id="assist-sample" class="button subtle" type="button" disabled>Try model on a sample light (paid)</button>
+            </div></details>
             <details class="device-setup"><summary>Audio diagnostics</summary><div class="details-content">
               <label for="repetitions">Probe repetitions</label>
               <input id="repetitions" name="repetitions" type="number" min="1" max="20" value="3" required>

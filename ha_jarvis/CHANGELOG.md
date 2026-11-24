@@ -1,3 +1,8 @@
+# 0.2.86
+
+- Select the home-control reasoning model under Advanced home control. Check its reservation against the available budget before arming Assist. GPT-6 Luna remains the default.
+- Try the selected model with two generated requests and a sample light. The result checks that Jarvis verifies a change and reads the light again after its state changes. This check uses no household token, microphone or speaker.
+
 # 0.2.85
 
 - Let a live answer use the time left in its budgeted session. The previous eight-second limit could cut off longer answers.

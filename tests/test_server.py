@@ -156,6 +156,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             await self.bench.run("synthetic_interrupt", 1)
             self.assertEqual(self.bench.results[0]["status"], "unavailable")
 
+    async def test_sample_respects_selected_model_headroom_and_never_connects_to_household_assist(self):
+        self.bench.cloud_settings.set_key("sk-generated-assist-sample")
+        self.bench.cloud_settings.budget_usd = 10
+        sample = {"session": {"finalization_confirmed": True, "error": None}, "checks": dict.fromkeys(
+            ("verified_change", "spoken_on", "fresh_read", "spoken_off"), True)}
+        url = "/api/cloud/assist-sample"
+        with (patch("jarvis.assist_sample.check_assist_sample", return_value=sample) as screen,
+              patch("jarvis.server.AssistClient") as household, patch.object(self.bench.device, "begin") as capture):
+            for bad in ({"model": "gpt-6-sol", "confirm_paid": True}, {"model": "gpt-6-luna"},
+                        {"model": "unknown", "confirm_paid": True}):
+                self.assertEqual((await self.ui.post(url, json=bad)).status, 400)
+            screen.assert_not_called()
+            self.assertIsNone(self.bench.task)
+            response = await self.ui.post(url, json={"model": "gpt-5.6-luna", "confirm_paid": True})
+            self.assertEqual(response.status, 202)
+            await self.bench.task
+            self.assertEqual(screen.await_args.args[1], "gpt-5.6-luna")
+            self.assertEqual(self.bench.results[0]["status"], "passed")
+            self.assertEqual(self.bench.config["assist_model"], "gpt-6-luna")
+            capture.assert_not_called()
+            household.assert_not_called()
+
     async def test_standby_rearms_locally_and_waits_for_a_real_wake_before_cloud(self):
         from unittest.mock import AsyncMock
 
@@ -180,6 +202,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         context = None
         token = "test.assist.standby"
+        self.bench.cloud_settings.budget_usd = 10
         assist = AsyncMock()
         assist.__aenter__.return_value = assist
         assist.list_tools.return_value = [{"name": "HassTurnOn", "inputSchema": {"type": "object"}}]
@@ -194,6 +217,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["standby_idle_seconds"], 6)
             self.assertIsNone(kwargs["wait_for_preconnected_wake"])
             self.assertIs(kwargs["assist_delegation"].client, assist)
+            self.assertEqual(kwargs["assist_delegation"].config()["responses"]["model"], "gpt-5.6-luna")
             self.assertEqual(result["assist_standby"], True)
             context = kwargs["standby_context"]
             self.assertIsNotNone(context)
@@ -208,7 +232,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.bench.continuous_input_ready = True
         response = await self.ui.put("/api/config", json={"standby_idle_seconds": 2})
         self.assertEqual(response.status, 400)
-        response = await self.ui.put("/api/config", json={"standby_idle_seconds": 6})
+        response = await self.ui.put("/api/config", json={"standby_idle_seconds": 6, "assist_model": "gpt-5.6-luna"})
         self.assertEqual(response.status, 200)
         self.assertEqual(Bench(self.folder.name).config["standby_idle_seconds"], 6)
         with (patch.object(device, "snapshot", return_value=ready),
@@ -587,7 +611,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         restarted = Bench(self.folder.name)
         self.assertEqual(restarted.config, {
             'device_token': original, 'ha_lan_url': 'http://192.168.1.10:8099', 'repetitions': 5,
-            'standby_idle_seconds': 10, 'voice': 'marin', 'personality': 'classic', 'voice_output_gain_db': -6})
+            'standby_idle_seconds': 10, 'voice': 'marin', 'personality': 'classic', 'voice_output_gain_db': -6,
+            'assist_model': 'gpt-6-luna'})
         self.assertEqual(restarted.firmware_secrets, self.bench.firmware_secrets)
 
     async def test_playback_requires_a_connected_jack_and_compatible_firmware(self):
