@@ -103,10 +103,14 @@ async def check_assist_sample(settings, model, voice, phase):
                 checks["verified_change"] = lamp.state == "on" and lamp.writes == 1 and lamp.readbacks == 1
             else:
                 checks["fresh_read"] = lamp.state == "off" and lamp.writes == 1 and lamp.reads > before
-            voice_after_lookup = first is not None and lamp.last_lookup_at is not None and first >= lamp.last_lookup_at
-            heard = spoken_state(owner.output_text)
-            checks["spoken_" + expected] = voice_after_lookup and heard == expected
-            report.setdefault("reply_evidence", []).append({"reported_state": heard, "voice_after_lookup": voice_after_lookup})
+            voice_after_lookup = (owner.first_result_voice_at is not None and lamp.last_lookup_at is not None
+                                  and owner.first_result_voice_at >= lamp.last_lookup_at)
+            offset = len(owner.output_text) if owner.result_text_offset is None else owner.result_text_offset
+            heard = spoken_state(owner.output_text[offset:])
+            early_state = spoken_state(owner.output_text[:offset])
+            checks["spoken_" + expected] = voice_after_lookup and heard == expected and early_state not in ("on", "off")
+            report.setdefault("reply_evidence", []).append({"reported_state": heard, "voice_after_lookup": voice_after_lookup,
+                                                           "before_result": early_state})
             if expected == "on" and not checks["verified_change"]:
                 break
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:

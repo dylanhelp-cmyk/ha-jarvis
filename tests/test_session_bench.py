@@ -26,11 +26,15 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
     async def test_sample_model_must_read_changed_state_before_speaking(self):
         import json
         from jarvis.live_bench import ASSIST_SAMPLE_PROMPTS
+        from jarvis.live_session import LiveSession
 
         class Provider:
             assist_work_pending = False
+            assist_result_at = None
+            assist_reply_pending = LiveSession.assist_reply_pending
             def __init__(self, _settings, **callbacks):
                 self.callbacks = callbacks
+                self.delayed_reply = None
                 self.metrics = SimpleNamespace(error=None, finalization_confirmed=True, usage_seconds=10,
                                                close_reason="close_requested")
             async def start(self):
@@ -38,19 +42,28 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
             async def close(self):
                 return self.metrics
             def begin_turn(self):
-                pass
+                self.assist_result_at = None
             def media_deadline(self):
                 return now + 50
             async def send_audio(self, packet):
                 marker = int.from_bytes(packet[:2], "little")
                 if not marker:
+                    if self.delayed_reply is not None and now >= self.assist_result_at + 1.6:
+                        self.callbacks["on_transcript"](self.delayed_reply)
+                        self.delayed_reply = None
+                        await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
                     return
                 self.callbacks["on_input_transcript"](ASSIST_SAMPLE_PROMPTS[marker - 1])
                 bridge = self.callbacks["assist_delegation"]
                 if marker == 1 or fresh:
                     name = "HassTurnOn" if marker == 1 else "GetLiveContext"
+                    self.callbacks["on_transcript"]("One moment. ")
+                    await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
                     await bridge.execute(str(marker), name, json.dumps({"name": SAMPLE_LIGHT_NAME}))
-                self.callbacks["on_transcript"](first_reply if marker == 1 else "Off.")
+                    self.assist_result_at = now + .001
+                    self.delayed_reply = first_reply if marker == 1 else "Off."
+                    return
+                self.callbacks["on_transcript"]("Off.")
                 await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
 
         async def fixture(prompt):

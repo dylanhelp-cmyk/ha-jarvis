@@ -254,6 +254,7 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 device = SimpleNamespace(errors=[], info={"jack_plugged": True})
                 session = SimpleNamespace(metrics=SimpleNamespace(error=None), send_audio=send_audio,
                                           assist_work_pending=pending, stop_interaction=lambda: None,
+                                          assist_reply_pending=lambda last_voice_at: session.assist_work_pending,
                                           media_deadline=lambda: 150.)
                 stream = SimpleNamespace(packet=packet, offer=lambda *_: None, passthrough_samples=0)
                 detector = SimpleNamespace(is_speech=lambda pcm, rate: bool(pcm[0]))

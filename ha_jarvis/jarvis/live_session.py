@@ -134,7 +134,7 @@ class LiveSession:
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
         self._delegation_task = None
-        self._assist_result_submitted = False
+        self.assist_result_at = None
         self.settings, self.on_audio, self.transport, self.voice = settings, on_audio, transport, voice
         self.greeting, self.on_transcript = greeting, on_transcript
         self.on_input_transcript, self.on_signoff_request = on_input_transcript, on_signoff_request
@@ -316,12 +316,17 @@ class LiveSession:
                     or (self._delegation_task is not None and not self._delegation_task.done()))
 
     def begin_turn(self):
-        self._assist_result_submitted = False
+        self.assist_result_at = None
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
 
+    def assist_reply_pending(self, last_voice_at):
+        # Speech before a function result can be a progress acknowledgment.
+        return (self.assist_work_pending or self.assist_result_at is not None
+                and (last_voice_at is None or last_voice_at < self.assist_result_at))
+
     def _hold_assist_audio(self):
-        return (self.assist_delegation is not None and not self._assist_result_submitted
+        return (self.assist_delegation is not None and self.assist_result_at is None
                 and (self.assist_delegation.preview_target is not None or self.assist_work_pending))
 
     def suppress_output(self):
@@ -535,7 +540,7 @@ class LiveSession:
                     if count >= self._assist_response_limit:
                         self._fail("Delegated response budget cannot cover the continuation")
                         return
-                    self._assist_result_submitted = False
+                    self.assist_result_at = None
                     self._delegation_task = self._spawn(self._return_assist_results(batch))
             except (CloudBudgetError, TypeError, AttributeError):
                 self.settings.mark_backend_unconfirmed(self._attempt)
@@ -565,7 +570,7 @@ class LiveSession:
                              "output": json.dumps(result, allow_nan=False)}})
             if not self._closing and not self._final.is_set():
                 self._assist_continuing = True
-                self._assist_result_submitted = True
+                self.assist_result_at = time.monotonic()
                 await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
         except Exception:
             self._fail("Could not return Assist delegation results")

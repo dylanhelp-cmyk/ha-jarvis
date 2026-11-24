@@ -1,3 +1,8 @@
+# 0.2.90
+
+- A device-control turn waits for voice after the App sends its function result. A progress acknowledgment alone could previously end the turn while the final spoken state was still on its way.
+- The two-turn sample-light check grades the speech before and after each function result separately. Run it with the default Assist model. Firmware 0.2.8 remains compatible.
+
 # 0.2.89
 
 - After a verified sample-light change, the follow-up now runs even if the first spoken answer was unclear. Each reply needs its own fresh lookup and an affirmative state for the requested light. Missing transcripts and uncertain wording remain visible in the result.
