@@ -1,3 +1,8 @@
+# 0.2.87
+
+- Assist results now distinguish backend completion, exhausted output allowance, function requests and commands blocked before dispatch. The sample-light check also records whether the generated device name was recognized. Results contain counts and flags only.
+- For a focused check, run the default model on the sample light and compare the requested action, its readback and the second state lookup. Firmware 0.2.8 remains compatible.
+
 # 0.2.86
 
 - Select the home-control reasoning model under Advanced home control. Check its reservation against the available budget before arming Assist. GPT-6 Luna remains the default.

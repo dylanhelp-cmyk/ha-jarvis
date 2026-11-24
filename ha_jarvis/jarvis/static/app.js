@@ -174,6 +174,14 @@ function showResults(results) {
         add(card, 'p', label + ' — ' + (value === undefined ? 'unavailable' : value ? 'passed' : 'failed'));
       }
       if (sample.failure) add(card, 'p', sample.failure);
+      if (sample.assist_activity) {
+        const activity = sample.assist_activity;
+        add(card, 'p', 'Backend responses started: ' + (activity.responses_started || 0) +
+          ' · function calls collected: ' + (activity.function_calls_collected || 0));
+        if (activity.output_limit_reached) add(card, 'p', 'The backend reached its output allowance.');
+        if (activity.missing_current_request) add(card, 'p', 'The command arrived before a current spoken request could be confirmed.');
+        if (activity.rejected_sample_target) add(card, 'p', 'The arguments did not identify the sample light.');
+      }
       if (sample.ledger_cost_usd != null) add(card, 'p', 'Session ledger cost · US$' + sample.ledger_cost_usd.toFixed(4));
       for (const [i, ms] of sample.generated_speech_end_to_returned_voice_ms.entries()) {
         if (ms !== null) add(card, 'p', 'Turn ' + (i + 1) + ' · generated speech end to returned voice ' + ms + ' ms');

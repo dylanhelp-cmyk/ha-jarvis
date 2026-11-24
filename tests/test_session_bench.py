@@ -55,6 +55,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(report["checks"]["verified_change"])
                 self.assertEqual(all(report["checks"].values()), fresh)
                 self.assertEqual(report["tool_calls"]["reads"], int(fresh))
+                self.assertEqual(report["recognized_fixture_target"], [True, True])
                 self.assertNotIn("Test Lamp", repr(report))
 
     async def test_real_time_generated_input_resumes_context_and_settles_both_sessions(self):

@@ -14,12 +14,14 @@ class SampleLight:
     def __init__(self):
         self.state = "off"
         self.writes = self.readbacks = self.reads = 0
+        self.rejected_targets = 0
         self.last_lookup_at = None
 
     async def call_tool(self, call_id, name, arguments):
         if (str(arguments.get("name", "")).casefold() != "test lamp"
                 or arguments.get("domain") not in (None, "light", ["light"])
                 or set(arguments) - {"name", "domain"}):
+            self.rejected_targets += 1
             return {"outcome": "failed", "reason": "The named sample device was not found"}
         if name == "HassTurnOn":
             self.writes += 1
@@ -55,7 +57,8 @@ async def check_assist_sample(settings, model, voice, phase):
     owner = DigitalConversation(settings, voice, ASSIST_STANDBY_INSTRUCTIONS, assist_delegation=bridge)
     checks, timings = {}, []
     # A reported tool result alone does not prove that the caller got the right answer.
-    report = {"checks": checks, "generated_speech_end_to_returned_voice_ms": timings, "model": model}
+    report = {"checks": checks, "generated_speech_end_to_returned_voice_ms": timings, "model": model,
+              "recognized_fixture_target": []}
     before_spend = settings.spent_usd
     try:
         await owner.session.start()
@@ -68,6 +71,8 @@ async def check_assist_sample(settings, model, voice, phase):
             lamp.state = "off"
             end_of_input = (owner.next_input_at or time.monotonic()) + voiced_end / RATE
             await owner.send(pcm)
+            report["recognized_fixture_target"].append(
+                bool(re.search(r"\btest\s+lamp\b", owner.signoff.text, re.IGNORECASE)))
             first = owner.first_voice_at
             timings.append(round(1000 * (first - end_of_input)) if first is not None and first >= end_of_input else None)
             if expected == "on":
@@ -85,4 +90,7 @@ async def check_assist_sample(settings, model, voice, phase):
         if report["session"]["finalization_confirmed"]:
             report["ledger_cost_usd"] = round(settings.spent_usd - before_spend, 6)
         report["tool_calls"] = {"writes": lamp.writes, "readbacks": lamp.readbacks, "reads": lamp.reads}
+        report["assist_activity"] = dict(bridge.activity)
+        if lamp.rejected_targets:
+            report["assist_activity"]["rejected_sample_target"] = lamp.rejected_targets
     return report

@@ -1,4 +1,5 @@
 """App-owned Assist functions for a GPT-Live Responses session."""
+from collections import Counter
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
@@ -106,6 +107,8 @@ class AssistDelegation:
         self._current = None
         self._responses = set()
         self._calls = set()
+        # Only fixed event categories are retained. Arguments and tool output stay private.
+        self.activity = Counter()
 
     def config(self, *, signoff=False):
         tools = list(self.tools.values())
@@ -145,12 +148,16 @@ class AssistDelegation:
             if self._current is not None or len(self._responses) >= MAX_CALLS:
                 raise ValueError("Overlapping or excessive delegated responses")
             self._responses.add(response_id)
+            self.activity["responses_started"] += 1
             self._current = ResponseBatch(delegation_id, response_id)
         elif self._current is not None and self._current.delegation_id == delegation_id:
             batch = self._current
-            if kind == "response.output_item.done" and delegation_id is not None:
+            if kind == "response.output_item.done":
                 item = event.get("item")
                 if not isinstance(item, dict) or item.get("type") != "function_call":
+                    return None
+                if delegation_id is None:
+                    self.activity["unattributed_function_items"] += 1
                     return None
                 call_id, name, arguments = (item.get(key) for key in ("call_id", "name", "arguments"))
                 if (not isinstance(call_id, str) or not 0 < len(call_id) <= 128
@@ -166,11 +173,16 @@ class AssistDelegation:
                 else:
                     batch.calls[call_id] = invocation
                     self._calls.add(call_id)
+                    self.activity["function_calls_collected"] += 1
             elif kind in ("response.completed", "response.failed", "response.incomplete", "response.cancelled"):
                 response = event.get("response") or {}
                 if response.get("id") != batch.response_id:
                     return None
                 self._current = None
+                self.activity[kind.split(".")[1]] += 1
+                if (kind == "response.incomplete" and isinstance(response.get("incomplete_details"), dict)
+                        and response["incomplete_details"].get("reason") == "max_output_tokens"):
+                    self.activity["output_limit_reached"] += 1
                 if kind == "response.completed" and response.get("status") == "completed" and batch.calls:
                     return batch
         return None

@@ -297,6 +297,8 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await session._execute_assist_call("signoff", END_CONVERSATION, "{}"), {"outcome": "accepted"})
         current_speech.return_value = False
         self.assertEqual((await session._execute_assist_call("seeded", "HassTurnOn", "{}"))["outcome"], "rejected")
+        self.assertEqual(dict(bridge.activity), {"responses_started": 3, "function_calls_collected": 3,
+                         "failed": 1, "completed": 2, "missing_current_request": 1})
         client.call_tool.assert_awaited_once()
 
     async def test_two_assist_requests_and_signoff_fit_one_standby_session(self):

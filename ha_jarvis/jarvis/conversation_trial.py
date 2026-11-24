@@ -729,6 +729,7 @@ async def run_voice_turn(device, settings, result, opening, pcm, delay_ms, phase
         profile = "wake standby" if standby else ("warm follow-up preview" if follow_up else "one-turn preview")
         if assist:
             profile = "Assist wake standby" if standby else "single-device Assist preview"
+            result["assist_activity"] = dict(assist_delegation.activity)
         result["cloud"] = {"transport": "websocket", "profile": profile, "voice": voice, "personality": personality,
                            "startup_ms": round(metrics.ready_ms, 1) if metrics.ready_ms is not None else None,
                            **metrics.websocket_startup_breakdown(),

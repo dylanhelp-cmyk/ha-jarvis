@@ -580,6 +580,7 @@ class LiveSession:
                 return {"outcome": "accepted"}
             return {"outcome": "rejected", "reason": "The current speech does not confirm a sign-off"}
         if self.allow_assist_action is not None and not self.allow_assist_action():
+            self.assist_delegation.activity["missing_current_request"] += 1
             return {"outcome": "rejected", "reason": "An explicit current spoken request is required"}
         if self._assist_unknown_this_turn and not self.assist_delegation.is_state_query(name):
             return {"outcome": "unknown", "reason": "An earlier attempt in this turn is unconfirmed. Check device state."}
