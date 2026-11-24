@@ -150,8 +150,9 @@ INTERRUPTION_REPLY = "Paris is the capital of France, and the river that flows t
 INTERRUPTION_INPUTS = ("Wait, please switch to a different topic.", "Hold on, can you tell me the time?")
 SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Goodbye.",
                         "Please count slowly from one to twenty.", "Stop. What is the capital of France?")
-ASSIST_SAMPLE_PROMPTS = ("Turn on the Test Lamp. Just say on or off.",
-                        "Check the Test Lamp again. Say just on or off.")
+SAMPLE_LIGHT_NAME = "Reading Lamp"
+ASSIST_SAMPLE_PROMPTS = (f"Please turn on the {SAMPLE_LIGHT_NAME}. Just say on or off.",
+                        f"Is the {SAMPLE_LIGHT_NAME} on or off now? Please check.")
 
 
 async def synthesize_fixture(prompt):

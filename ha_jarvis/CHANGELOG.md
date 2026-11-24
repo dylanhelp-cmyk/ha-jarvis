@@ -1,3 +1,8 @@
+# 0.2.88
+
+- The Assist backend now receives an explicit instruction to clarify a missing or ambiguous device name before trying another name.
+- Run the sample-light check with the default model. The generated caller now asks for the Reading Lamp. Every accepted action must still match that name and its resulting state must be read back.
+
 # 0.2.87
 
 - Assist results now distinguish backend completion, exhausted output allowance, function requests and commands blocked before dispatch. The sample-light check also records whether the generated device name was recognized. Results contain counts and flags only.

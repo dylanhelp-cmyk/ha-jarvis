@@ -5,10 +5,17 @@ from unittest.mock import patch
 import numpy as np
 
 from jarvis.session_bench import SESSION_PROMPTS, check_sessions
-from jarvis.assist_sample import check_assist_sample
+from jarvis.assist_sample import SampleLight, check_assist_sample
+from jarvis.live_bench import SAMPLE_LIGHT_NAME
 
 
 class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_spoken_target_does_not_change_sample(self):
+        lamp = SampleLight()
+        result = await lamp.call_tool("1", "HassTurnOn", {"name": "Different Lamp"})
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual((lamp.state, lamp.writes, lamp.rejected_targets), ("off", 0, 1))
+
     async def test_sample_model_must_read_changed_state_before_speaking(self):
         import json
         from jarvis.live_bench import ASSIST_SAMPLE_PROMPTS
@@ -35,7 +42,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 bridge = self.callbacks["assist_delegation"]
                 if marker == 1 or fresh:
                     name = "HassTurnOn" if marker == 1 else "GetLiveContext"
-                    await bridge.execute(str(marker), name, json.dumps({"name": "Test Lamp"}))
+                    await bridge.execute(str(marker), name, json.dumps({"name": SAMPLE_LIGHT_NAME}))
                 self.callbacks["on_transcript"]("On." if marker == 1 else "Off.")
                 await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
 
@@ -56,7 +63,7 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(all(report["checks"].values()), fresh)
                 self.assertEqual(report["tool_calls"]["reads"], int(fresh))
                 self.assertEqual(report["recognized_fixture_target"], [True, True])
-                self.assertNotIn("Test Lamp", repr(report))
+                self.assertNotIn(SAMPLE_LIGHT_NAME, repr(report))
 
     async def test_real_time_generated_input_resumes_context_and_settles_both_sessions(self):
         clock = 100.

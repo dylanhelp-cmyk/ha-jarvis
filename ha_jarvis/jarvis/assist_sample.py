@@ -6,7 +6,7 @@ import time
 from .assist_delegation import AssistDelegation
 from .audio import RATE
 from .conversation_trial import ASSIST_STANDBY_INSTRUCTIONS
-from .live_bench import ASSIST_SAMPLE_PROMPTS, synthesize_fixture
+from .live_bench import ASSIST_SAMPLE_PROMPTS, SAMPLE_LIGHT_NAME, synthesize_fixture
 from .session_bench import DigitalConversation
 
 
@@ -15,26 +15,36 @@ class SampleLight:
         self.state = "off"
         self.writes = self.readbacks = self.reads = 0
         self.rejected_targets = 0
+        self.last_rejection = None
         self.last_lookup_at = None
 
     async def call_tool(self, call_id, name, arguments):
-        if (str(arguments.get("name", "")).casefold() != "test lamp"
-                or arguments.get("domain") not in (None, "light", ["light"])
-                or set(arguments) - {"name", "domain"}):
+        name_arg = arguments.get("name")
+        problem = None
+        if not isinstance(name_arg, str) or not name_arg:
+            problem = "missing_name"
+        elif name_arg.casefold() != SAMPLE_LIGHT_NAME.casefold():
+            problem = "different_name"
+        elif arguments.get("domain") not in (None, "light", ["light"]):
+            problem = "different_domain"
+        elif set(arguments) - {"name", "domain"}:
+            problem = "unexpected_filter"
+        if problem:
             self.rejected_targets += 1
+            self.last_rejection = problem
             return {"outcome": "failed", "reason": "The named sample device was not found"}
         if name == "HassTurnOn":
             self.writes += 1
             self.state = "on"
             payload = {"response_type": "action_done", "data": {"failed": [], "success": [{
-                "type": "entity", "id": "light.test_lamp", "name": "Test Lamp"}]}}
+                "type": "entity", "id": "light.reading_lamp", "name": SAMPLE_LIGHT_NAME}]}}
         elif name == "GetLiveContext":
             self.last_lookup_at = time.monotonic()
             if call_id.startswith("verify:"):
                 self.readbacks += 1
             else:
                 self.reads += 1
-            payload = {"result": f"Live Context: sample\n- names: Test Lamp\n  domain: light\n  state: '{self.state}'"}
+            payload = {"result": f"Live Context: sample\n- names: {SAMPLE_LIGHT_NAME}\n  domain: light\n  state: '{self.state}'"}
         else:
             return {"outcome": "rejected", "reason": "Unknown sample tool"}
         return {"outcome": "reported", "text": json.dumps(payload)}
@@ -42,8 +52,9 @@ class SampleLight:
 
 def said_state(text, expected):
     words = " ".join(re.findall(r"[a-z']+", text.lower().replace("’", "'")))
+    name = SAMPLE_LIGHT_NAME.casefold()
     return words.removesuffix(" sir") in (expected, f"it is {expected}", f"it's {expected}",
-                                          f"the test lamp is {expected}", f"test lamp is {expected}")
+                                          f"the {name} is {expected}", f"{name} is {expected}")
 
 
 async def check_assist_sample(settings, model, voice, phase):
@@ -72,16 +83,18 @@ async def check_assist_sample(settings, model, voice, phase):
             end_of_input = (owner.next_input_at or time.monotonic()) + voiced_end / RATE
             await owner.send(pcm)
             report["recognized_fixture_target"].append(
-                bool(re.search(r"\btest\s+lamp\b", owner.signoff.text, re.IGNORECASE)))
+                bool(re.search(r"\b" + re.escape(SAMPLE_LIGHT_NAME) + r"\b", owner.signoff.text, re.IGNORECASE)))
             first = owner.first_voice_at
             timings.append(round(1000 * (first - end_of_input)) if first is not None and first >= end_of_input else None)
             if expected == "on":
                 checks["verified_change"] = lamp.state == "on" and lamp.writes == 1 and lamp.readbacks == 1
             else:
                 checks["fresh_read"] = lamp.state == "off" and lamp.writes == 1 and lamp.reads > before
-            checks["spoken_" + expected] = (first is not None and lamp.last_lookup_at is not None
-                                            and first >= lamp.last_lookup_at and said_state(owner.output_text, expected))
+            voice_after_lookup = first is not None and lamp.last_lookup_at is not None and first >= lamp.last_lookup_at
+            state_words_match = said_state(owner.output_text, expected)
+            checks["spoken_" + expected] = voice_after_lookup and state_words_match
             if not all(checks.values()):
+                report["last_reply"] = {"state_words_match": state_words_match, "voice_after_lookup": voice_after_lookup}
                 break
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         report["failure"] = owner.session.metrics.error or type(exc).__name__
@@ -93,4 +106,5 @@ async def check_assist_sample(settings, model, voice, phase):
         report["assist_activity"] = dict(bridge.activity)
         if lamp.rejected_targets:
             report["assist_activity"]["rejected_sample_target"] = lamp.rejected_targets
+            report["sample_rejection"] = lamp.last_rejection
     return report
