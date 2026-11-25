@@ -49,6 +49,8 @@ On 0.2.92, GPT-Live and GPT-6 Luna switched the in-memory light on once, read ba
 
 The 0.2.95 local internal-speaker check detected both clips and passed continuous microphone processing with 30.1 ms estimated echo alignment. The App is idle with the greeting cached. Near-end speech and cancellation of an old answer still need a consented room trial on the primary jack.
 
+The household's MCP Server integration is loaded. A read-only Home Assistant registry check identified a working light explicitly exposed to Assist and a live power sensor outside Assist's default exposure. The two names are kept in the project conversation. This prepares a positive and negative lookup through Jarvis with the user's local token. The registry check changed no entities and made no OpenAI calls. [Home Assistant entity exposure defaults](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/homeassistant/exposed_entities.py)
+
 The next user-facing milestone is one ordinary wake conversation on the primary speaker. Jarvis should greet once, act on an exposed device, verify and speak the result, accept a follow-up or interruption, and close cleanly. Keep the current GPT-Live transport and accepted response timing while working through the three acceptance checks above. Broader model comparisons can wait until the default path verifies a command.
 
 ## Earlier conversation results
