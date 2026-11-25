@@ -18,7 +18,7 @@ Build an everyday Home Assistant voice assistant. From the user's usual position
 
 1. **Conversation.** At ordinary volume, ask for a longer answer and speak a distinct second question while it plays. The old answer must stop and stay stopped, the opening words of the new request must survive, and Jarvis must answer it once at its usual level. Record which speaker was used. The pending spoken test requires fresh room-audio permission.
 2. **Home control.** The installed App and default model passed the generated two-turn sample and the separate spoken cancellation during a pending state check. Move to the household check with a non-admin token entered in Jarvis. Confirm inclusion of an exposed device and exclusion of an unexposed device. For one reversible spoken command, compare the first audible state claim with the actual device state and the verification time. Check a correction or cancellation during pending household work.
-3. **Daily use.** Exercise the session-ending cases in normal wake standby, a second wake with recent context, mute, reconnect and speaker fallback. Verify the experience on the primary jack before closing a milestone tested on the internal speaker.
+3. **Daily use.** Exercise the session-ending cases in normal wake standby and a second wake with recent context. Software mute and fresh capture after unmute passed on the paired device. Verify physical mute, recovery during an active conversation and speaker fallback. Use the primary jack for final conversation checks.
 
 Each new diagnostic should resolve a specific failure in one of these checks. Keep WebSocket for GPT-Live on the Voice PE. Both transports passed the generated interruption check. Follow the agreed tuning limit of two credible changes with less than 100 ms repeatable gain, or stop sooner if reliability worsens. Keep proactive monitoring deferred.
 
@@ -39,7 +39,9 @@ The agent handles routine installation and hardware testing under existing deleg
 
 ## Current installed result
 
-App 0.2.97 and firmware 0.2.8 are installed. A fresh, explicit “Cancel that” or “Never mind” can cancel pending Assist work. If a Home Assistant command may already have run, Jarvis reports an unconfirmed outcome and preserves the protection against repeating it. Offline tests covered cancellation before dispatch, during preflight, and during verification, plus rejection of old transcript fragments and “Cancel that timer.” All 226 offline tests passed.
+App 0.2.98 and firmware 0.2.8 are installed. A fresh, explicit “Cancel that” or “Never mind” can cancel pending Assist work. If a Home Assistant command may already have run, Jarvis reports an unconfirmed outcome and preserves the protection against repeating it. Offline tests covered cancellation before dispatch, during preflight, and during verification, plus rejection of old transcript fragments and “Cancel that timer.” All 227 offline tests passed.
+
+On 0.2.98, toggling the Voice PE software mute stopped an active local microphone capture and the App reported a mute cancellation. It refused a new capture while muted. After restoring the switch to off, a fresh internal-speaker playback and microphone test passed. Both clips drained and estimated echo alignment was 30.7 ms. The App returned to idle. No OpenAI calls ran.
 
 The 0.2.97 transport comparison sent the same generated questions through WebSocket and WebRTC in one session each. Both recognized the question spoken over the active count, answered it once, and stopped the count for the five-second observation. Finalized usage was 10 seconds on WebSocket and 15 seconds on WebRTC, which is billed session duration. The pair cost US$0.020833, bringing total ledger use to US$0.971577 of US$10. Keep WebSocket based on the earlier audible startup and warm comparisons. This test exercised provider turn-taking. Physical stop-to-silence and speech pickup during playback remain open.
 
