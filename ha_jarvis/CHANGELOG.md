@@ -1,3 +1,8 @@
+# 0.2.96
+
+- Full-duplex playback can send seven 10 ms packets before waiting for a Voice PE acknowledgment. It uses an existing slot in the firmware queue to ride out a delayed acknowledgment.
+- Run **Conversation playback stability** to check continuous microphone processing. Firmware 0.2.8 remains compatible.
+
 # 0.2.95
 
 - Recognise a complete cancellation phrase after a short transcript pause when GPT-Live supplies no terminal punctuation. A following word can still disqualify the phrase. Use the sample-light cancellation check to verify the provider path.

@@ -16,6 +16,9 @@ CHANNELS = 2
 PACKET_FRAMES = 480
 HEADER = struct.Struct("<4sBBHIIQ")
 MAX_IN_FLIGHT = 6 * PACKET_FRAMES
+# A full-duplex reply already schedules more audio ahead. Allow it to use one
+# more slot of the firmware's eight-packet FIFO while acceptance is delayed.
+EXTENDED_IN_FLIGHT_PACKETS = 7
 # PCM ahead of playback is separate from packets awaiting device acceptance.
 MAX_PRIME_PACKETS = 10
 MAX_SEND_LAG_MS = 100
@@ -257,6 +260,8 @@ class JackPlayback:
 
         if not 1 <= prime_packets <= MAX_PRIME_PACKETS:
             raise ValueError("Playback prime exceeds 100 ms")
+        credit_limit = (EXTENDED_IN_FLIGHT_PACKETS * PACKET_FRAMES
+                        if prime_packets >= EXTENDED_IN_FLIGHT_PACKETS else MAX_IN_FLIGHT)
         source_prime = prime_packets if source_prime_packets is None else source_prime_packets
         if not prime_packets <= source_prime <= 20:
             raise ValueError("Playback source prime exceeds 200 ms")
@@ -294,7 +299,7 @@ class JackPlayback:
         source_wait_ms = 0.0
         while payload is not None:
             credit_wait_at = time.monotonic()
-            while self.frames_sent - self.frames_accepted >= MAX_IN_FLIGHT:
+            while self.frames_sent - self.frames_accepted >= credit_limit:
                 self.progress.clear()
                 self.ensure_playing()
                 await asyncio.wait_for(self.progress.wait(), .15)
