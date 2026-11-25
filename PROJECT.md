@@ -39,7 +39,9 @@ The agent handles routine installation and hardware testing under existing deleg
 
 ## Current installed result
 
-App 0.2.98 and firmware 0.2.8 are installed. A fresh, explicit “Cancel that” or “Never mind” can cancel pending Assist work. If a Home Assistant command may already have run, Jarvis reports an unconfirmed outcome and preserves the protection against repeating it. Offline tests covered cancellation before dispatch, during preflight, and during verification, plus rejection of old transcript fragments and “Cancel that timer.” All 227 offline tests passed.
+App 0.2.99 and firmware 0.2.8 are installed. Wake standby now waits for echo-cleaned microphone packets captured near the grace or inactivity deadline to pass through the VAD confirmation window. The regression starts speech 20 ms before the deadline and delivers it to the detector 120 ms later. Standby keeps listening, while one isolated detection allows closure. All 227 offline tests passed. An ordinary spoken grace-period trial still needs room-audio consent.
+
+A fresh, explicit “Cancel that” or “Never mind” can cancel pending Assist work. If a Home Assistant command may already have run, Jarvis reports an unconfirmed outcome and preserves the protection against repeating it. Offline tests covered cancellation before dispatch, during preflight, and during verification, plus rejection of old transcript fragments and “Cancel that timer.”
 
 On 0.2.98, toggling the Voice PE software mute stopped an active local microphone capture and the App reported a mute cancellation. It refused a new capture while muted. After restoring the switch to off, a fresh internal-speaker playback and microphone test passed. Both clips drained and estimated echo alignment was 30.7 ms. The App returned to idle. No OpenAI calls ran.
 
@@ -54,6 +56,8 @@ The first sample-light failure was traced on 0.2.87 to a missing recognized name
 On 0.2.92, GPT-Live and GPT-6 Luna switched the in-memory light on once, read back the change, and made a fresh lookup after the light changed to off independently. Both replies matched the verified state. No voice reached the App's output callback before either lookup. The generated turns took 7.68 and 6.98 seconds from the end of speech to returned voice. Household device-action latency and acoustic playback remain open. The 22-second trial cost US$0.019060 and total ledger usage was US$0.923577 of US$10 with no pending reservation.
 
 Starting with 0.2.96, full-duplex playback can send one additional packet within the existing firmware queue when acceptance is delayed. Both 0.2.96 test clips used the seven-packet window and ran at their expected duration. The 0.2.97 local repeat also had two gap-free clips and passed continuous microphone processing at 31.8 ms estimated echo alignment. The App is idle with the greeting cached. Near-end speech and cancellation of an old answer still need a consented room trial on the primary jack.
+
+During the 0.2.99 local check the first run had an 80 ms excess DMA span in one clip, with up to 52.6 ms waiting for playback acceptance and 35.4 ms waiting for source audio in that interval. The App rejected that continuous echo reference. A separate repeat had two gap-free clips, passed continuous microphone processing and estimated 30.8 ms echo alignment. The App returned idle with no new OpenAI usage.
 
 The household's MCP Server integration is loaded. A read-only Home Assistant registry check identified a working light explicitly exposed to Assist and a live power sensor outside Assist's default exposure. The two names are kept in the project conversation. This prepares a positive and negative lookup through Jarvis with the user's local token. The registry check changed no entities and made no OpenAI calls. [Home Assistant entity exposure defaults](https://github.com/home-assistant/core/blob/2026.11.2/homeassistant/components/homeassistant/exposed_entities.py)
 
