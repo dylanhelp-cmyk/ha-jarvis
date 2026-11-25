@@ -1,3 +1,7 @@
+# 0.2.97
+
+- Choose WebSocket or WebRTC in **Generated interruption control**. Both send the same generated interruption to GPT-Live and check whether it stops counting and answers the new question once. Firmware 0.2.8 remains compatible.
+
 # 0.2.96
 
 - Full-duplex playback can send seven 10 ms packets before waiting for a Voice PE acknowledgment. It uses an existing slot in the firmware queue to ride out a delayed acknowledgment.

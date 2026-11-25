@@ -194,6 +194,7 @@ function showResults(results) {
     if (result.error || result.reason) add(card, 'p', result.error || result.reason);
     if (result.interruption_checks) {
       const checks = result.interruption_checks;
+      if (checks.transport) add(card, 'p', checks.transport === 'webrtc' ? 'WebRTC' : 'WebSocket');
       for (const [name, label] of Object.entries({interrupted_during_count: 'Spoke over an active count',
         replacement_question_heard: 'New question recognized', replacement_answer_once: 'New question answered once',
         count_stayed_stopped: 'Count stayed stopped through the observation'})) {
@@ -621,5 +622,7 @@ $('run-session-checks').addEventListener('click', () => {
 
 $('run-interruption-check').addEventListener('click', () => {
   if (!window.confirm('Check cloud interruption with generated speech using up to US$0.05? No microphone or speaker audio is used.')) return;
-  action(() => api('api/cloud/interrupt-check', 'POST', {confirm_paid: true}));
+  action(() => api('api/cloud/interrupt-check', 'POST', {
+    confirm_paid: true, transport: $('interruption-transport').value
+  }));
 });

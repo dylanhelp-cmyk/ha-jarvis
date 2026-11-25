@@ -63,8 +63,11 @@ class InterruptionCheckTests(unittest.IsolatedAsyncioTestCase):
                     sent.clear()
                     owners.clear()
                     now = 100.
-                    report = await check_interruption(None, "marin", "classic", lambda _: None)
+                    transport = "webrtc" if answer == "Paris." else "websocket"
+                    report = await check_interruption(None, "marin", "classic", lambda _: None, transport=transport)
                     self.assertEqual(len(owners), 1)
+                    self.assertEqual(owners[0].callbacks["transport"], transport)
+                    self.assertEqual(report["transport"], transport)
                     self.assertEqual(owners[0].seen, {0, 1, 2})
                     self.assertEqual(report["checks"]["count_stayed_stopped"], answer == "Paris.")
                     self.assertEqual(all(report["checks"].values()), answer == "Paris.")

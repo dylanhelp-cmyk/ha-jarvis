@@ -12,14 +12,15 @@ COUNT = re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleve
                    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\b", re.I)
 
 
-async def check_interruption(settings, voice, personality, stage):
+async def check_interruption(settings, voice, personality, stage, *, transport="websocket"):
     first, _ = await synthesize_fixture(INTERRUPTION_PROMPT)
     question, voiced_end = await synthesize_fixture(INTERRUPTING_QUESTION)
     checks = {}
     report = {"scope": "Generated caller speech and provider output on one connection. No room audio or speakers.",
-              "checks": checks, "sessions": []}
+              "transport": transport, "checks": checks, "sessions": []}
     owner = DigitalConversation(settings, voice,
-        " ".join((INSTRUCTIONS, DUPLEX_INSTRUCTIONS, PERSONALITIES[personality])), allow_signoff=False)
+        " ".join((INSTRUCTIONS, DUPLEX_INSTRUCTIONS, PERSONALITIES[personality])),
+        allow_signoff=False, transport=transport)
     try:
         stage("waiting for GPT-Live to begin counting")
         await owner.session.start()

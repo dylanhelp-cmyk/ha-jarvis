@@ -145,10 +145,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.interruption_bench.check_interruption", new_callable=AsyncMock, return_value=sample) as check):
             response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": 1})
             self.assertEqual(response.status, 400)
+            response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": True, "transport": "realtime"})
+            self.assertEqual(response.status, 400)
             check.assert_not_called()
-            response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": True})
+            response = await self.ui.post("/api/cloud/interrupt-check", json={"confirm_paid": True, "transport": "webrtc"})
             self.assertEqual(response.status, 202)
             await self.bench.task
+            self.assertEqual(check.await_args.kwargs["transport"], "webrtc")
             self.assertEqual(self.bench.results[0]["status"], "passed")
             capture.assert_not_called()
             sample["sessions"][0]["finalization_confirmed"] = False

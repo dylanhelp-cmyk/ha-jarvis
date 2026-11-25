@@ -151,6 +151,8 @@
         <button class="button subtle" id="run-session-checks" type="button" disabled>Run conversation checks (paid test)</button>
         <h3>Generated interruption control</h3>
         <p class="field-help">A generated caller interrupts a count with a new question. Check whether Jarvis answers it once and leaves the count stopped. Uses up to US$0.05 with no room microphone or speaker playback.</p>
+        <label for="interruption-transport">Interruption transport</label>
+        <select id="interruption-transport"><option value="websocket">WebSocket</option><option value="webrtc">WebRTC</option></select>
         <button class="button subtle" id="run-interruption-check" type="button" disabled>Run generated interruption check (paid test)</button>
         <h3>Wake acknowledgment</h3>
         <p id="ack-state" class="field-help" aria-live="polite"></p>

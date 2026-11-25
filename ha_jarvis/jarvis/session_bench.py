@@ -18,7 +18,8 @@ INTERRUPTION_PROMPT = "Please count slowly from one to twenty."
 class DigitalConversation:
     """Feed generated audio at real-time speed and keep only bounded text in RAM."""
 
-    def __init__(self, settings, voice, instructions, prior_exchanges=(), *, allow_signoff=True, assist_delegation=None):
+    def __init__(self, settings, voice, instructions, prior_exchanges=(), *, allow_signoff=True,
+                 assist_delegation=None, transport="websocket"):
         self.signoff = SignOffRequest()
         self.transcript = ExchangeTranscript()
         self.output_text = ""
@@ -26,7 +27,7 @@ class DigitalConversation:
         self.result_at = self.first_result_voice_at = self.result_text_offset = None
         self.last_audio_at = self.first_voice_at = self.last_voice_at = None
         self.next_input_at = None
-        self.session = LiveSession(settings, transport="websocket", voice=voice, instructions=instructions,
+        self.session = LiveSession(settings, transport=transport, voice=voice, instructions=instructions,
             on_audio=self.audio, on_transcript=self.output_transcript, on_input_transcript=self.signoff.append,
             on_signoff_request=self.request_signoff if allow_signoff else None, on_timed_transcript=self.transcript.append,
             prior_exchanges=prior_exchanges, assist_delegation=assist_delegation,

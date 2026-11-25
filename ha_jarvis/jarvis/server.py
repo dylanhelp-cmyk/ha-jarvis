@@ -1253,7 +1253,8 @@ class Bench:
                     def stage(phase):
                         self.test["phase"] = phase
                     outcome = await check_interruption(self.cloud_settings, self.config["voice"],
-                                                       self.config["personality"], stage)
+                                                       self.config["personality"], stage,
+                                                       transport=startup_transport or "websocket")
                     result["interruption_checks"] = outcome
                     required = ("interrupted_during_count", "replacement_question_heard",
                                 "replacement_answer_once", "count_stayed_stopped")
@@ -1674,8 +1675,9 @@ def create_ui(bench):
     async def session_checks(request):
         data = await request.json()
         sample = request.path.endswith("/assist-sample")
+        interrupt = request.path.endswith("/interrupt-check")
         expected = {"confirm_paid", "model"} if sample else {"confirm_paid"}
-        optional = {"cancel_pending"} if sample else set()
+        optional = {"cancel_pending"} if sample else {"transport"} if interrupt else set()
         if (not isinstance(data, dict) or set(data) - optional != expected or data["confirm_paid"] is not True
                 or type(data.get("cancel_pending", False)) is not bool):
             raise ValueError("Confirm budgeted sessions with generated speech")
@@ -1684,7 +1686,9 @@ def create_ui(bench):
         public = bench.cloud_settings.public()
         if not public["api_key_configured"] or public["paid_retry_blocked"]:
             raise ValueError("A configured key and settled budget ledger are required")
-        interrupt = request.path.endswith("/interrupt-check")
+        transport = data.get("transport", "websocket")
+        if interrupt and transport not in ("websocket", "webrtc"):
+            raise ValueError("Choose WebSocket or WebRTC for the generated interruption")
         if sample:
             if not isinstance(data["model"], str) or data["model"] not in BACKEND_RATES:
                 raise ValueError("Choose a supported home-control model")
@@ -1695,7 +1699,8 @@ def create_ui(bench):
         bench.test = {"running": True, "id": ident, "phase": "preparing generated conversation checks"}
         kind = "assist_sample" if sample else ("synthetic_interrupt" if interrupt else "synthetic_sessions")
         bench.task = asyncio.create_task(bench.run(
-            kind, 1, sample_model=data.get("model"), sample_cancel=data.get("cancel_pending", False)))
+            kind, 1, startup_transport=transport if interrupt else None,
+            sample_model=data.get("model"), sample_cancel=data.get("cancel_pending", False)))
         return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):
