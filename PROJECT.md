@@ -39,7 +39,9 @@ The agent handles routine installation and hardware testing under existing deleg
 
 ## Current installed result
 
-App 0.2.99 and firmware 0.2.8 are installed. Wake standby now waits for echo-cleaned microphone packets captured near the grace or inactivity deadline to pass through the VAD confirmation window. The regression starts speech 20 ms before the deadline and delivers it to the detector 120 ms later. Standby keeps listening, while one isolated detection allows closure. All 227 offline tests passed. An ordinary spoken grace-period trial still needs room-audio consent.
+App 0.2.100 and firmware 0.2.8 are installed. The first household standby attempt did not arm. The user saw the voice token field clear after pressing Start, and the App recorded no voice test. On the prior release the browser cleared the token before the server accepted Start. The new App shows a Start rejection beside the button and leaves the token in the current page for retry. It clears the token on acceptance. The simulated rejected and accepted form submissions passed, along with 227 offline checks. The 3.5 mm output measured 33.4 ms alignment after the update. Continuous capture was unavailable after a playback discontinuity, so the first spoken on/off trial uses ordinary turn-taking.
+
+Since 0.2.99, wake standby waits for echo-cleaned microphone packets captured near the grace or inactivity deadline to pass through the VAD confirmation window. The regression starts speech 20 ms before the deadline and delivers it to the detector 120 ms later. Standby keeps listening, while one isolated detection allows closure. An ordinary spoken grace-period trial still needs room-audio consent.
 
 A fresh, explicit “Cancel that” or “Never mind” can cancel pending Assist work. If a Home Assistant command may already have run, Jarvis reports an unconfirmed outcome and preserves the protection against repeating it. Offline tests covered cancellation before dispatch, during preflight, and during verification, plus rejection of old transcript fragments and “Cancel that timer.”
 
