@@ -1,3 +1,7 @@
+# 0.2.92
+
+- The sample-light check now reports whether any voice reached the output callback before each lookup. Early provider transcript words can correspond to audio that Jarvis discarded.
+
 # 0.2.91
 
 - When an acknowledgment overlaps a device lookup, keep listening for words and voice after the result. A sign-off can close after its existing farewell. The sample-light check waits for the final transcript on each turn to grade the spoken state.

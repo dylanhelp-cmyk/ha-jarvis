@@ -59,10 +59,13 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
                 bridge = self.callbacks["assist_delegation"]
                 if marker == 1 or fresh:
                     name = "HassTurnOn" if marker == 1 else "GetLiveContext"
-                    self.callbacks["on_transcript"]("One moment. ")
-                    await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
+                    self.callbacks["on_transcript"](early_text if marker == 1 else "One moment. ")
+                    if marker != 1 or early_voice:
+                        await self.callbacks["on_audio"](np.full(320, 1000, dtype="<i2").tobytes(), 16000)
+                    now_before_lookup = now
+                    await sleep(.05)
                     await bridge.execute(str(marker), name, json.dumps({"name": SAMPLE_LIGHT_NAME}))
-                    self.assist_result_at = now + .001
+                    self.assist_result_at = now_before_lookup + .051
                     self._assist_result_words = False
                     self.delayed_reply = first_reply if marker == 1 else "Off."
                     return
@@ -80,10 +83,17 @@ class SessionCheckTests(unittest.IsolatedAsyncioTestCase):
               patch("jarvis.assist_sample.synthesize_fixture", side_effect=fixture),
               patch("jarvis.assist_sample.time", clock), patch("jarvis.session_bench.time", clock),
               patch("jarvis.session_bench.asyncio.sleep", side_effect=sleep)):
-            for fresh, first_reply in ((True, "On."), (False, "On."), (True, "Checking.")):
+            for fresh, first_reply, early_text, early_voice in (
+                (True, "On.", "One moment. ", True),
+                (False, "On.", "One moment. ", True),
+                (True, "Checking.", "One moment. ", True),
+                (True, "On.", "On. ", False),
+                (True, "On.", "On. ", True),
+            ):
                 report = await check_assist_sample(SimpleNamespace(spent_usd=0), "gpt-6-luna", "marin", lambda _: None)
                 self.assertTrue(report["checks"]["verified_change"])
-                self.assertEqual(all(report["checks"].values()), fresh and first_reply == "On.")
+                early_claim = early_text == "On. " and early_voice
+                self.assertEqual(all(report["checks"].values()), fresh and first_reply == "On." and not early_claim)
                 self.assertEqual(report["checks"]["spoken_off"], fresh)
                 self.assertEqual(report["tool_calls"]["reads"], int(fresh))
                 self.assertEqual(report["recognized_fixture_target"], [True, True])
