@@ -123,12 +123,13 @@ class ConversationPolicy:
         if clear_closing_intent:
             self.ending_requested = True
 
-    def should_close(self, now: float) -> bool:
+    def should_close(self, now: float, *, speech_checked_through: float | None = None) -> bool:
         if self.pending_work or now < self.audible_until:
             self.grace_started = None
             return False
+        checked_at = now if speech_checked_through is None else min(now, speech_checked_through)
         if self.ending_requested:
             if self.grace_started is None:
                 self.grace_started = now
-            return now - self.grace_started >= self.grace_seconds
-        return now - max(self.last_activity, self.audible_until) >= self.idle_seconds
+            return checked_at - self.grace_started >= self.grace_seconds
+        return checked_at - max(self.last_activity, self.audible_until) >= self.idle_seconds

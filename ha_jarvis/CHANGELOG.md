@@ -1,3 +1,8 @@
+# 0.2.99
+
+- Before closing, wake standby checks microphone packets captured near the end of the goodbye grace or inactivity interval. A late follow-up can keep the session open while those packets pass through echo cleanup and voice detection.
+- For a focused check, say goodbye in wake standby, then ask another question near the end of the two-second grace. Firmware 0.2.8 remains compatible.
+
 # 0.2.98
 
 - The App reports a muted microphone when starting capture and when mute stops a running session. To check it, mute the Voice PE during **Microphone connection**, unmute it, then start a fresh check. Firmware 0.2.8 remains compatible.

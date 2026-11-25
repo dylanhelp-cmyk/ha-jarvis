@@ -307,10 +307,13 @@ class SpeechEndpoint:
         self.active = False
         self.last_voice = None
         self.voice_packets = 0
+        self.checked_through = float("-inf")
 
     def observe(self, pcm, captured_at, sent_at):
         voiced = self.detector.is_speech(pcm, RATE)
         self.recent.append(voiced)
+        # A candidate starting in the latest packets still needs its five-packet window.
+        self.checked_through = captured_at - (self.recent.maxlen - 1) * .02
         if voiced:
             self.voice_packets += 1
             self.quiet_frames = 0
@@ -456,7 +459,7 @@ async def stream_reply(device, session, result, stream, set_output, phase, liste
             if policy.pending_work and not pending_work:
                 policy.last_activity = now
             policy.pending_work = int(pending_work)
-            if warm_follow_up and policy.should_close(now):
+            if warm_follow_up and policy.should_close(now, speech_checked_through=endpoint.checked_through):
                 if policy.ending_requested:
                     raise FollowUpEnded("signoff", "The sign-off grace period finished")
                 raise FollowUpEnded("inactivity", f"No detected speech for {idle_seconds:g} seconds")

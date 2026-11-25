@@ -229,6 +229,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 sent = 0
                 output = None
                 turn_deadline = 100 if signoff else 300
+                capture_delay = 6  # 120 ms between capture and the processed packet.
+                reply_at = turn_deadline + capture_delay + 5
                 policy = ConversationPolicy(idle_seconds=6)
                 policy.request_end(clear_closing_intent=signoff)
 
@@ -239,15 +241,20 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                 async def packet():
                     nonlocal now
                     now = 100 + sent * .02
-                    pcm = bytes([1, 0]) * 320 if speaking and turn_deadline - 5 <= sent < turn_deadline - 1 else bytes(640)
-                    return pcm, now
+                    position = sent - capture_delay
+                    # Speech begins one packet before the deadline. A lone
+                    # detection in the silent case must not keep it open.
+                    voiced = (turn_deadline - 1 <= position <= turn_deadline + 2
+                              if speaking else position == turn_deadline - 1)
+                    pcm = bytes([1, 0]) * 320 if voiced else bytes(640)
+                    return pcm, now - capture_delay * .02
 
                 async def send_audio(_):
                     nonlocal sent
                     sent += 1
                     if sent == turn_deadline + 1:
                         session.assist_work_pending = False
-                    if sent == turn_deadline + 3:
+                    if (speaking or pending) and sent == reply_at:
                         output.first_voice_at = now
                         output.last_voice_at = now - 1
 
@@ -267,13 +274,14 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
                                        closure_policy=policy, assist=pending)
                     if speaking or pending:
                         self.assertIsNotNone(await run)
-                        self.assertEqual(sent, turn_deadline + 3)
+                        self.assertEqual(sent, reply_at)
                         self.assertFalse(policy.ending_requested)
                     else:
                         with self.assertRaises(FollowUpEnded) as ending:
                             await run
                         self.assertEqual(ending.exception.reason, "signoff" if signoff else "inactivity")
-                        self.assertIn(sent, range(turn_deadline, turn_deadline + 3))
+                        self.assertIn(sent, range(turn_deadline + capture_delay + 4,
+                                                  turn_deadline + capture_delay + 8))
 
     def test_echo_guard_keeps_sample_order_across_partial_aec_blocks(self):
         buffered = 0
