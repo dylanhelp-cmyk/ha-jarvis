@@ -125,14 +125,15 @@
                 <label for="voice-assist-domain">Device type</label>
                 <select id="voice-assist-domain"><option value="light">Light</option><option value="switch">Switch</option></select>
               </div>
-              <label for="voice-assist-token">Home Assistant access token</label>
-              <input id="voice-assist-token" type="password" autocomplete="off" maxlength="2048">
-              <p class="field-help">Use a non-admin Home Assistant account. Jarvis keeps this token locally in memory until the preview or wake standby stops.</p>
+              <label for="voice-assist-token">Home Assistant access token for voice control</label>
+              <input id="voice-assist-token" type="password" autocomplete="off" maxlength="2048" aria-describedby="voice-assist-token-help">
+              <p id="voice-assist-token-help" class="field-help">Paste the token here before starting a voice test. Use a non-admin account. Jarvis keeps this token locally in memory until the preview or wake standby stops.</p>
             </div>
             <label class="check"><input id="voice-turn-confirmed" type="checkbox"><span>I authorize Jarvis to send cleaned room microphone audio from the selected voice mode to OpenAI GPT-Live and use my API test budget. Jarvis keeps the capture in memory for the test.</span></label>
             <p class="field-help">The single-run preview ends after the selected one or two replies. Wake standby supports multiple follow-ups. Wait for the reply to finish before speaking. Run Echo reference alignment first.</p>
           </div>
           <p id="readiness" class="readiness" aria-live="polite">Waiting for the bench connection.</p>
+          <p id="test-start-error" class="readiness" role="alert" hidden></p>
           <div class="test-actions"><button class="button primary" id="run-test" type="button" disabled>Run playback latency <span aria-hidden="true">→</span></button><button class="button danger" id="cancel-test" type="button" hidden>Stop test</button></div>
           <p class="local-note"><span aria-hidden="true">◇</span> Local tests use no paid calls. Cloud tests are labelled and require a separate Start action.</p>
         </section>
@@ -164,9 +165,9 @@
         <h2 id="assist-title">Home Assistant device control</h2>
         <p>Check the local Assist connection. Enter a device name to read its current state.</p>
         <form id="assist-form">
-          <label for="assist-token">Home Assistant access token</label>
+          <label for="assist-token">Home Assistant access token for this lookup</label>
           <input id="assist-token" type="password" autocomplete="off" maxlength="2048" required>
-          <p class="field-help">Use a non-admin Home Assistant account. The token is used once for this check.</p>
+          <p class="field-help">Use a non-admin Home Assistant account. For spoken commands, paste the token again under Voice preview.</p>
           <label for="assist-lookup-name">Device name or alias (optional)</label>
           <input id="assist-lookup-name" type="text" autocomplete="off" maxlength="128">
           <button class="button subtle" id="assist-check" type="submit">Check Assist</button>

@@ -1,3 +1,7 @@
+# 0.2.100
+
+- Clarify which Home Assistant token field starts voice control. If Start is rejected, Jarvis shows the error beside the button and retains the entered token for retry in the current page. It clears the token after accepting Start.
+
 # 0.2.99
 
 - Before closing, wake standby checks microphone packets captured near the end of the goodbye grace or inactivity interval. A late follow-up can keep the session open while those packets pass through echo cleanup and voice detection.

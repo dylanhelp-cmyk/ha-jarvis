@@ -60,6 +60,7 @@ function readiness() {
   }
   $('voice-assist-fields').hidden = !assist;
   $('voice-assist-target').hidden = !assist || standby;
+  $('voice-assist-token').disabled = running || busy;
   $('voice-assist-mode').textContent = standby
     ? 'Allow control of Assist-exposed devices while wake standby is enabled.'
     : 'Allow one on or off command for a named Assist-exposed light or switch during this preview.';
@@ -82,7 +83,7 @@ function readiness() {
   else if (kind === 'voice_turn' && $('voice-duplex').checked && !state.continuous_input_ready) reason = 'Repeat Echo reference alignment until the continuous microphone check passes.';
   else if (kind === 'voice_turn' && (!state.cloud.api_key_configured || state.cloud.paid_retry_blocked)) reason = 'A configured OpenAI key and a settled budget ledger are required.';
   else if (assist && reservations?.[standby ? 'standby' : 'preview'] > remaining + 1e-12) reason = 'The saved Assist model exceeds the available budget for this mode. Choose another model under Advanced home control.';
-  else if (assist && !$('voice-assist-token').value.trim()) reason = 'Enter a local Home Assistant token.';
+  else if (assist && !$('voice-assist-token').value.trim()) reason = 'Paste the Home Assistant token into the voice control field above.';
   else if (assist && !standby && !$('voice-assist-name').value.trim()) reason = 'Enter the selected device name.';
   else if (kind === 'voice_turn' && !$('voice-turn-confirmed').checked) reason = 'Review and authorize microphone audio for the selected voice mode.';
   $('readiness').textContent = running ? state.test.phase : reason || (kind === 'voice_turn' ? 'Ready for an authorized cloud voice preview.' : 'Ready for a local test.');
@@ -395,6 +396,7 @@ async function action(callback) {
 for (const button of document.querySelectorAll('.test-option')) {
   button.addEventListener('click', () => {
     kind = button.dataset.kind;
+    $('test-start-error').hidden = true;
     for (const option of document.querySelectorAll('.test-option')) {
       option.classList.toggle('selected', option === button);
       option.setAttribute('aria-pressed', String(option === button));
@@ -477,6 +479,8 @@ async function startAcousticTest(body) {
 }
 
 $('run-test').addEventListener('click', () => {
+  const errorStatus = $('test-start-error');
+  errorStatus.hidden = true;
   const startup = kind === 'wake_ack' && $('wake-startup-transport').value;
   if (startup && !window.confirm('Start one budgeted GPT-Live startup test on the next wake? Room microphone audio stays local.')) return;
   const body = {kind, comfortable_volume_confirmed: $('volume-confirmed').checked};
@@ -491,7 +495,6 @@ $('run-test').addEventListener('click', () => {
   if (startup) Object.assign(body, {startup_transport: startup, confirm_paid: true});
   if (kind === 'voice_turn') {
     if (!$('voice-turn-confirmed').checked) return;
-    $('voice-turn-confirmed').checked = false;
     const assist = $('voice-assist').checked;
     const standby = $('voice-standby').checked;
     Object.assign(body, {allow_room_audio_to_openai: true, confirm_paid: true, standby,
@@ -501,7 +504,6 @@ $('run-test').addEventListener('click', () => {
       after_greeting: $('voice-after-greeting').checked,
       duplex: $('voice-duplex').checked,
       preconnect: !assist && !standby && $('voice-preconnect').checked});
-    $('voice-remember-context').checked = false;
     if (assist && standby) {
       body.allow_assist_standby = true;
       body.assist_standby_token = $('voice-assist-token').value.trim();
@@ -510,9 +512,21 @@ $('run-test').addEventListener('click', () => {
       body.assist_preview = {token: $('voice-assist-token').value.trim(),
         domain: $('voice-assist-domain').value, name: $('voice-assist-name').value.trim()};
     }
-    if (assist) $('voice-assist-token').value = '';
   }
-  action(() => api('api/tests', 'POST', body));
+  action(async () => {
+    try {
+      await api('api/tests', 'POST', body);
+    } catch (error) {
+      errorStatus.textContent = error.message;
+      errorStatus.hidden = false;
+      return;
+    }
+    if (body.kind === 'voice_turn') {
+      $('voice-turn-confirmed').checked = false;
+      $('voice-remember-context').checked = false;
+      $('voice-assist-token').value = '';
+    }
+  });
 });
 $('cancel-test').addEventListener('click', () => action(() =>
   Promise.all([stopAcousticSource(), api('api/tests/current', 'DELETE')])));
