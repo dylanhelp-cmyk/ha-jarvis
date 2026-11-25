@@ -1,3 +1,8 @@
+# 0.2.93
+
+- A fresh spoken “Cancel that” or “Never mind” can stop pending Assist work. Jarvis reports an unconfirmed outcome if the device command may already have reached Home Assistant.
+- For the focused check, use an exposed test device in Assist wake standby and enable **Listen during replies (experimental)**. Say “Cancel that” while work is still pending, then check the device state. Firmware 0.2.8 remains compatible.
+
 # 0.2.92
 
 - The sample-light check now reports whether any voice reached the output callback before each lookup. Early provider transcript words can correspond to audio that Jarvis discarded.

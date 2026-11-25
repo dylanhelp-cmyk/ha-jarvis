@@ -350,12 +350,12 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await session.close()).finalization_confirmed)
         self.assertIsNone(self.settings.pending)
 
-    async def test_stop_during_preflight_or_verification_revokes_the_whole_batch(self):
+    async def test_spoken_or_terminal_stop_during_tool_work_revokes_the_whole_batch(self):
         schema = {"type": "object", "properties": {"name": {}, "domain": {}}}
         catalog = [{"name": name, "inputSchema": schema} for name in ("HassTurnOn", "GetLiveContext")]
         arguments = '{"name":"Desk Lamp"}'
-        for preflight in (True, False):
-            with self.subTest(preflight=preflight):
+        for preflight, spoken in ((True, False), (False, False), (True, True), (False, True)):
+            with self.subTest(preflight=preflight, spoken=spoken):
                 waiting, release = asyncio.Event(), asyncio.Event()
 
                 async def call_tool(_call_id, name, _arguments):
@@ -382,27 +382,79 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
                     session._event({"type": "response.event", "delegation_id": "work",
                                     "event": {"type": kind, **data}})
 
+                def hear(delta, start, end):
+                    session._event({"type": "session.input_transcript.delta", "delta": delta,
+                                    "start_ms": start, "end_ms": end})
+
                 response = {"id": "work", "status": "completed", "usage": {"input_tokens": 100, "output_tokens": 8}}
+                session._event({"type": "session.delegation.created", "offset_ms": 1200, "delegation": {
+                    "target": "responses", "id": "work", "response_id": "work"}})
                 emit("response.created", response={"id": "work"})
                 for call_id in ("first", "second"):
                     emit("response.output_item.done", item={"type": "function_call",
                          "call_id": call_id, "name": "HassTurnOn", "arguments": arguments})
                 emit("response.completed", response=response)
                 await asyncio.wait_for(waiting.wait(), 1)
-                release.set()  # HA and the Stop signal are ready in the same event loop turn.
-                if preflight:
+                if spoken:
+                    hear("Cancel that.", 100, 500)
+                    hear("Cancel that.", 1250, 1250)
+                    hear("Cancel that timer.", 1400, 1750)
+                    hear("Cancel", 1900, 2050)
+                    self.assertFalse(session._assist_call.cancelled())
+                    release.set()  # The HTTP result and the final word can arrive together.
+                    hear(" that.", 2075, 2250)
+                    await session._delegation_task
+                    self.assertEqual(bridge.activity["spoken_cancellations"], 1)
+                    messages = [json.loads(m["item"]["output"]) for m in ws.sent
+                                if m["type"] == "response.item.create"]
+                    expected = "cancelled" if preflight else "unknown"
+                    self.assertEqual([m["outcome"] for m in messages], [expected, expected])
+                    self.assertEqual(ws.sent[-1]["type"], "response.create")
+                elif preflight:
+                    release.set()
                     session.stop_interaction()
                 else:
+                    release.set()
                     session._event({"type": "error"})
-                with self.assertRaises(asyncio.CancelledError):
-                    await session._delegation_task
+                if not spoken:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await session._delegation_task
                 self.assertEqual([call.args[1] for call in client.call_tool.await_args_list],
                                  ["GetLiveContext"] if preflight else ["HassTurnOn", "GetLiveContext"])
                 self.assertEqual(bridge.action_unconfirmed, not preflight)
                 self.assertEqual(bool(uncertain), not preflight)
                 self.assertTrue((await session.close()).finalization_confirmed)
                 self.assertIsNone(self.settings.pending)
-                self.assertEqual([m["type"] for m in ws.sent], ["session.start", "session.close"])
+                if not spoken:
+                    self.assertEqual([m["type"] for m in ws.sent], ["session.start", "session.close"])
+
+    async def test_spoken_cancellation_before_tool_dispatch_preserves_the_connection(self):
+        client = SimpleNamespace(call_tool=AsyncMock())
+        bridge = AssistDelegation(client, [{"name": "HassTurnOn", "inputSchema": {"type": "object"}}])
+        ws = FakeWS()
+        session = self.session(transport="websocket", assist_delegation=bridge)
+        with patch("jarvis.live_session.aiohttp.ClientSession", return_value=FakeHTTP(ws)):
+            await session.start()
+
+        def emit(kind, **data):
+            session._event({"type": "response.event", "delegation_id": "first",
+                            "event": {"type": kind, **data}})
+
+        response = {"id": "pending", "status": "completed", "usage": {"input_tokens": 100, "output_tokens": 8}}
+        session._event({"type": "session.delegation.created", "offset_ms": 900, "delegation": {
+            "target": "responses", "id": "first", "response_id": "pending"}})
+        emit("response.created", response=response)
+        session._event({"type": "session.input_transcript.delta", "delta": "Actually, never mind.",
+                        "start_ms": 1100, "end_ms": 1700})
+        emit("response.output_item.done", item={"type": "function_call", "call_id": "call1",
+                                               "name": "HassTurnOn", "arguments": '{"name":"Desk Lamp"}'})
+        emit("response.completed", response=response)
+        await session._delegation_task
+        client.call_tool.assert_not_awaited()
+        output = next(m["item"]["output"] for m in ws.sent if m["type"] == "response.item.create")
+        self.assertEqual(json.loads(output)["outcome"], "cancelled")
+        await session.send_audio(bytes(640))
+        self.assertTrue((await session.close()).finalization_confirmed)
 
     async def test_delegation_closes_at_the_reserved_response_limit(self):
         ws = FakeWS()

@@ -12,6 +12,7 @@ import base64
 from dataclasses import dataclass
 from fractions import Fraction
 import json
+import re
 import time
 import uuid
 
@@ -33,6 +34,10 @@ LIVE_VOICES = (
     "shida", "shimmer", "sillage", "stone", "tempo", "verse", "vesper", "willow",
 )
 INSTRUCTIONS = "Wait silently for a spoken question, then answer briefly in one short sentence. Do not greet, delegate work or use tools."
+ASSIST_CANCELLATION = re.compile(
+    r"(?:actually,? )?(?:please )?(?:cancel that|never ?mind|forget that|don['’]t do that)(?:,? please)?[.!]",
+    re.IGNORECASE,
+)
 
 
 class LiveSessionError(RuntimeError):
@@ -134,6 +139,10 @@ class LiveSession:
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
         self._delegation_task = None
+        self._assist_call = None
+        self._assist_cancel_after_ms = None
+        self._assist_cancel_text = ""
+        self._assist_cancelled = False
         self.assist_result_at = None
         self._assist_result_submitted = False
         self._assist_result_words = False
@@ -323,6 +332,9 @@ class LiveSession:
         self._assist_result_words = False
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
+        self._assist_cancel_after_ms = None
+        self._assist_cancel_text = ""
+        self._assist_cancelled = False
 
     def assist_reply_pending(self, first_voice_at, last_voice_at, *, require_words=False):
         if self.assist_work_pending:
@@ -353,6 +365,7 @@ class LiveSession:
         if self._closing:
             return
         self._closing = True
+        self._assist_cancel_text = ""
         self.suppress_output()
         if self._delegation_task is not None and not self._delegation_task.done():
             self._delegation_task.cancel()
@@ -507,6 +520,9 @@ class LiveSession:
                         and 0 < len(response_id) <= 128 and response_id not in self._assist_finished):
                     self._assist_active.add(response_id)
                     self.assist_used_this_turn = True
+                    offset = event.get("offset_ms")
+                    if self._assist_cancel_after_ms is None and type(offset) is int and offset >= 0:
+                        self._assist_cancel_after_ms = offset
             elif self.on_signoff_request is None:
                 self._fail("Unexpected delegation in voice-only benchmark")
             else:
@@ -571,7 +587,16 @@ class LiveSession:
             for call_id, (name, arguments) in batch.calls.items():
                 if self._closing or self._final.is_set():
                     return
-                result = await self._execute_assist_call(call_id, name, arguments)
+                if self._assist_cancelled:
+                    result = self._cancelled_assist_result()
+                else:
+                    self._assist_call = asyncio.create_task(self._execute_assist_call(call_id, name, arguments))
+                    try:
+                        result = await self._assist_call
+                    except asyncio.CancelledError:
+                        if self._closing or not self._assist_cancelled:
+                            raise
+                        result = self._cancelled_assist_result()
                 if self._closing or self._final.is_set():
                     return
                 await self._ws.send_json({"type": "response.item.create", "event_id": uuid.uuid4().hex,
@@ -586,6 +611,30 @@ class LiveSession:
                 await self._ws.send_json({"type": "response.create", "event_id": uuid.uuid4().hex})
         except Exception:
             self._fail("Could not return Assist delegation results")
+        finally:
+            self._assist_call = None
+
+    def _cancelled_assist_result(self):
+        if self._assist_unknown_this_turn:
+            return {"outcome": "unknown",
+                    "reason": "You cancelled while a command was in flight. Check the device state before retrying."}
+        return {"outcome": "cancelled", "reason": "You cancelled the pending request."}
+
+    def _check_assist_cancellation(self, delta, start, end):
+        if (self._assist_cancel_after_ms is None or self._assist_cancelled or self._assist_result_submitted
+                or not self.assist_work_pending or self._assist_call is not None and self._assist_call.done()
+                or type(start) is not int or type(end) is not int or not self._assist_cancel_after_ms <= start < end):
+            return
+        self._assist_cancel_text = (self._assist_cancel_text + delta)[-96:]
+        phrase = " ".join(self._assist_cancel_text.split())
+        if ASSIST_CANCELLATION.fullmatch(phrase):
+            self._assist_cancelled = True
+            self._assist_unknown_this_turn |= self.assist_delegation.action_unconfirmed
+            self.assist_delegation.activity["spoken_cancellations"] += 1
+            if self._assist_call is not None:
+                self._assist_call.cancel()
+        if phrase.endswith((".", "!", "?")):
+            self._assist_cancel_text = ""
 
     async def _execute_assist_call(self, call_id, name, arguments):
         if name == END_CONVERSATION and self.on_signoff_request is not None:
@@ -616,6 +665,8 @@ class LiveSession:
         if type(start) is int and start == end:
             # A zero-length transcript interval can describe seeded text, not speech.
             return
+        if is_input and self.assist_delegation is not None and not self._closing:
+            self._check_assist_cancellation(delta, start, end)
         if not is_input and self.assist_result_at is not None and any(ch.isalpha() for ch in delta):
             self._assist_result_words = True
         callback = self.on_input_transcript if is_input else self.on_transcript

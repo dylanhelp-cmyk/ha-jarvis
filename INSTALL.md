@@ -32,6 +32,8 @@ On App **0.2.86**, open **Jarvis settings → Advanced home control** to choose 
 
 To test Assist in standby, select **Stay ready for “Hey Jarvis”** and **Allow control of Assist-exposed devices** in **Voice preview**. Enter a non-admin Home Assistant access token locally, review the microphone consent and enable standby. Ask for an exposed test light by name, check that it changes state, then ask Jarvis to restore that light as a warm follow-up. Try “Goodbye” to close the conversation. Jarvis keeps the token in memory until standby stops. You can also select Assist without standby to try a single named light or switch.
 
+To test cancellation while Assist is still working, enable **Listen during replies (experimental)** and say “Cancel that” during a request. If Jarvis reports an unconfirmed outcome, check the light in Home Assistant before trying again.
+
 App **0.2.76** adds **Listen during replies (experimental)** in Voice preview. Run **Echo reference alignment** first and check that the continuous microphone check passes. For one focused trial, enable the warm follow-up and this option, approve the room-audio consent and ask a question. While Jarvis answers, ask a short follow-up. This tests continuous capture and provider listening; reliable immediate playback cancellation is still being developed. Leave the option off to use the previous preview path.
 
 App **0.2.78** increases the playback reserve only for **Listen during replies**. Run the local **Conversation playback stability** check first. It plays two longer references while microphone cleanup runs, with no OpenAI connection. A failed voice trial now keeps **Reply level measurements** in its result, so a volume change can be investigated without retaining audio.

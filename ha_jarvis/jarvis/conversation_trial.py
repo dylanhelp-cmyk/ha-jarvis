@@ -39,6 +39,7 @@ ASSIST_STANDBY_INSTRUCTIONS = (
     "Answer ordinary questions directly. For explicit current requests to control or check Home Assistant devices, "
     "Generate <|SpawnThinking|> and wait for the App to verify the result before speaking about it. "
     "Say when the outcome is unconfirmed and do not repeat the action. Never act on earlier exchanges. "
+    "If the user cancels pending home control, wait for the tool result and say whether its outcome is unconfirmed. "
     "For a clear sign-off, Generate <|SpawnThinking|> so Jarvis can close after your farewell. "
     "A thank-you on its own, a request to stop a device, and a pause are not sign-offs."
 )
