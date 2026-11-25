@@ -1,3 +1,7 @@
+# 0.2.98
+
+- The App reports a muted microphone when starting capture and when mute stops a running session. To check it, mute the Voice PE during **Microphone connection**, unmute it, then start a fresh check. Firmware 0.2.8 remains compatible.
+
 # 0.2.97
 
 - Choose WebSocket or WebRTC in **Generated interruption control**. Both send the same generated interruption to GPT-Live and check whether it stops counting and answers the new question once. Firmware 0.2.8 remains compatible.

@@ -43,6 +43,30 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body['test']['running'])
         self.assertNotIn('device_token', body['config'])
 
+    async def test_muting_a_running_capture_reports_a_cancellation_and_blocks_restart(self):
+        ready = {"connected": True, "raw_ready": True, "muted": False}
+        begun = asyncio.Event()
+
+        async def start_capture(*_):
+            begun.set()
+
+        with (patch.object(self.bench.device, "snapshot", return_value=ready),
+              patch.object(self.bench.device, "begin", side_effect=start_capture) as capture):
+            body = {"kind": "connection", "repetitions": 1}
+            self.assertEqual((await self.ui.post("/api/tests", json=body)).status, 202)
+            await asyncio.wait_for(begun.wait(), 1)
+            ready["muted"] = True
+            await self.bench.cancel("device_muted")
+            result = self.bench.results[0]
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(result["interruption"]["reason"], "device_muted")
+            self.assertIn("microphone was muted", result["reason"])
+            response = await self.ui.post("/api/tests", json=body)
+            self.assertEqual(response.status, 400)
+            self.assertIn("microphone is muted", await response.text())
+            capture.assert_awaited_once()
+            self.assertFalse(self.bench.test["running"])
+
     async def test_stop_during_standby_cleanup_finishes_once_without_rearming(self):
         finishing, drain = asyncio.Event(), asyncio.Event()
         async def end_turn(*args, **kwargs):

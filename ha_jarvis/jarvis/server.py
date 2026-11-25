@@ -1461,8 +1461,10 @@ class Bench:
             result["clock_uncertainty_ms"] = round(self.device.clock_rtt_ms / 2 + 4, 1)
         except asyncio.CancelledError:
             interruption = self.test.get("interruption", {"reason": "unexpected_task_cancellation"})
-            result.update(interruption=interruption,
-                          status="cancelled" if interruption["reason"] == "user_stop" else "failed")
+            reason = interruption["reason"]
+            result.update(interruption=interruption, status="cancelled" if reason in ("user_stop", "device_muted") else "failed")
+            if reason == "device_muted":
+                result["reason"] = "The Voice PE microphone was muted."
             raise
         except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
             result.update(status="failed", error=str(exc) or type(exc).__name__)
@@ -1751,8 +1753,10 @@ def create_ui(bench):
         if type(repetitions) is not int or not 1 <= repetitions <= 20:
             raise ValueError("Choose 1 to 20 repetitions")
         device = bench.device.snapshot()
-        if not device["connected"] or device.get("muted") or device.get("raw_ready") is not True:
-            raise ValueError("Pair and unmute the Voice PE with verified raw microphone capture")
+        if not device["connected"] or device.get("raw_ready") is not True:
+            raise ValueError("Pair the Voice PE and verify raw microphone capture")
+        if device.get("muted"):
+            raise ValueError("The Voice PE microphone is muted")
         if kind != "connection":
             if data.get("comfortable_volume_confirmed") is not True:
                 raise ValueError("Confirm comfortable speaker volume before starting")
