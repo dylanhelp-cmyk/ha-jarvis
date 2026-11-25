@@ -1,3 +1,7 @@
+# 0.2.94
+
+- In Advanced home control, select **Test a spoken cancellation during state verification**, then run the sample light. Jarvis sends generated speech while the sample's state lookup is pending and checks that the lookup stops, the action runs once and the reply reports uncertainty. Firmware 0.2.8 remains compatible.
+
 # 0.2.93
 
 - A fresh spoken “Cancel that” or “Never mind” can stop pending Assist work. Jarvis reports an unconfirmed outcome if the device command may already have reached Home Assistant.

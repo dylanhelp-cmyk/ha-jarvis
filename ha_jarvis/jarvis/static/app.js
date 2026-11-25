@@ -168,8 +168,12 @@ function showResults(results) {
     if (result.assist_model) add(card, 'p', 'Assist reasoning model · ' + result.assist_model);
     if (result.assist_sample) {
       const sample = result.assist_sample;
-      for (const [key, label] of Object.entries({verified_change: 'Verified light change', spoken_on: 'Spoke confirmed on state',
-        fresh_read: 'Read changed state', spoken_off: 'Spoke confirmed off state'})) {
+      const checks = result.assist_sample_cancellation ? {
+        pending_at_cancellation: 'Verification was pending', readback_cancelled: 'Verification cancelled',
+        action_not_retried: 'Command ran once', spoken_uncertain_outcome: 'Spoke unconfirmed outcome'
+      } : {verified_change: 'Verified light change', spoken_on: 'Spoke confirmed on state',
+        fresh_read: 'Read changed state', spoken_off: 'Spoke confirmed off state'};
+      for (const [key, label] of Object.entries(checks)) {
         const value = sample.checks[key];
         add(card, 'p', label + ' — ' + (value === undefined ? 'unavailable' : value ? 'passed' : 'failed'));
       }
@@ -581,9 +585,11 @@ $('assist-model').addEventListener('change', readiness);
 $('assist-sample').addEventListener('click', () => {
   const model = $('assist-model').value;
   const hold = state.assist_model_options[model].standby;
-  if (!window.confirm('Run two generated requests with ' + model + ' and an in-memory light? The ledger reserves US$' +
+  const cancelPending = $('assist-sample-cancel').checked;
+  const scenario = cancelPending ? 'a generated command and cancellation' : 'two generated requests';
+  if (!window.confirm('Run ' + scenario + ' with ' + model + ' and an in-memory light? The ledger reserves US$' +
       hold.toFixed(2) + '. The test uses no room audio or household devices.')) return;
-  action(() => api('api/cloud/assist-sample', 'POST', {model, confirm_paid: true}));
+  action(() => api('api/cloud/assist-sample', 'POST', {model, confirm_paid: true, cancel_pending: cancelPending}));
 });
 
 initialize().catch((error) => notice(error.message));

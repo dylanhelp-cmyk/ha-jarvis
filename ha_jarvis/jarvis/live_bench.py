@@ -153,12 +153,13 @@ SESSION_ONLY_PROMPTS = ("Which river flows through that city?", "Thanks.", "Good
 SAMPLE_LIGHT_NAME = "Reading Lamp"
 ASSIST_SAMPLE_PROMPTS = (f"Please turn on the {SAMPLE_LIGHT_NAME}. Just say on or off.",
                         f"Is the {SAMPLE_LIGHT_NAME} on or off now? Please check.")
+ASSIST_CANCEL_PROMPTS = (f"Please turn on the {SAMPLE_LIGHT_NAME}.", "Cancel that.")
 
 
 async def synthesize_fixture(prompt):
     """Build a digital test asset on the App. No recording or upload endpoint is used."""
     if prompt not in (*SYNTHETIC_PROMPTS, INTERRUPTION_REPLY, *INTERRUPTION_INPUTS, *SESSION_ONLY_PROMPTS,
-                      *ASSIST_SAMPLE_PROMPTS):
+                      *ASSIST_SAMPLE_PROMPTS, *ASSIST_CANCEL_PROMPTS):
         raise ValueError("Unknown built-in synthetic prompt")
     process = await asyncio.create_subprocess_exec(
         "espeak-ng", "--stdout", "-v", "en-gb", "--stdin",

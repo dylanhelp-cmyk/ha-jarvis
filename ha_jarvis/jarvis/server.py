@@ -1214,7 +1214,7 @@ class Bench:
     async def run(self, kind, repetitions, startup_transport=None, reply_profile="baseline", gain_db=0,
                   follow_up=False, preconnect=False, *, standby=False, assist_preview=None, after_greeting=False,
                   standby_context=None, assist_standby_token=None, uncertain_actions=None, source_variant=None, duplex=False,
-                  sample_model=None):
+                  sample_model=None, sample_cancel=False):
         started = time.monotonic()
         route = output_route(self.device.info)
         result = {"id": self.test["id"], "kind": kind, "route": route,
@@ -1233,15 +1233,17 @@ class Bench:
                 result["route"] = "digital"
                 result["warnings"].clear()
                 if kind == "assist_sample":
-                    from .assist_sample import check_assist_sample
+                    from .assist_sample import CANCELLATION_CHECKS, STATE_CHECKS, check_assist_sample
 
                     def stage(phase):
                         self.test["phase"] = phase
                     result["assist_model"] = sample_model
-                    sample = await check_assist_sample(self.cloud_settings, sample_model, self.config["voice"], stage)
+                    result["assist_sample_cancellation"] = sample_cancel
+                    sample = await check_assist_sample(
+                        self.cloud_settings, sample_model, self.config["voice"], stage, cancel_pending=sample_cancel)
                     result["assist_sample"] = sample
-                    complete = all(sample["checks"].get(key) is True for key in
-                                   ("verified_change", "spoken_on", "fresh_read", "spoken_off"))
+                    required = CANCELLATION_CHECKS if sample_cancel else STATE_CHECKS
+                    complete = all(sample["checks"].get(key) is True for key in required)
                     result["status"] = ("passed" if complete and not sample.get("failure") and
                         sample["session"]["finalization_confirmed"] and not sample["session"]["error"] else "unavailable")
                 elif kind == "synthetic_interrupt":
@@ -1673,7 +1675,9 @@ def create_ui(bench):
         data = await request.json()
         sample = request.path.endswith("/assist-sample")
         expected = {"confirm_paid", "model"} if sample else {"confirm_paid"}
-        if not isinstance(data, dict) or set(data) != expected or data["confirm_paid"] is not True:
+        optional = {"cancel_pending"} if sample else set()
+        if (not isinstance(data, dict) or set(data) - optional != expected or data["confirm_paid"] is not True
+                or type(data.get("cancel_pending", False)) is not bool):
             raise ValueError("Confirm budgeted sessions with generated speech")
         if bench.test["running"] or (bench.task and not bench.task.done()):
             raise web.HTTPConflict(text="Wait for the current test to finish")
@@ -1690,7 +1694,8 @@ def create_ui(bench):
         ident = uuid.uuid4().hex
         bench.test = {"running": True, "id": ident, "phase": "preparing generated conversation checks"}
         kind = "assist_sample" if sample else ("synthetic_interrupt" if interrupt else "synthetic_sessions")
-        bench.task = asyncio.create_task(bench.run(kind, 1, sample_model=data.get("model")))
+        bench.task = asyncio.create_task(bench.run(
+            kind, 1, sample_model=data.get("model"), sample_cancel=data.get("cancel_pending", False)))
         return web.json_response({"test_id": ident}, status=202)
 
     async def config(request):

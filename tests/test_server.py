@@ -165,6 +165,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with (patch("jarvis.assist_sample.check_assist_sample", return_value=sample) as screen,
               patch("jarvis.server.AssistClient") as household, patch.object(self.bench.device, "begin") as capture):
             for bad in ({"model": "gpt-6-sol", "confirm_paid": True}, {"model": "gpt-6-luna"},
+                        {"model": "gpt-6-luna", "confirm_paid": True, "cancel_pending": 1},
                         {"model": "unknown", "confirm_paid": True}):
                 self.assertEqual((await self.ui.post(url, json=bad)).status, 400)
             screen.assert_not_called()
@@ -173,8 +174,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 202)
             await self.bench.task
             self.assertEqual(screen.await_args.args[1], "gpt-5.6-luna")
+            self.assertFalse(screen.await_args.kwargs["cancel_pending"])
             self.assertEqual(self.bench.results[0]["status"], "passed")
             self.assertEqual(self.bench.config["assist_model"], "gpt-6-luna")
+            response = await self.ui.post(url, json={"model": "gpt-6-luna", "confirm_paid": True, "cancel_pending": True})
+            self.assertEqual(response.status, 202)
+            await self.bench.task
+            self.assertTrue(screen.await_args.kwargs["cancel_pending"])
+            self.assertEqual(self.bench.results[0]["status"], "unavailable")
             capture.assert_not_called()
             household.assert_not_called()
 
