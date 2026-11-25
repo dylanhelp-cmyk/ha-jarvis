@@ -1,3 +1,7 @@
+# 0.2.95
+
+- Recognise a complete cancellation phrase after a short transcript pause when GPT-Live supplies no terminal punctuation. A following word can still disqualify the phrase. Use the sample-light cancellation check to verify the provider path.
+
 # 0.2.94
 
 - In Advanced home control, select **Test a spoken cancellation during state verification**, then run the sample light. Jarvis sends generated speech while the sample's state lookup is pending and checks that the lookup stops, the action runs once and the reply reports uncertainty. Firmware 0.2.8 remains compatible.

@@ -398,7 +398,10 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
                 if spoken:
                     hear("Cancel that.", 100, 500)
                     hear("Cancel that.", 1250, 1250)
-                    hear("Cancel that timer.", 1400, 1750)
+                    hear("Cancel that", 1400, 1650)
+                    self.assertIsNotNone(session._assist_cancel_timer)
+                    hear(" timer.", 1650, 1750)
+                    self.assertIsNone(session._assist_cancel_timer)
                     hear("Cancel", 1900, 2050)
                     self.assertFalse(session._assist_call.cancelled())
                     release.set()  # The HTTP result and the final word can arrive together.
@@ -444,8 +447,11 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         session._event({"type": "session.delegation.created", "offset_ms": 900, "delegation": {
             "target": "responses", "id": "first", "response_id": "pending"}})
         emit("response.created", response=response)
-        session._event({"type": "session.input_transcript.delta", "delta": "Actually, never mind.",
+        session._event({"type": "session.input_transcript.delta", "delta": "Actually, never mind",
                         "start_ms": 1100, "end_ms": 1700})
+        self.assertFalse(session._assist_cancelled)
+        await asyncio.sleep(.55)
+        self.assertTrue(session._assist_cancelled)
         emit("response.output_item.done", item={"type": "function_call", "call_id": "call1",
                                                "name": "HassTurnOn", "arguments": '{"name":"Desk Lamp"}'})
         emit("response.completed", response=response)

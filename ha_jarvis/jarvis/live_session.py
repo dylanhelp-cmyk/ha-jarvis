@@ -35,7 +35,7 @@ LIVE_VOICES = (
 )
 INSTRUCTIONS = "Wait silently for a spoken question, then answer briefly in one short sentence. Do not greet, delegate work or use tools."
 ASSIST_CANCELLATION = re.compile(
-    r"(?:actually,? )?(?:please )?(?:cancel that|never ?mind|forget that|don['’]t do that)(?:,? please)?[.!]",
+    r"(?:actually,? )?(?:please )?(?:cancel that|never ?mind|forget that|don['’]t do that)(?:,? please)?",
     re.IGNORECASE,
 )
 
@@ -142,6 +142,8 @@ class LiveSession:
         self._assist_call = None
         self._assist_cancel_after_ms = None
         self._assist_cancel_text = ""
+        self._assist_cancel_last_end = None
+        self._assist_cancel_timer = None
         self._assist_cancelled = False
         self.assist_result_at = None
         self._assist_result_submitted = False
@@ -333,7 +335,7 @@ class LiveSession:
         self.assist_used_this_turn = False
         self._assist_unknown_this_turn = False
         self._assist_cancel_after_ms = None
-        self._assist_cancel_text = ""
+        self._clear_assist_cancellation()
         self._assist_cancelled = False
 
     def assist_reply_pending(self, first_voice_at, last_voice_at, *, require_words=False):
@@ -365,7 +367,7 @@ class LiveSession:
         if self._closing:
             return
         self._closing = True
-        self._assist_cancel_text = ""
+        self._clear_assist_cancellation()
         self.suppress_output()
         if self._delegation_task is not None and not self._delegation_task.done():
             self._delegation_task.cancel()
@@ -523,6 +525,7 @@ class LiveSession:
                     offset = event.get("offset_ms")
                     if self._assist_cancel_after_ms is None and type(offset) is int and offset >= 0:
                         self._assist_cancel_after_ms = offset
+                        self.assist_delegation.activity["timed_delegations"] += 1
             elif self.on_signoff_request is None:
                 self._fail("Unexpected delegation in voice-only benchmark")
             else:
@@ -605,6 +608,7 @@ class LiveSession:
             if not self._closing and not self._final.is_set():
                 self._assist_continuing = True
                 self._assist_result_submitted = True
+                self._clear_assist_cancellation()
                 if any(name != END_CONVERSATION for name, _ in batch.calls.values()):
                     self.assist_result_at = time.monotonic()
                     self._assist_result_words = False
@@ -620,20 +624,48 @@ class LiveSession:
                     "reason": "You cancelled while a command was in flight. Check the device state before retrying."}
         return {"outcome": "cancelled", "reason": "You cancelled the pending request."}
 
+    def _can_cancel_assist(self):
+        return (not self._closing and not self._assist_cancelled and not self._assist_result_submitted
+                and self.assist_work_pending and (self._assist_call is None or not self._assist_call.done()))
+
+    def _clear_assist_cancellation(self):
+        self._assist_cancel_text = ""
+        self._assist_cancel_last_end = None
+        if self._assist_cancel_timer is not None:
+            self._assist_cancel_timer.cancel()
+            self._assist_cancel_timer = None
+
+    def _accept_assist_cancellation(self):
+        self._clear_assist_cancellation()
+        if not self._can_cancel_assist():
+            return
+        self._assist_cancelled = True
+        self._assist_unknown_this_turn |= self.assist_delegation.action_unconfirmed
+        self.assist_delegation.activity["spoken_cancellations"] += 1
+        if self._assist_call is not None:
+            self._assist_call.cancel()
+
     def _check_assist_cancellation(self, delta, start, end):
-        if (self._assist_cancel_after_ms is None or self._assist_cancelled or self._assist_result_submitted
-                or not self.assist_work_pending or self._assist_call is not None and self._assist_call.done()
+        if (self._assist_cancel_after_ms is None or not self._can_cancel_assist()
                 or type(start) is not int or type(end) is not int or not self._assist_cancel_after_ms <= start < end):
             return
+        if self._assist_cancel_last_end is not None and start - self._assist_cancel_last_end >= 600:
+            self._clear_assist_cancellation()
+        if self._assist_cancel_timer is not None:
+            self._assist_cancel_timer.cancel()
+            self._assist_cancel_timer = None
+        self._assist_cancel_last_end = end
         self._assist_cancel_text = (self._assist_cancel_text + delta)[-96:]
+        self.assist_delegation.activity["timed_cancellation_fragments"] += 1
         phrase = " ".join(self._assist_cancel_text.split())
-        if ASSIST_CANCELLATION.fullmatch(phrase):
-            self._assist_cancelled = True
-            self._assist_unknown_this_turn |= self.assist_delegation.action_unconfirmed
-            self.assist_delegation.activity["spoken_cancellations"] += 1
-            if self._assist_call is not None:
-                self._assist_call.cancel()
-        if phrase.endswith((".", "!", "?")):
+        if ASSIST_CANCELLATION.fullmatch(phrase.rstrip(".!")):
+            if phrase.endswith((".", "!")):
+                self._accept_assist_cancellation()
+            else:
+                # Live can omit punctuation. Give a following word a chance
+                # to distinguish a different request such as "cancel that timer".
+                self._assist_cancel_timer = asyncio.get_running_loop().call_later(.5, self._accept_assist_cancellation)
+        elif phrase.endswith((".", "!", "?")):
             self._assist_cancel_text = ""
 
     async def _execute_assist_call(self, call_id, name, arguments):
